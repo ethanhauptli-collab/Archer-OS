@@ -82,6 +82,7 @@ class Timeline:
     connected: list[ConnectedClip] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
     section_starts: list[tuple[int, str]] = field(default_factory=list)
+    section_frames: dict[int, int] = field(default_factory=dict)  # plan section index -> first frame
     seg_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
@@ -113,6 +114,10 @@ class _Piece:
     # re-joined when nothing was cut between them (w0 == previous w1 + 1).
     w0: int | None = None
     w1: int | None = None
+    # True when an edge was limited by a neighbouring (cut) word, so frame
+    # rounding must go inward rather than grab a frame of that word.
+    a_tight: bool = False
+    b_tight: bool = False
 
 
 # ------------------------------------------------------------------ formats
@@ -160,17 +165,22 @@ def choose_format(pieces: list[_Piece], analysis: Analysis, override: str | None
 # ------------------------------------------------------------- speech runs
 
 
-def _silence_clamp_end(t: float, word_start: float, silences: list[tuple[float, float]]) -> float:
-    """Whisper word ends often run into the following silence; pull them back."""
+def _silence_clamp_end(t: float, word_start: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
+    """Whisper word ends often run into the following silence; pull them back.
+
+    Only a silence that covers the word's tail counts. A pause in the middle
+    of a stretched word must not cut the real audio after it.
+    """
     for s, e in silences:
-        if word_start < s < t:
+        if word_start < s < t and e >= t - eps:
             return s
     return t
 
 
-def _silence_clamp_start(t: float, word_end: float, silences: list[tuple[float, float]]) -> float:
+def _silence_clamp_start(t: float, word_end: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
+    """Mirror of _silence_clamp_end: skip silence covering the word's head."""
     for s, e in silences:
-        if t < e < word_end:
+        if s <= t + eps and t < e < word_end:
             return e
     return t
 
@@ -225,11 +235,17 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:
-            pieces.append(_Piece(clip.id, a, b, wa, wb, section, [seg.id], base + first_i, base + last_i))
+            pieces.append(
+                _Piece(
+                    clip.id, a, b, wa, wb, section, [seg.id], base + first_i, base + last_i,
+                    a_tight=min(lo, wa) >= wa - style.pad_in and a > 0.0,
+                    b_tight=max(hi, wb) <= wb + style.pad_out and b < dur,
+                )
+            )
     return pieces
 
 
-def _merge(pieces: list[_Piece], max_gap: float) -> list[_Piece]:
+def _merge(pieces: list[_Piece], max_gap: float, warnings: list[str] | None = None) -> list[_Piece]:
     """Join back-to-back sentences from the same take when the pause between them is natural.
 
     Only pieces with nothing cut between them are joined, so removed fillers
@@ -247,9 +263,17 @@ def _merge(pieces: list[_Piece], max_gap: float) -> list[_Piece]:
                 q.seg_ids.extend(s for s in p.seg_ids if s not in q.seg_ids)
                 continue
             if q.clip_id == p.clip_id and p.a < q.b and p.a >= q.a:
-                # Overlapping padding between adjacent picks: split the difference.
-                mid = (q.b + p.a) / 2
-                q.b, p.a = mid, mid
+                # The next pick starts inside the previous one: split the overlap,
+                # but never into either side's words.
+                mid = min(max((q.b + p.a) / 2, q.wb), max(q.wb, p.wa))
+                q.b = min(q.b, mid)
+                q.b_tight = True
+                p.a = max(p.a, q.b)
+                p.a_tight = True
+                if p.b - p.a < 0.05:
+                    if warnings is not None:
+                        warnings.append(f"{p.clip_id}: {', '.join(p.seg_ids) or 'range'} repeats the previous pick; skipped")
+                    continue
         merged.append(p)
     return merged
 
@@ -277,7 +301,7 @@ def build_timeline(
                 raw_pieces.extend(speech_pieces(seg, clip, style, s_idx))
             else:
                 raw_pieces.append(_Piece(clip.id, item.start, item.end, item.start, item.end, s_idx, []))
-    pieces = _merge(raw_pieces, style.max_gap)
+    pieces = _merge(raw_pieces, style.max_gap, warnings)
 
     width, height, seq_fd = choose_format(pieces, analysis, format_override)
     tl = Timeline(name=name, frame_duration=seq_fd, width=width, height=height)
@@ -292,10 +316,19 @@ def build_timeline(
             frames = max(1, tc.round_frames(Fraction(p.b - p.a).limit_denominator(100000), seq_fd))
         else:
             grid = m.frame_duration if m.kind == "video" and m.frame_duration else seq_fd
-            in_frames = tc.floor_frames(Fraction(p.a).limit_denominator(1000000), grid)
+            a = Fraction(p.a).limit_denominator(1000000)
+            b = Fraction(p.b).limit_denominator(1000000)
+            # Round outward for breathing room, inward where a cut word is next door.
+            in_frames = tc.ceil_frames(a, grid) if p.a_tight else tc.floor_frames(a, grid)
             src_in = in_frames * grid
-            want = Fraction(p.b).limit_denominator(1000000) - src_in
-            frames = tc.ceil_frames(want, seq_fd)
+            prev = tl.spine[-1] if tl.spine else None
+            if prev is not None and prev.clip_id == p.clip_id:
+                prev_end = prev.src_in + prev.frames * seq_fd
+                if prev.src_in <= src_in < prev_end:
+                    # Never replay a frame the previous edit already showed.
+                    src_in = tc.ceil_frames(prev_end, grid) * grid
+            span = b - src_in
+            frames = tc.floor_frames(span, seq_fd) if p.b_tight else tc.ceil_frames(span, seq_fd)
             available = tc.floor_frames(m.duration - src_in, seq_fd)
             frames = min(frames, available)
         if frames < 1:
@@ -317,6 +350,7 @@ def build_timeline(
             tl.spine.append(sc)
         if p.section != last_section:
             tl.section_starts.append((offset, plan.sections[p.section].name))
+            tl.section_frames.setdefault(p.section, offset)
             last_section = p.section
         # Map each segment's content to timeline frames through this clip.
         for seg_id in p.seg_ids:
@@ -363,7 +397,8 @@ def _place_broll(tl: Timeline, plan: Plan, analysis: Analysis, style: Style, vol
                 dur = m.duration
                 need = want * fd
                 if b.source_in >= 0:
-                    src = Fraction(b.source_in).limit_denominator(1000000)
+                    # Back off a late in-point so the cutaway still fills its spot.
+                    src = min(Fraction(b.source_in).limit_denominator(1000000), max(Fraction(0), dur - need))
                 else:
                     src = min(dur * Fraction(15, 100), max(Fraction(0), dur - need))
                 src = max(Fraction(0), min(src, dur - grid))
@@ -392,12 +427,15 @@ def _place_broll(tl: Timeline, plan: Plan, analysis: Analysis, style: Style, vol
 
 def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float, warnings: list[str]) -> None:
     fd = tl.frame_duration
-    starts = tl.section_starts
+    placed = sorted(tl.section_frames.items())
     for cue in plan.music:
-        if cue.first_section >= len(starts):
+        inside = [f for i, f in placed if cue.first_section <= i <= cue.last_section]
+        if not inside:
+            warnings.append(f"music {cue.clip_id}: sections {cue.first_section + 1}-{cue.last_section + 1} aren't on the timeline; skipped")
             continue
-        start = starts[cue.first_section][0]
-        end = starts[cue.last_section + 1][0] if cue.last_section + 1 < len(starts) else tl.total_frames
+        start = min(inside)
+        after = [f for i, f in placed if i > cue.last_section]
+        end = min(after) if after else tl.total_frames
         m = analysis.clip(cue.clip_id).media
         src_in = Fraction(cue.source_in).limit_denominator(1000)
         src_in = tc.floor_frames(src_in, fd) * fd

@@ -39,7 +39,7 @@ roughcut render <out_dir> --style tight     # rebuild from saved plan
 
 ## Status: built in a Linux cloud session, not yet run on a Mac
 
-Verified there: 60 tests, DTD validation, the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
+Verified there: 77 tests (including a regression test for each finding from an independent code review), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
 **Not yet verified:** a live Claude call, real mlx-whisper transcription (Hugging Face was blocked in that sandbox), and importing into Final Cut Pro.
 
 ### First run on the Mac: checklist
@@ -48,9 +48,11 @@ Verified there: 60 tests, DTD validation, the real Anthropic SDK against a mocke
 2. `roughcut build <small folder> --provider none`, then import into FCP. Does it import cleanly? Check that cuts land on words, the timecode-start clips line up, and stills and keywords appear.
 3. The same folder with Claude and a brief. Read `edit_report.md` against the FCP timeline, and check B-roll placement, chapter/to-do markers and the music bed.
 4. Mixed media: iPhone HDR/VFR clips, vertical clips, a GoPro, a still, a separate audio recording. Watch the report's Warnings section.
-5. If FCP rejects the XML, it names the line. Fix `fcpxml.py`, add a regression test, and re-validate against the DTD.
+5. Field-recorder WAVs: the asset `start` comes from the BWF `time_reference`. Confirm FCP agrees; if not, clips will read "outside the media".
+6. Mixed frame rates (e.g. 25fps clip in a 23.98 project): real FCP exports add `<conform-rate>`; we don't. Check how FCP conforms them on import.
+7. If FCP rejects the XML, it names the line. Fix `fcpxml.py`, add a regression test, and re-validate against the DTD.
 
-Things most likely to need adjustment after real-world runs: Whisper word-end timing vs `pad_out`, `silencedetect` threshold (`-35dB`) for noisy footage, the `aroll`/`broll` classification thresholds in `analyze.classify`, and the planner prompt.
+Things most likely to need adjustment after real-world runs: Whisper word-end timing vs `pad_out`; the `silencedetect` threshold (`-35dB`) for noisy footage; the `aroll`/`broll` classification thresholds in `analyze.classify`; whether mlx-whisper with `condition_on_previous_text=True` (verbatim mode, needed so um/uh keep getting transcribed after the first 30s) loops or hallucinates on long clips (fall back with `--no-verbatim`); and the planner prompt.
 
 ## Roadmap
 

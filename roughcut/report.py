@@ -58,7 +58,7 @@ def build_report(
     for cc in tl.connected:
         broll_by_start.setdefault(cc.start, []).append(cc)
     for s_idx, section in enumerate(plan.sections):
-        start = next((f for f, n in tl.section_starts if n == section.name), None)
+        start = tl.section_frames.get(s_idx)
         head = f"### {section.name}" + (f"  `{_tc(start, tl)}`" if start is not None else "")
         L += [head, ""]
         if section.purpose:

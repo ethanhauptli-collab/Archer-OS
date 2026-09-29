@@ -206,6 +206,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     warnings: list[str] = []
     plan = Plan(title=str(raw.get("title") or "Rough Cut"), logline=str(raw.get("logline") or ""), source=source)
     used_segments: set[str] = set()
+    raw_to_plan: dict[int, int] = {}  # model's section index -> kept section index
 
     for s_idx, s_raw in enumerate(raw.get("sections") or []):
         if not isinstance(s_raw, dict):
@@ -244,6 +245,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
             section.broll.append(Broll(clip_id=clip_id, over=valid, source_in=source_in, reason=str(b_raw.get("reason") or "")))
 
         if section.items:
+            raw_to_plan[s_idx] = len(plan.sections)
             plan.sections.append(section)
         else:
             warnings.append(f"section '{section.name}' had no usable items; dropped")
@@ -257,7 +259,6 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         if isinstance(flag, dict) and flag.get("note"):
             plan.flags.append({"ref": str(flag.get("ref") or ""), "note": str(flag["note"])})
 
-    n_sections = len(plan.sections)
     for cue in raw.get("music") or []:
         if not isinstance(cue, dict):
             continue
@@ -266,13 +267,18 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
             warnings.append(f"music {cue.get('clip')!r} is not an audio clip; skipped")
             continue
         try:
-            first = max(0, int(cue.get("first_section", 0)))
-            last = min(n_sections - 1, int(cue.get("last_section", n_sections - 1)))
+            first = int(cue.get("first_section", 0))
+            last = int(cue.get("last_section", first))
             source_in = max(0.0, float(cue.get("source_in", 0)))
         except (TypeError, ValueError):
+            warnings.append(f"music {clip.id}: unreadable section range; skipped")
             continue
-        if n_sections and first <= last:
-            plan.music.append(MusicCue(clip.id, first, last, source_in))
+        # The model counts sections in its own list; map onto the sections we kept.
+        kept = [plan_idx for raw_idx, plan_idx in raw_to_plan.items() if first <= raw_idx <= last]
+        if not kept:
+            warnings.append(f"music {clip.id}: sections {first}-{last} don't match any kept section; skipped")
+            continue
+        plan.music.append(MusicCue(clip.id, min(kept), max(kept), source_in))
 
     plan.cut_notes = str(raw.get("cut_notes") or "")
     plan.warnings = warnings
@@ -289,6 +295,14 @@ def _parse_item(ref: str, analysis: Analysis, still_seconds: float, warnings: li
             return None
         return Item(clip_id=seg.clip_id, seg_id=seg_id, start=seg.start, end=seg.end)
 
+    try:
+        return _parse_non_segment(ref, analysis, still_seconds, warnings)
+    except ValueError:
+        warnings.append(f"can't read the times in {ref!r}; skipped")
+        return None
+
+
+def _parse_non_segment(ref: str, analysis: Analysis, still_seconds: float, warnings: list[str]) -> Item | None:
     m = _RANGE.match(ref)
     clip_only = _CLIP.match(ref)
     if not m and not clip_only:

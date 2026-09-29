@@ -12,6 +12,7 @@ Coordinate rules (the part that's easy to get wrong):
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -226,6 +227,17 @@ def _browser_clip(event: ET.Element, clip: Clip, res: _Resources) -> None:
     ET.SubElement(el, "keyword", {"start": tc.fcpx_time(m.start, tb), "duration": tc.fcpx_time(m.duration, tb), "value": keywords})
 
 
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def _scrub(root: ET.Element) -> None:
+    """Model output, transcripts and file names can carry characters XML 1.0 forbids."""
+    for el in root.iter():
+        for key, value in el.attrib.items():
+            if _XML_ILLEGAL.search(value):
+                el.set(key, _XML_ILLEGAL.sub(" ", value))
+
+
 def build_fcpxml(timelines: list[Timeline], analysis: Analysis, *, event_name: str, browser_clips: bool = True) -> str:
     res = _Resources(analysis)
     root = ET.Element("fcpxml", {"version": FCPXML_VERSION})
@@ -240,6 +252,7 @@ def build_fcpxml(timelines: list[Timeline], analysis: Analysis, *, event_name: s
     for p in projects:
         event.append(p)
 
+    _scrub(root)
     ET.indent(root, space="    ")
     body = ET.tostring(root, encoding="unicode")
     return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + body + "\n"

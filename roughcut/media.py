@@ -227,10 +227,15 @@ def probe(path: Path) -> MediaInfo:
         fd = info.frame_duration
         nb = v.get("nb_frames")
         seconds = _duration_seconds(v, fmt)
-        if nb and str(nb).isdigit() and int(nb) > 0 and not info.vfr:
-            frames = int(nb)
+        by_count = int(nb) if nb and str(nb).isdigit() and int(nb) > 0 else None
+        by_time = tc.round_frames(seconds, fd) if seconds > 0 else None
+        # Trust the frame count only when it agrees with the clock. Phone clips
+        # that run slightly under their nominal rate have fewer frames than
+        # seconds x rate, and Final Cut plays them for their real length.
+        if by_count and (by_time is None or abs(by_count - by_time) <= 1) and not info.vfr:
+            frames = by_count
         else:
-            frames = max(1, tc.round_frames(seconds, fd))
+            frames = max(1, by_time or by_count or 1)
         info.duration = frames * fd
 
     if audio_streams:
@@ -242,6 +247,11 @@ def probe(path: Path) -> MediaInfo:
             samples = round(seconds * info.audio_rate)
             info.duration = Fraction(samples, info.audio_rate)
             info.codec = a0.get("codec_name", "")
+            # Broadcast WAV from field recorders carries its timecode as a
+            # sample count since midnight.
+            ref = fmt_tags.get("time_reference")
+            if ref and str(ref).isdigit() and int(ref) > 0:
+                info.start = Fraction(int(ref), info.audio_rate)
 
     if kind == "image" and (info.width == 0 or info.height == 0):
         warnings.append("could not read image dimensions")

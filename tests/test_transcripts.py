@@ -119,7 +119,8 @@ def test_mlx_backend_glue(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "mlx_whisper", types.SimpleNamespace(transcribe=transcribe))
     t = Transcriber("mlx", language="en").transcribe(tmp_path / "a.wav")
     assert seen["path_or_hf_repo"] == "mlx-community/whisper-large-v3-turbo"
-    assert seen["word_timestamps"] is True and seen["condition_on_previous_text"] is False
+    # Verbatim mode conditions on previous text so the um-keeping style lasts past 30s.
+    assert seen["word_timestamps"] is True and seen["condition_on_previous_text"] is True
     assert seen["initial_prompt"] == VERBATIM_PROMPT and seen["language"] == "en"
     assert [w.text for w in t.words] == ["Hi,", "um,", "there."]
     assert t.words[1].is_filler
@@ -151,5 +152,6 @@ def test_faster_whisper_backend_glue(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel))
     t = Transcriber("faster-whisper").transcribe(tmp_path / "a.wav")
     assert seen["model"] == "large-v3-turbo" and seen["vad_filter"] is True and seen["word_timestamps"] is True
+    assert seen["hotwords"] == seen["initial_prompt"]  # re-sent every window
     assert [w.text for w in t.words] == ["Real", "words."]
     assert t.language == "en"

@@ -111,8 +111,11 @@ def test_build_with_model_plan(footage, tmp_path, fake):
     origin = T(talk_asset.get("start"))
     wrap = [el for el in rough if el.get("name") == "talk" and T(el.get("start")) - origin > 15]
     assert len(wrap) == 2
+    uh_end = s + 3 * (e - s) / 7 - 0.02
     first_end = T(wrap[0].get("start")) + T(wrap[0].get("duration")) - origin
-    assert float(first_end) <= uh_start + 0.04
+    second_start = T(wrap[1].get("start")) - origin
+    assert float(first_end) <= uh_start  # not a single frame of the "uh"
+    assert float(second_start) >= uh_end
 
     report = result.report.read_text()
     assert "## Paper edit" in report and "Cold open" in report and "V09.S001" in report  # warning surfaced

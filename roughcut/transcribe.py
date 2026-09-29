@@ -12,6 +12,7 @@ etc. can be dropped in.
 
 from __future__ import annotations
 
+import html
 import json
 import platform
 import re
@@ -132,7 +133,10 @@ class Transcriber:
         kwargs = dict(
             path_or_hf_repo=self.model,
             word_timestamps=True,
-            condition_on_previous_text=False,
+            # mlx-whisper only uses initial_prompt for the first 30s window.
+            # Conditioning on its own (disfluent) output carries the verbatim
+            # style forward; the silence guard below curbs runaway repeats.
+            condition_on_previous_text=self.verbatim,
             # Skip long silent stretches where Whisper tends to invent text.
             hallucination_silence_threshold=2.0,
         )
@@ -158,6 +162,8 @@ class Transcriber:
             hallucination_silence_threshold=2.0,
             language=self.language,
             initial_prompt=VERBATIM_PROMPT if self.verbatim else None,
+            # hotwords are re-sent with every 30s window; initial_prompt is not.
+            hotwords=VERBATIM_PROMPT if self.verbatim else None,
         )
         words: list[Word] = []
         for seg in segments:
@@ -224,6 +230,8 @@ def load_sidecar(path: Path) -> Transcript:
             return t
         raise TranscriptionError(f"{path.name}: unrecognized JSON transcript shape")
     cues = _parse_cues(text)
+    if _looks_like_telemetry(cues):
+        raise TranscriptionError(f"{path.name} looks like camera telemetry (e.g. DJI), not a transcript")
     words: list[Word] = []
     for start, end, cue_text in cues:
         words.extend(_spread_words(cue_text, start, end))
@@ -252,11 +260,24 @@ def _parse_cues(text: str) -> list[tuple[float, float, str]]:
                 start = _cue_seconds(g[0], g[1], g[2], g[3])
                 end = _cue_seconds(g[4], g[5], g[6], g[7])
                 body = " ".join(lines[i + 1 :])
-                body = re.sub(r"<[^>]+>", "", body).strip()
+                body = html.unescape(re.sub(r"<[^>]+>", "", body)).strip()
                 if body and end > start:
                     cues.append((start, end, body))
                 break
     return cues
+
+
+_TELEMETRY = re.compile(r"(?i)\b(iso|shutter|fnum|ev|latitude|longitude|gps|framecnt|diffTime|altitude|ct)\s*[:\[]")
+
+
+def _looks_like_telemetry(cues: list[tuple[float, float, str]]) -> bool:
+    """Drones and action cams write per-frame metadata as .SRT files."""
+    if not cues:
+        return False
+    sample = cues[:50]
+    short = sum(1 for s, e, _ in sample if e - s < 0.25)
+    tagged = sum(1 for _, _, t in sample if _TELEMETRY.search(t))
+    return short > len(sample) * 0.6 or tagged > len(sample) * 0.3
 
 
 def _spread_words(text: str, start: float, end: float) -> list[Word]:

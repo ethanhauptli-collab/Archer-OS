@@ -120,7 +120,7 @@ def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, a
     xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
     fcpxml_path = out_dir / f"{slug(name)}.fcpxml"
     fcpxml_path.write_text(xml, encoding="utf-8")
-    (out_dir / "plan.json").write_text(json.dumps({"plan": plan.to_json(), "raw": raw_plan}, indent=1))
+    (out_dir / "plan.json").write_text(json.dumps({"name": name, "plan": plan.to_json(), "raw": raw_plan}, indent=1))
     report_path = out_dir / "edit_report.md"
     report_path.write_text(build_report(plan, rough, analysis, stringout=stringout, **report_kwargs), encoding="utf-8")
     return fcpxml_path, report_path
@@ -178,6 +178,7 @@ def build(opts: Options) -> Result:
         if not plan.sections:
             extra_warnings.append("The model's plan had no usable sections; fell back to the stringout.")
             plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
+            raw_plan = None  # so `render` rebuilds the fallback, not the empty plan
             fell_back = True
     if not plan.sections:
         raise SystemExit("Nothing to cut: no speech or visual clips were found.")
@@ -201,11 +202,11 @@ def rerender(out_dir: Path, opts: Options) -> Result:
     """Rebuild the FCPXML from a saved analysis + plan (no model calls)."""
     analysis = Analysis.load(out_dir / "analysis.json")
     saved = json.loads((out_dir / "plan.json").read_text())
-    name = opts.name or out_dir.name.removesuffix("_roughcut")
-    if saved.get("raw"):
-        plan = normalize(saved["raw"], analysis, source=saved["plan"].get("source", "saved plan"))
-    else:
-        plan = normalize(saved["plan"], analysis, source=saved["plan"].get("source", "saved plan"))
+    name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
+    source = saved["plan"].get("source", "saved plan")
+    plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    if not plan.sections:
+        plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     rough, stringout = make_timelines(plan, analysis, opts, name)
     fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), analysis, rough, stringout, {})
     return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout)

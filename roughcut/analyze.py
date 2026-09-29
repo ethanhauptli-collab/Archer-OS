@@ -175,6 +175,10 @@ def classify(clip: Clip) -> str:
             return "music"
         return "aroll" if m.has_audio and audible > 0.5 else "broll"
     if m.kind == "audio":
+        # Songs with lyrics transcribe as speech; trust a music-ish folder or name.
+        hint = " ".join(Path(m.path).parts[-3:]).lower()
+        if any(k in hint for k in ("music", "song", "soundtrack")):
+            return "music"
         return "voiceover" if words >= 20 and speech / dur > 0.25 else "music"
     return "aroll" if words >= 12 and speech >= max(4.0, 0.2 * dur) else "broll"
 
