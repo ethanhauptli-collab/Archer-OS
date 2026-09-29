@@ -18,6 +18,8 @@ Or, while working on the app: `open Package.swift` (opens in Xcode), pick the **
 
 Needs macOS 14+ and Xcode or the Command Line Tools (`xcode-select --install`). `swift test` runs the RoughcutKit tests and needs full Xcode for XCTest.
 
+The build is signed ad hoc, so after each rebuild macOS may ask again to allow Keychain access (for your API key) and access to footage folders. To stop that, sign with your free Apple Development certificate: `ROUGHCUT_SIGN_IDENTITY="Apple Development: …" scripts/build-app.sh --install` (`security find-identity -v -p codesigning` lists yours).
+
 ## First launch
 
 1. The app looks for the CLI in this order: the path set in Settings, the repo it was built from, `~/Archer-OS/.venv/bin/roughcut` and a few other usual spots. If it can't find it, the banner at the top of the window says so. Point to it in **Settings → General**.

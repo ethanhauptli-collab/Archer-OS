@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Finds the `roughcut` command and builds the environment to run it in.
 ///
@@ -77,12 +82,16 @@ public enum ShellEnvironment {
         timeout: TimeInterval = 8
     ) -> String? {
         guard !name.isEmpty, name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return nil }
+        // The value goes to a temp file, not a pipe: a background job started
+        // from ~/.zshrc could hold a pipe open forever, and noisy rc files
+        // can't corrupt the answer.
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-env-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
-        // -i loads ~/.zshrc, -l loads ~/.zprofile; markers survive noisy rc files.
-        process.arguments = ["-ilc", "printf '__RC_BEGIN__%s__RC_END__' \"$\(name)\""]
-        let out = Pipe()
-        process.standardOutput = out
+        // -i loads ~/.zshrc, -l loads ~/.zprofile.
+        process.arguments = ["-ilc", "printf '%s' \"$\(name)\" > '\(tmp.path)'"]
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         do {
@@ -95,14 +104,10 @@ public enum ShellEnvironment {
             Thread.sleep(forTimeInterval: 0.05)
         }
         if process.isRunning {
-            process.terminate()
+            kill(process.processIdentifier, SIGKILL)  // interactive shells ignore SIGTERM
             return nil
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let text = String(decoding: data, as: UTF8.self)
-        guard let begin = text.range(of: "__RC_BEGIN__"),
-              let end = text.range(of: "__RC_END__", range: begin.upperBound..<text.endIndex) else { return nil }
-        let value = String(text[begin.upperBound..<end.lowerBound])
+        let value = (try? String(contentsOf: tmp, encoding: .utf8)) ?? ""
         return value.isEmpty ? nil : value
     }
 }

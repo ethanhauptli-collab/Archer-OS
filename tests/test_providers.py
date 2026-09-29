@@ -169,3 +169,21 @@ def test_openai_compat_requires_model():
 )
 def test_extract_json(text, expected):
     assert extract_json(text) == expected
+
+
+def test_compatible_server_without_a_key_does_not_crash(monkeypatch):
+    pytest.importorskip("openai")
+    from roughcut.providers import make_provider
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    p = make_provider("openai-compatible", model="local", base_url="http://localhost:1234/v1", api_key_env="OPENAI_API_KEY")
+    assert p.client.api_key == "none"
+
+
+def test_openai_without_a_key_is_a_provider_error(monkeypatch):
+    pytest.importorskip("openai")
+    from roughcut.providers import make_provider
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(ProviderError, match="openai"):
+        make_provider("openai", model="some-model")

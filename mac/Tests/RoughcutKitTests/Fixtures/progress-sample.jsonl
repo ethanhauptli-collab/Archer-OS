@@ -1,9 +1,10 @@
 {"event": "stage", "stage": "scan", "message": "Finding media"}
 {"event": "stage", "stage": "probe", "message": "Reading 5 files"}
 {"event": "stage", "stage": "silence", "message": "Finding the pauses"}
-{"event": "stage", "stage": "transcribe", "message": "Transcribing music.m4a", "current": 1, "total": 3}
-{"event": "stage", "stage": "transcribe", "message": "Transcribing talk.mov", "current": 2, "total": 3}
-{"event": "stage", "stage": "transcribe", "message": "Transcribing broll.mp4", "current": 3, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing music.m4a", "current": 0, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing talk.mov", "current": 1, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing broll.mp4", "current": 2, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcripts ready", "current": 3, "total": 3}
 {"event": "stage", "stage": "vision", "message": "Looking at 4 clips"}
 {"event": "stage", "stage": "vision", "message": "Looking at 4 clips", "current": 1, "total": 1}
 {"event": "stage", "stage": "plan", "message": "Planning the edit with fake-model"}

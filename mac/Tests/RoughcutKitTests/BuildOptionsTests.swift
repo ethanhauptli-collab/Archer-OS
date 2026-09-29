@@ -17,7 +17,7 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(o.problems, [])
         XCTAssertEqual(o.arguments(), [
             "build", "/Users/you/Movies/Trip", "--progress-json",
-            "--context=- open on the lake", "--target=8m",
+            "--context=- open on the lake", "--target=480",
             "--style", "tight", "--format", "vertical",
             "--provider", "anthropic", "--effort", "high", "--vision",
         ])
@@ -66,6 +66,14 @@ final class BuildOptionsTests: XCTestCase {
         let args = o.arguments()
         XCTAssertTrue(args.contains("--out=/Volumes/SSD/Cuts"))
         XCTAssertTrue(args.contains("--name=Trip, Day 1"))
+    }
+
+    func testTargetIsSentAsSeconds() {
+        var o = options()
+        o.targetLength = "8 min"
+        XCTAssertTrue(o.arguments().contains("--target=480"))
+        o.targetLength = "1:30"
+        XCTAssertTrue(o.arguments().contains("--target=90"))
     }
 
     func testRecut() {

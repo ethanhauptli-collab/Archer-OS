@@ -211,7 +211,9 @@ def parse_duration(text: str) -> float:
         for p in parts:
             total = total * 60 + p
         return total
-    m = re.fullmatch(r"(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m(?:in)?)?\s*(?:(\d+(?:\.\d+)?)s?)?", raw)
+    m = re.fullmatch(
+        r"(?:(\d+(?:\.\d+)?)\s*h(?:rs?|ours?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:ins?)?)?\s*(?:(\d+(?:\.\d+)?)\s*s?(?:ec)?)?", raw
+    )
     if not m or not any(m.groups()):
         raise ValueError(f"can't parse duration: {text!r}")
     h, mi, s = (float(g) if g else 0.0 for g in m.groups())

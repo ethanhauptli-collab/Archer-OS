@@ -14,6 +14,7 @@ public enum RunOutput: Equatable, Sendable {
 ///
 /// The stream finishes only after both pipes reach end-of-file, so the final
 /// `done` event is never lost to a race with process termination.
+/// Each instance runs once (a Foundation `Process` can't be relaunched).
 public final class CLIProcess: @unchecked Sendable {
     public let executable: URL
     public let arguments: [String]

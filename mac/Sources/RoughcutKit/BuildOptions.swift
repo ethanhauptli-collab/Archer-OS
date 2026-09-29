@@ -142,8 +142,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if !brief.trimmed.isEmpty {
             args.append("--context=\(brief.trimmed)")
         }
-        if !targetLength.trimmed.isEmpty {
-            args.append("--target=\(targetLength.trimmed)")
+        if let seconds = TimeText.seconds(from: targetLength) {
+            // Send plain seconds: the app's parser decided it's valid, so the
+            // CLI never sees a spelling it reads differently.
+            args.append("--target=\(Int(seconds.rounded()))")
         }
         args += ["--style", style.rawValue]
         if let format = format.cliValue {

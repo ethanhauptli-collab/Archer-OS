@@ -60,3 +60,14 @@ def test_seconds_to_clock():
     assert tc.seconds_to_clock(65) == "1:05"
     assert tc.seconds_to_clock(3725) == "1:02:05"
     assert tc.seconds_to_clock(12.34, millis=True) == "0:12.3"
+
+
+@pytest.mark.parametrize("text,seconds", [("8 min", 480), ("8 m", 480), ("1 h 5 m", 3900), ("90 sec", 90), ("2 mins", 120)])
+def test_parse_duration_accepts_spaced_units(text, seconds):
+    assert tc.parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["5m5m", "eight", "8x"])
+def test_parse_duration_rejects_garbage(text):
+    with pytest.raises(ValueError):
+        tc.parse_duration(text)

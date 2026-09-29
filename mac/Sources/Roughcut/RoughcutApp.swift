@@ -1,12 +1,20 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Needed when launched as a bare executable (`swift run`, Xcode) so the
         // app gets a Dock icon, a menu bar and keyboard focus.
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Child processes outlive their parent; stop a build still running.
+        model?.cancel()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -24,6 +32,7 @@ struct RoughcutApp: App {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 620, minHeight: 680)
+                .onAppear { appDelegate.model = model }
                 .task { await model.refreshDoctor() }
         }
         .windowResizability(.contentMinSize)

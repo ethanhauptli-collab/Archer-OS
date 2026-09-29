@@ -4,6 +4,12 @@
 #   mac/scripts/build-app.sh            -> mac/build/Roughcut.app
 #   mac/scripts/build-app.sh --install  -> also copies it to /Applications
 #
+# Signing: ad-hoc by default, which gives each rebuild a new identity, so
+# macOS may ask again for Keychain and folder access after rebuilding. To
+# avoid that, sign with your (free) Apple Development certificate:
+#   ROUGHCUT_SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)" mac/scripts/build-app.sh
+# (`security find-identity -v -p codesigning` lists yours.)
+#
 # Needs Xcode or the Command Line Tools (xcode-select --install). The app
 # remembers where this repo's CLI lives (.venv/bin/roughcut), so set up the
 # Python side first (see the repo README).
@@ -52,13 +58,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
     <key>NSHighResolutionCapable</key><true/>
     ${ICON_KEY}
-    <key>RoughcutCLIPath</key><string>${CLI_PATH}</string>
 </dict>
 </plist>
 PLIST
+# Added with plutil so any characters in the path are escaped properly.
+plutil -insert RoughcutCLIPath -string "$CLI_PATH" "$APP/Contents/Info.plist"
+plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-# Ad-hoc signature: enough to run locally on Apple Silicon. Not notarized.
-codesign --force --sign - "$APP" >/dev/null
+# Enough to run locally on Apple Silicon. Not notarized.
+codesign --force --sign "${ROUGHCUT_SIGN_IDENTITY:--}" "$APP" >/dev/null
 echo "Built $APP"
 
 if [ ! -x "$CLI_PATH" ]; then

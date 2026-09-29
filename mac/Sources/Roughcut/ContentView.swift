@@ -156,6 +156,10 @@ struct BuildForm: View {
         .onChange(of: model.options) {
             model.savePreferences()
         }
+        .onChange(of: model.options.provider) {
+            // Local and compatible servers are usually text-only models.
+            model.options.vision = model.options.provider == .anthropic || model.options.provider == .openai
+        }
     }
 }
 

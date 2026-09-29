@@ -104,5 +104,5 @@ A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.v
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 83 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 93 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

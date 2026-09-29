@@ -49,7 +49,8 @@ def make_provider(
     if name == "openai-compatible":
         if not base_url:
             raise ProviderError("--base-url is required for the openai-compatible provider")
-        key = os.environ.get(api_key_env) if api_key_env else "none"
+        # Local servers (LM Studio, llama.cpp) accept any key; the client just needs one.
+        key = (os.environ.get(api_key_env) if api_key_env else None) or "none"
         return OpenAICompatProvider(model or "", name="openai-compatible", base_url=base_url, api_key=key, supports_vision=bool(vision))
     raise ProviderError(f"unknown provider {name!r}; choose from {', '.join(PROVIDERS)}")
 

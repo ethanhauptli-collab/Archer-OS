@@ -246,7 +246,8 @@ def analyze(
     audible = [c for c in clips if c.media.has_audio]
     for n, clip in enumerate(audible, 1):
         m = clip.media
-        progress.stage("transcribe", f"Transcribing {m.name}", current=n, total=len(audible))
+        # current = files finished, so the bar never reads full while work remains.
+        progress.stage("transcribe", f"Transcribing {m.name}", current=n - 1, total=len(audible))
         transcript: Transcript | None = None
         sidecar = find_sidecar(Path(m.path), transcript_dirs)
         if sidecar:
@@ -274,6 +275,7 @@ def analyze(
             clip.segments = segments_from_regions(clip.id, regions)
             clip.transcript_source = "silence-map"
     if audible:
+        progress.stage("transcribe", "Transcripts ready", current=len(audible), total=len(audible))
         log(f"transcripts ready in {time.monotonic() - t2:.1f}s")
 
     for clip in clips:

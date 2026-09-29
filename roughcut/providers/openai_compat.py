@@ -31,7 +31,10 @@ class OpenAICompatProvider:
                 from openai import OpenAI
             except ImportError as e:
                 raise ProviderError("the openai package is not installed: pip install -e '.[openai]'") from e
-            client = OpenAI(base_url=base_url, api_key=api_key)
+            try:
+                client = OpenAI(base_url=base_url, api_key=api_key)
+            except Exception as e:  # e.g. missing OPENAI_API_KEY
+                raise ProviderError(f"{name}: {e}") from e
         self.client = client
         self.name = name
         self.model = model

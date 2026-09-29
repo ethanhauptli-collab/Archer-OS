@@ -33,7 +33,7 @@ final class AppModel {
     private(set) var log: [String] = []
 
     // Environment
-    private(set) var cliURL: URL?
+    private(set) var cliURL: URL? = CLILocator.locate()
     private(set) var doctor: DoctorReport?
     private(set) var doctorError: String?
     private(set) var checkingSetup = false
@@ -135,7 +135,8 @@ final class AppModel {
         )
         self.process = process
         Task {
-            for await output in process.run() {
+            // Ignore stragglers from a previous run that is still shutting down.
+            for await output in process.run() where self.process === process {
                 self.handle(output)
             }
         }
@@ -182,9 +183,7 @@ final class AppModel {
             progressCurrent = event.current
             progressTotal = event.total
         case "log":
-            if let message = event.message {
-                appendLog(message)
-            }
+            break  // the same line also arrives on stderr
         case "done":
             guard let result = event.result else { return }
             for stage in Stage.allCases where stageStatus[stage] == .active {
@@ -213,7 +212,7 @@ final class AppModel {
         }
     }
 
-    private static func shellQuoted(_ arg: String) -> String {
+    nonisolated private static func shellQuoted(_ arg: String) -> String {
         let safe = arg.allSatisfy { $0.isLetter || $0.isNumber || "-_./=:@".contains($0) }
         return safe ? arg : "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
@@ -320,6 +319,8 @@ final class AppModel {
         }
         if (options.provider == .openai || options.provider == .openaiCompatible) && !doctor.openaiInstalled {
             issues.append("OpenAI support isn't installed. In the repo: pip install -e '.[openai]'")
+        } else if options.provider == .openai && !doctor.openaiKey {
+            issues.append("Add your OpenAI API key in Settings.")
         }
         return issues
     }
