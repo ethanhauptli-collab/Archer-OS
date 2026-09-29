@@ -9,3 +9,7 @@ dist/
 # Local run outputs
 *_roughcut/
 roughcut_out/
+# Swift / Mac app
+mac/.build/
+mac/build/
+mac/.swiftpm/

@@ -4,7 +4,7 @@ Dump a folder of footage in and get a Final Cut Pro rough cut out.
 
 `roughcut` transcribes every clip on your Mac, removes dead air and "um"s, asks an AI model to build the story (hook, sections, best takes, B-roll, music), and writes an FCPXML file. Import that into Final Cut and you get a real, fully editable project that references your original media, so every cut keeps its handles. It also adds a **Stringout** project (all dialogue in recording order, dead air removed) and organizes the event browser with keywords (A-Roll, B-Roll, Stills, Music, plus visual tags).
 
-This is the command-line engine. A native Mac app will wrap it later (see `CLAUDE.md` → Roadmap).
+There's a command-line tool (below) and a Mac app in [`mac/`](mac/README.md) that wraps it: drop footage in, write a brief, watch the progress, then open the result in Final Cut Pro.
 
 ## Setup (Mac, Apple Silicon)
 
@@ -37,6 +37,8 @@ roughcut build ~/Movies/Talk --provider none
 # Re-cut an earlier run tighter, or for vertical, without calling the model again
 roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
 ```
+
+`roughcut doctor` checks that ffmpeg, transcription and your API key are set up.
 
 Then in Final Cut Pro choose **File → Import → XML…** and pick the `.fcpxml` in the output folder (by default `<footage folder>_roughcut/`, next to your footage).
 
@@ -102,5 +104,5 @@ A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.v
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 77 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 83 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

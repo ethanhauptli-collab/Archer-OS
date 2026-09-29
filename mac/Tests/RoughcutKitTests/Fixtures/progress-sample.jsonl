@@ -1,0 +1,12 @@
+{"event": "stage", "stage": "scan", "message": "Finding media"}
+{"event": "stage", "stage": "probe", "message": "Reading 5 files"}
+{"event": "stage", "stage": "silence", "message": "Finding the pauses"}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing music.m4a", "current": 1, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing talk.mov", "current": 2, "total": 3}
+{"event": "stage", "stage": "transcribe", "message": "Transcribing broll.mp4", "current": 3, "total": 3}
+{"event": "stage", "stage": "vision", "message": "Looking at 4 clips"}
+{"event": "stage", "stage": "vision", "message": "Looking at 4 clips", "current": 1, "total": 1}
+{"event": "stage", "stage": "plan", "message": "Planning the edit with fake-model"}
+{"event": "stage", "stage": "cut", "message": "Cutting (medium)"}
+{"event": "stage", "stage": "write", "message": "Writing the Final Cut file"}
+{"event": "done", "result": {"title": "Mountain Day", "out_dir": "/Users/you/Movies/Trip_roughcut", "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip.fcpxml", "report": "/Users/you/Movies/Trip_roughcut/edit_report.md", "rough_seconds": 15.682, "stringout_seconds": 13.68, "edits": 6, "broll": 2, "sections": ["Cold open", "Heading out", "Wrap"], "planned_by": "fake:fake-model", "fell_back": false, "warnings": ["unknown segment 'V09.S001'; skipped", "V01.S005 used twice; kept the first use", "B-roll V01: ignored references not in section 'Heading out': ['V01.S999']"]}}
