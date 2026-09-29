@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from . import progress
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log
 from .fcpxml import build_fcpxml
 from .media import require_tools, scan
@@ -50,6 +51,10 @@ class Options:
     workers: int = 4
 
 
+class RoughcutError(RuntimeError):
+    """A problem with the inputs the user can fix (no media, nothing to cut...)."""
+
+
 @dataclass
 class Result:
     out_dir: Path
@@ -59,6 +64,26 @@ class Result:
     timeline: Timeline
     stringout: Timeline | None
     fell_back: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+
+def result_summary(result: Result) -> dict:
+    """What the Mac app shows when a run finishes (the `done` event payload)."""
+    tl = result.timeline
+    return {
+        "title": result.plan.title,
+        "out_dir": str(result.out_dir),
+        "fcpxml": str(result.fcpxml),
+        "report": str(result.report),
+        "rough_seconds": round(tl.seconds, 3),
+        "stringout_seconds": round(result.stringout.seconds, 3) if result.stringout is not None else None,
+        "edits": len(tl.spine),
+        "broll": sum(1 for c in tl.connected if c.kind == "broll"),
+        "sections": [name for _, name in tl.section_starts],
+        "planned_by": result.plan.source,
+        "fell_back": result.fell_back,
+        "warnings": result.warnings,
+    }
 
 
 def slug(text: str) -> str:
@@ -81,9 +106,10 @@ def style_for(opts: Options) -> Style:
 
 def run_analysis(opts: Options, out_dir: Path) -> Analysis:
     require_tools()
+    progress.stage("scan", "Finding media")
     files = scan(opts.inputs, exclude=[out_dir])
     if not files:
-        raise SystemExit("No media files found.")
+        raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
     transcriber = None
     if opts.transcriber != "none":
@@ -104,6 +130,7 @@ def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tu
 
 
 def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> tuple[Timeline, Timeline | None]:
+    progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
     rough = build_timeline(plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db)
     stringout = None
@@ -115,6 +142,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
 
 
 def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, analysis: Analysis, rough: Timeline, stringout: Timeline | None, report_kwargs: dict) -> tuple[Path, Path]:
+    progress.stage("write", "Writing the Final Cut file")
     out_dir.mkdir(parents=True, exist_ok=True)
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
     xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
@@ -166,6 +194,7 @@ def build(opts: Options) -> Result:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     else:
         t = time.monotonic()
+        progress.stage("plan", f"Planning the edit with {provider.model}")
         log(f"planning the edit with {provider.name}:{provider.model}")
         try:
             plan, raw_plan = plan_with_model(provider, analysis, opts)
@@ -181,7 +210,7 @@ def build(opts: Options) -> Result:
             raw_plan = None  # so `render` rebuilds the fallback, not the empty plan
             fell_back = True
     if not plan.sections:
-        raise SystemExit("Nothing to cut: no speech or visual clips were found.")
+        raise RoughcutError("Nothing to cut: no speech or visual clips were found.")
 
     rough, stringout = make_timelines(plan, analysis, opts, name)
     timings["total"] = time.monotonic() - t_start
@@ -195,11 +224,14 @@ def build(opts: Options) -> Result:
         stringout,
         dict(usage=usage, timings=timings, extra_warnings=extra_warnings),
     )
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back)
+    warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
+    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings)
 
 
 def rerender(out_dir: Path, opts: Options) -> Result:
     """Rebuild the FCPXML from a saved analysis + plan (no model calls)."""
+    if not (out_dir / "analysis.json").is_file() or not (out_dir / "plan.json").is_file():
+        raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
     analysis = Analysis.load(out_dir / "analysis.json")
     saved = json.loads((out_dir / "plan.json").read_text())
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
@@ -209,4 +241,4 @@ def rerender(out_dir: Path, opts: Options) -> Result:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     rough, stringout = make_timelines(plan, analysis, opts, name)
     fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), analysis, rough, stringout, {})
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout)
+    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=plan.warnings + rough.warnings)

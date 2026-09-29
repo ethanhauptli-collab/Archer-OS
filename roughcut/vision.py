@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import ffmpeg_ops
+from . import ffmpeg_ops, progress
 from .analyze import Analysis, Cache, Clip, log
 from .prompts import VISION_SCHEMA, VISION_SYSTEM
 from .providers import ImagePart, Provider, ProviderError, TextPart
@@ -57,6 +57,7 @@ def describe_clips(
         return warnings
 
     t0 = time.monotonic()
+    progress.stage("vision", f"Looking at {len(todo)} clips")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for clip, frames in zip(todo, pool.map(lambda c: extract_frames(c, cache), todo)):
             clip.frames = frames
@@ -94,7 +95,8 @@ def describe_clips(
         return [f"visual log skipped {', '.join(missing)}"] if missing else []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for w in pool.map(run, batches):
+        for done, w in enumerate(pool.map(run, batches), 1):
             warnings.extend(w)
+            progress.stage("vision", f"Looking at {len(todo)} clips", current=done, total=len(batches))
     log(f"visual log done in {time.monotonic() - t0:.1f}s")
     return warnings

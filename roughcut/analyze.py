@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import ffmpeg_ops
+from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions
 from .transcribe import Transcriber, Transcript, find_sidecar, load_sidecar
@@ -27,6 +27,7 @@ ROLE_LABELS = {
 
 def log(msg: str) -> None:
     print(f"[roughcut] {msg}", file=sys.stderr, flush=True)
+    progress.emit("log", message=msg)
 
 
 def default_cache_dir() -> Path:
@@ -194,6 +195,7 @@ def analyze(
 ) -> Analysis:
     t0 = time.monotonic()
     warnings: list[str] = []
+    progress.stage("probe", f"Reading {len(paths)} files")
 
     def _probe(p: Path) -> MediaInfo | None:
         from .media import fingerprint
@@ -235,6 +237,7 @@ def analyze(
         clip.silences = [tuple(s) for s in cached]
 
     t1 = time.monotonic()
+    progress.stage("silence", "Finding the pauses")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(_silence, clips))
     log(f"mapped silence in {time.monotonic() - t1:.1f}s")
@@ -243,6 +246,7 @@ def analyze(
     audible = [c for c in clips if c.media.has_audio]
     for n, clip in enumerate(audible, 1):
         m = clip.media
+        progress.stage("transcribe", f"Transcribing {m.name}", current=n, total=len(audible))
         transcript: Transcript | None = None
         sidecar = find_sidecar(Path(m.path), transcript_dirs)
         if sidecar:

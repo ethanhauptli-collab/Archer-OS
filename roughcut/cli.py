@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, progress
 from .providers import PROVIDERS, ProviderError
 from .timecode import parse_duration, seconds_to_clock
 
@@ -24,6 +28,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--music-db", type=float, default=-14.0, help="music level in dB (default: -14)")
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
     p.add_argument("--name", help="project/event name (default: folder name)")
+    p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,12 +67,56 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("render", help="rebuild the FCPXML from a previous run's plan (no model calls)")
     r.add_argument("out_dir", help="a folder written by `roughcut build`")
     _add_render_args(r)
+
+    d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
+    d.add_argument("--json", action="store_true", help="print the report as JSON")
     return parser
+
+
+def doctor_report() -> dict:
+    mlx = importlib.util.find_spec("mlx_whisper") is not None
+    fw = importlib.util.find_spec("faster_whisper") is not None
+    apple_silicon = sys.platform == "darwin" and os.uname().machine == "arm64"
+    transcriber = "mlx" if (mlx and apple_silicon) else "faster-whisper" if fw else None
+    return {
+        "version": __version__,
+        "python": sys.version.split()[0],
+        "executable": sys.executable,
+        "ffmpeg": shutil.which("ffmpeg"),
+        "ffprobe": shutil.which("ffprobe"),
+        "transcriber": transcriber,
+        "anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+        "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "openai_installed": importlib.util.find_spec("openai") is not None,
+    }
+
+
+def _print_doctor(r: dict) -> int:
+    rows = [
+        ("ffmpeg", r["ffmpeg"] and r["ffprobe"], r["ffmpeg"] or "missing: brew install ffmpeg"),
+        ("transcriber", r["transcriber"], r["transcriber"] or "missing: pip install -e '.[mac]'"),
+        ("Claude API key", r["anthropic_key"], "ANTHROPIC_API_KEY set" if r["anthropic_key"] else "ANTHROPIC_API_KEY not set"),
+        ("OpenAI", r["openai_key"] and r["openai_installed"], "ready" if r["openai_key"] and r["openai_installed"] else "optional, not set up"),
+    ]
+    print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
+    for label, ok, detail in rows:
+        print(f"  {'ok ' if ok else '-- '} {label:<15} {detail}")
+    return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    from .pipeline import Options, build, rerender
+    if args.command == "doctor":
+        report = doctor_report()
+        if args.json:
+            print(json.dumps(report))
+            return 0
+        return _print_doctor(report)
+
+    from .pipeline import Options, build, rerender, result_summary
+
+    json_mode = bool(args.progress_json)
+    progress.enable(json_mode)
 
     common = dict(
         name=args.name,
@@ -106,9 +155,17 @@ def main(argv: list[str] | None = None) -> int:
                 **common,
             )
             result = build(opts)
-    except (ProviderError, ValueError, RuntimeError) as e:
+    except (ProviderError, ValueError, RuntimeError, OSError) as e:
         print(f"roughcut: {e}", file=sys.stderr)
+        progress.emit("error", message=str(e))
         return 1
+    except Exception as e:  # a bug: tell the app, then show the traceback
+        progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}")
+        raise
+
+    if json_mode:
+        progress.emit("done", result=result_summary(result))
+        return 3 if result.fell_back else 0
 
     tl = result.timeline
     print(f"\nRough cut: {seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
