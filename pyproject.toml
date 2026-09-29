@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roughcut"
+version = "0.1.0"
+description = "Dump a folder of footage in, get a Final Cut Pro rough cut (FCPXML) out."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=1.9",
+]
+
+[project.optional-dependencies]
+# Fast on-device transcription for Apple Silicon Macs (recommended on the Mac).
+mac = ["mlx-whisper>=0.4"]
+# Cross-platform transcription (CPU/CUDA). Slower on a Mac than mlx-whisper.
+whisper = ["faster-whisper>=1.1"]
+# OpenAI, Ollama, LM Studio, OpenRouter and other OpenAI-compatible endpoints.
+openai = ["openai>=1.50"]
+dev = ["pytest>=8", "lxml>=5"]
+
+[project.scripts]
+roughcut = "roughcut.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["roughcut*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
