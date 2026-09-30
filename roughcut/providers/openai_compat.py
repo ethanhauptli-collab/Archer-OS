@@ -10,7 +10,11 @@ import base64
 import json
 import time
 
-from .base import ImagePart, Part, ProviderError, TextPart, Usage, UsageLog, extract_json
+from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog, extract_json
+
+
+def _is_auth_error(e: Exception) -> bool:
+    return type(e).__name__ in ("AuthenticationError", "PermissionDeniedError")
 
 
 class OpenAICompatProvider:
@@ -40,6 +44,16 @@ class OpenAICompatProvider:
         self.model = model
         self.supports_vision = supports_vision
         self.usage = UsageLog()
+
+    def verify(self) -> str:
+        """Checks the key where the server supports listing models; local servers may not."""
+        try:
+            self.client.models.list()
+        except Exception as e:
+            if _is_auth_error(e):
+                raise ProviderAuthError(f"{self.name} rejected the API key: {e}") from e
+            # Many local servers don't implement /models; the real call will tell.
+        return self.model
 
     def _content(self, parts: list[Part]):
         if not any(isinstance(p, ImagePart) for p in parts):
@@ -84,6 +98,8 @@ class OpenAICompatProvider:
                     **extra,
                 )
             except Exception as e:  # servers disagree on error types; try the next mode
+                if _is_auth_error(e):
+                    raise ProviderAuthError(f"{self.name} rejected the API key: {e}") from e
                 errors.append(f"{extra.get('response_format', {}).get('type', 'plain')}: {e}")
                 continue
             usage = getattr(resp, "usage", None)

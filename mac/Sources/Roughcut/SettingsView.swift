@@ -43,7 +43,7 @@ struct GeneralSettings: View {
                     CheckRow(ok: true, title: "roughcut \(doctor.version)", detail: "Python \(doctor.python)")
                     CheckRow(ok: doctor.hasFFmpeg, title: "ffmpeg", detail: doctor.ffmpeg ?? "brew install ffmpeg")
                     CheckRow(ok: doctor.transcriber != nil, title: "Transcription", detail: doctor.transcriber ?? "pip install -e '.[mac]'")
-                    CheckRow(ok: doctor.anthropicKey, title: "Claude API key", detail: doctor.anthropicKey ? "Found" : "Add it under API Keys")
+                    CheckRow(ok: doctor.anthropicKeyWorks, title: "Claude API key", detail: keyDetail(doctor))
                     CheckRow(ok: doctor.openaiKey && doctor.openaiInstalled, title: "OpenAI (optional)", detail: doctor.openaiInstalled ? (doctor.openaiKey ? "Ready" : "No key") : "Not installed")
                 } else {
                     Text(model.doctorError ?? "Checking…")
@@ -56,6 +56,15 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func keyDetail(_ doctor: DoctorReport) -> String {
+        switch doctor.anthropicKeyStatus {
+        case "ok": return "Accepted by Anthropic"
+        case "not checked": return "Set (not tested)"
+        case .some: return doctor.anthropicKeyMessage ?? "Not working"
+        case .none: return doctor.anthropicKey ? "Found" : "Add it under API Keys"
+        }
     }
 
     private func chooseCLI() {

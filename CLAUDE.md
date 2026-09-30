@@ -11,6 +11,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/transcribe.py` | mlx-whisper / faster-whisper / sidecar `.srt/.vtt/.json` → `Word`s |
 | `roughcut/segments.py` | Words → sentence `Segment`s with IDs `V01.S003` |
 | `roughcut/analyze.py` | Orchestrates stage 1, role classification, on-disk cache (`~/Library/Caches/roughcut`) |
+| `roughcut/duplicates.py` | Alternate exports (same words / same frames) → `duplicate_of` (hidden); repeated narration reads → `take_of` |
 | `roughcut/vision.py` | Frame sampling + vision descriptions/tags (batched, cached) |
 | `roughcut/prompts.py` | Planner/vision prompts; media block rendered deterministically for prompt caching |
 | `roughcut/providers/` | `anthropic_provider.py` (official SDK, streaming, structured outputs, `fallbacks: "default"`), `openai_compat.py` (OpenAI/Ollama/LM Studio, degrades schema → JSON mode → text) |
@@ -28,6 +29,8 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 - **FCPXML coordinates:** spine `offset` = timeline time. Spine `start` = asset timecode origin + source in. Connected clips and markers live in the **parent's source time** (`parent.start + (frame − parent.offset) × frameDuration`). Stills use `<video>` with a `3600s` origin; browser stills are `<clip><video duration="0s"/></clip>`. Audio-only clips carry `format` = `FFVideoFormatRateUndefined`. All of this is verified against Apple's DTD and real FCP exports.
 - Tests validate every generated FCPXML against `tests/fixtures/FCPXMLv1_10.dtd` (Apple's DTD, as vendored by CommandPost/OpenFCPXMLKit) and check timing invariants (`tests/test_end_to_end.py::check_invariants`). Keep both passing.
 - **The app ↔ CLI contract is `--progress-json`** (one JSON object per stdout line: `stage` / `log` / `done` / `error`; stages `scan probe silence transcribe vision plan cut write`; `done.result` = `pipeline.result_summary`) and `roughcut doctor --json`. `mac/Tests/RoughcutKitTests/Fixtures/progress-sample.jsonl` is real output. The Swift tests decode it, and `tests/test_progress.py` fails if the Python side drifts. Change both sides together and regenerate the fixture.
+- **A rejected API key stops the run** (`ProviderAuthError`): `build` calls `provider.verify()` before any analysis, and auth errors during vision/planning are fatal. Only non-auth model failures may fall back to the stringout, and that fallback is announced at the top of the report and in the CLI output.
+- **An audio-only storyline (narration) never plays over black**: `timeline._fill_picture` covers any gap the plan left, matching narration words (multi-word names count double) to clip names/visual tags, preferring moving footage, never repeating a still. Several B-roll entries with the same `over` play back to back.
 - Claude calls use `claude-opus-5-5` by default, adaptive thinking (implicit on this model), `output_config.effort`, streaming, and structured outputs via `output_config.format`. Don't add `thinking: {type: "disabled"}` or `budget_tokens` (400 on this model) or forced `tool_choice`.
 
 ## Commands
@@ -49,9 +52,15 @@ mac/scripts/build-app.sh --install          # build Roughcut.app into /Applicati
 The CLI was built and tested in a Linux cloud session. The owner has since run it from Terminal on their Mac.
 The Mac app (`mac/`) was written in that cloud session with **no Swift toolchain available** (neither the macOS SDK nor a Linux Swift). It had an independent compile-focused review but has never been compiled. On the first `swift build`, fix whatever the compiler reports, keeping the structure, then run `swift test`.
 
+### First real run (OCVIBE, 301 clips: 3 narration reads, 9 interviews/promos, 13 B-roll, 276 stills)
+
+- The Anthropic key was **rejected**; the old code kept going and silently delivered the stringout (all speech back to back, narration over black, the Roy Choi promo three times). Fixed: key check up front, fatal auth errors, clear hints (missing key, Claude sign-in token instead of API key, ANTHROPIC_BASE_URL), `roughcut doctor` tests the key.
+- Project shape exposed gaps now fixed: duplicate exports (16:9/9:16/4:3), three takes of one narration script, narration-led structure with 5-25 s sentences needing multiple shots.
+- Not yet seen: an actual AI-planned cut. Next run needs a working key (console.anthropic.com API key).
+
 ### CLI verification (cloud)
 
-Verified there: 93 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
+Verified there: 116 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
 Not verifiable in the cloud: a live Claude call, real mlx-whisper transcription (Hugging Face was blocked), and importing into Final Cut Pro. Those depend on runs on the Mac; record the results here.
 
 ### First run on the Mac: checklist

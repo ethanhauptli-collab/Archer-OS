@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .analyze import ROLE_LABELS, Analysis
 from .plan import Plan
 from .providers import UsageLog, estimate_cost
@@ -11,6 +13,29 @@ from .timeline import Timeline
 
 def _tc(frames: int, tl: Timeline) -> str:
     return seconds_to_clock(float(frames * tl.frame_duration))
+
+
+def collapse_warnings(warnings: list[str]) -> list[str]:
+    """Merge warnings that differ only in clip IDs ("visual log failed for V01, I002: X" x 46)."""
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for w in warnings:
+        ids = re.findall(r"\b[VAI]\d{2,}(?:\.S\d+)?\b", w)
+        key = re.sub(r"\b[VAI]\d{2,}(?:\.S\d+)?\b(?:,\s*)?", "", w)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((w, ids))
+    out = []
+    for key in order:
+        items = groups[key]
+        if len(items) == 1:
+            out.append(items[0][0])
+        else:
+            ids = [i for _, found in items for i in found]
+            shown = ", ".join(ids[:8]) + (f" and {len(ids) - 8} more" if len(ids) > 8 else "")
+            out.append(f"{items[0][0]}  (x{len(items)}: {shown})")
+    return out
 
 
 def build_report(
@@ -26,6 +51,10 @@ def build_report(
     raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image")
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
     L = [f"# {plan.title}", ""]
+    failures = [w for w in (extra_warnings or []) if "planning failed" in w or "no usable sections" in w]
+    if failures:
+        L += ["> **The AI didn't plan this cut.** It's the stringout: all speech in recording order with dead air removed, no B-roll.", ">"]
+        L += [f"> {w}" for w in failures] + [""]
     if plan.logline:
         L += [f"_{plan.logline}_", ""]
     L += [
@@ -46,6 +75,9 @@ def build_report(
     if timings:
         L.append("- **Processing:** " + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()))
     L.append("")
+    notes = list(analysis.notes) + list(tl.notes)
+    if notes:
+        L += ["## Notes", ""] + [f"- {n}" for n in notes] + [""]
 
     if len(tl.section_starts) > 1:
         L += ["## Chapters", "", "```"]
@@ -111,7 +143,7 @@ def build_report(
         L.append(f"| {c.id} | {c.media.name} | {ROLE_LABELS.get(c.role, c.role)} | {length} | {desc} |")
     L.append("")
 
-    warnings = list(analysis.warnings) + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or [])
+    warnings = collapse_warnings(list(analysis.warnings) + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or []))
     if warnings:
         L += ["## Warnings", ""] + [f"- {w}" for w in warnings] + [""]
     return "\n".join(L)

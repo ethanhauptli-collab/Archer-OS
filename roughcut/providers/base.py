@@ -12,6 +12,10 @@ class ProviderError(RuntimeError):
     pass
 
 
+class ProviderAuthError(ProviderError):
+    """Credentials were rejected. Retrying or falling back won't help: stop the run."""
+
+
 @dataclass
 class TextPart:
     text: str
@@ -51,6 +55,10 @@ class Provider(Protocol):
     model: str
     supports_vision: bool
     usage: UsageLog
+
+    def verify(self) -> str:
+        """Cheap credentials/model check before any real work. Raises ProviderAuthError."""
+        ...
 
     def complete_json(
         self,

@@ -80,11 +80,22 @@ def test_plain_mode_prints_no_json(footage, tmp_path, capsys):
     assert "Rough cut:" in out and '"event"' not in out
 
 
-def test_doctor_json(capsys):
+def test_doctor_json(capsys, monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     assert main(["doctor", "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
-    for key in ("version", "python", "executable", "ffmpeg", "ffprobe", "transcriber", "anthropic_key", "openai_key", "openai_installed"):
+    for key in ("version", "python", "executable", "ffmpeg", "ffprobe", "transcriber", "anthropic_key", "anthropic_key_status",
+                "anthropic_key_message", "openai_key", "openai_installed"):
         assert key in report
+    assert report["anthropic_key_status"] == "missing" and "console.anthropic.com" in report["anthropic_key_message"]
+
+
+def test_doctor_offline_does_not_call_anthropic(capsys, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")  # would fail if contacted
+    assert main(["doctor", "--json", "--offline"]) == 0
+    assert json.loads(capsys.readouterr().out)["anthropic_key_status"] == "not checked"
 
 
 def test_swift_fixture_matches_the_cli_contract():

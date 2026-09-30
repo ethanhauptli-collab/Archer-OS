@@ -27,6 +27,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll audio level in dB (default: -20)")
     g.add_argument("--music-db", type=float, default=-14.0, help="music level in dB (default: -14)")
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
+    g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
     p.add_argument("--name", help="project/event name (default: folder name)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
 
@@ -70,14 +71,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
+    d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic")
     return parser
 
 
-def doctor_report() -> dict:
+def check_anthropic_key(offline: bool = False) -> tuple[str, str]:
+    """(status, message): status is ok / rejected / missing / unreachable / not checked."""
+    from .providers import ProviderAuthError
+    from .providers.anthropic_provider import AnthropicProvider, key_problem_hint
+
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        return "missing", key_problem_hint()
+    if offline:
+        return "not checked", ""
+    try:
+        import anthropic
+
+        AnthropicProvider(client=anthropic.Anthropic(max_retries=0, timeout=10)).verify()
+    except ProviderAuthError as e:
+        return "rejected", str(e)
+    except ProviderError as e:
+        return "unreachable", str(e)
+    return "ok", ""
+
+
+def doctor_report(offline: bool = False) -> dict:
     mlx = importlib.util.find_spec("mlx_whisper") is not None
     fw = importlib.util.find_spec("faster_whisper") is not None
     apple_silicon = sys.platform == "darwin" and os.uname().machine == "arm64"
     transcriber = "mlx" if (mlx and apple_silicon) else "faster-whisper" if fw else None
+    key_status, key_message = check_anthropic_key(offline)
     return {
         "version": __version__,
         "python": sys.version.split()[0],
@@ -86,6 +109,8 @@ def doctor_report() -> dict:
         "ffprobe": shutil.which("ffprobe"),
         "transcriber": transcriber,
         "anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+        "anthropic_key_status": key_status,
+        "anthropic_key_message": key_message,
         "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
         "openai_installed": importlib.util.find_spec("openai") is not None,
     }
@@ -95,7 +120,7 @@ def _print_doctor(r: dict) -> int:
     rows = [
         ("ffmpeg", r["ffmpeg"] and r["ffprobe"], r["ffmpeg"] or "missing: brew install ffmpeg"),
         ("transcriber", r["transcriber"], r["transcriber"] or "missing: pip install -e '.[mac]'"),
-        ("Claude API key", r["anthropic_key"], "ANTHROPIC_API_KEY set" if r["anthropic_key"] else "ANTHROPIC_API_KEY not set"),
+        ("Claude API key", r["anthropic_key_status"] == "ok", {"ok": "accepted by Anthropic", "not checked": "set (not tested)"}.get(r["anthropic_key_status"], r["anthropic_key_message"])),
         ("OpenAI", r["openai_key"] and r["openai_installed"], "ready" if r["openai_key"] and r["openai_installed"] else "optional, not set up"),
     ]
     print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
@@ -107,7 +132,7 @@ def _print_doctor(r: dict) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
-        report = doctor_report()
+        report = doctor_report(offline=args.offline)
         if args.json:
             print(json.dumps(report))
             return 0
@@ -126,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         broll_db=args.broll_db,
         music_db=args.music_db,
         stringout=not args.no_stringout,
+        fill=not args.no_fill,
     )
     try:
         if args.command == "render":
@@ -168,6 +194,11 @@ def main(argv: list[str] | None = None) -> int:
         return 3 if result.fell_back else 0
 
     tl = result.timeline
+    if result.fell_back:
+        print("\n*** The AI step failed, so this is only the stringout (all speech, dead air removed, no B-roll). ***")
+        for w in result.warnings:
+            if "planning failed" in w or "no usable sections" in w:
+                print(f"*** {w}")
     print(f"\nRough cut: {seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
     if result.stringout is not None:
         print(f"Stringout: {seconds_to_clock(result.stringout.seconds)}")

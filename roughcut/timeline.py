@@ -8,6 +8,8 @@ coordinates; nothing here knows about XML.
 
 from __future__ import annotations
 
+import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -25,12 +27,14 @@ class Style:
     max_gap: float  # pauses longer than this inside kept speech are cut out
     remove_fillers: bool = True
     min_broll: float = 1.5  # shortest cutaway worth placing
+    fill_shot: float = 4.0  # shot length when filling narration with B-roll
+    max_still: float = 6.0  # longest a single still holds
 
 
 STYLES = {
-    "tight": Style(pad_in=0.06, pad_out=0.12, max_gap=0.35),
+    "tight": Style(pad_in=0.06, pad_out=0.12, max_gap=0.35, fill_shot=3.0, max_still=5.0),
     "medium": Style(pad_in=0.10, pad_out=0.20, max_gap=0.60),
-    "loose": Style(pad_in=0.20, pad_out=0.40, max_gap=1.20),
+    "loose": Style(pad_in=0.20, pad_out=0.40, max_gap=1.20, fill_shot=5.0, max_still=7.0),
 }
 
 
@@ -85,6 +89,7 @@ class Timeline:
     section_frames: dict[int, int] = field(default_factory=dict)  # plan section index -> first frame
     seg_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def total_frames(self) -> int:
@@ -290,6 +295,7 @@ def build_timeline(
     format_override: str | None = None,
     broll_db: float | None = -20.0,
     music_db: float = -14.0,
+    fill: bool = True,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -366,63 +372,296 @@ def build_timeline(
             tl.seg_ranges[seg_id] = (f0, f1)
         offset += frames
 
-    _place_broll(tl, plan, analysis, style, broll_db, warnings)
+    lanes = _Lanes()
+    _place_broll(tl, plan, analysis, style, broll_db, warnings, lanes)
+    if fill:
+        _fill_picture(tl, analysis, style, broll_db, lanes)
     _place_music(tl, plan, analysis, music_db, warnings)
     _place_markers(tl, plan, analysis)
     tl.warnings = warnings
     return tl
 
 
-def _place_broll(tl: Timeline, plan: Plan, analysis: Analysis, style: Style, volume_db: float | None, warnings: list[str]) -> None:
+class _Lanes:
+    """Which frames each connected lane already holds."""
+
+    def __init__(self) -> None:
+        self.used: dict[int, list[tuple[int, int]]] = {}
+
+    def free(self, start: int, end: int) -> int:
+        lane = 1
+        while any(not (end <= s or start >= e) for s, e in self.used.get(lane, [])):
+            lane += 1
+        self.used.setdefault(lane, []).append((start, end))
+        return lane
+
+
+def _video_window(m, want: int, fd: Fraction, hint: Fraction | None) -> tuple[Fraction, int]:
+    """Source in-point and length (frames) for a cutaway of `want` frames."""
+    grid = m.frame_duration or fd
+    dur = m.duration
+    need = want * fd
+    if hint is not None:
+        # Back off a late in-point so the cutaway still fills its spot.
+        src = min(hint, max(Fraction(0), dur - need))
+    else:
+        src = min(dur * Fraction(15, 100), max(Fraction(0), dur - need))
+    src = max(Fraction(0), min(src, dur - grid))
+    src_in = tc.floor_frames(src, grid) * grid
+    return src_in, min(want, tc.floor_frames(dur - src_in, fd))
+
+
+def _place_broll(
+    tl: Timeline, plan: Plan, analysis: Analysis, style: Style, volume_db: float | None, warnings: list[str], lanes: _Lanes
+) -> None:
     fd = tl.frame_duration
-    lanes: dict[int, list[tuple[int, int]]] = {}
     min_frames = tc.ceil_frames(Fraction(style.min_broll).limit_denominator(1000), fd)
+    max_still = tc.floor_frames(Fraction(style.max_still).limit_denominator(1000), fd)
     for section in plan.sections:
+        # Consecutive entries over the same lines play one after another, so a
+        # long narrated sentence can get several shots.
+        groups: list[list] = []
         for b in section.broll:
-            ranges = [tl.seg_ranges[s] for s in b.over if s in tl.seg_ranges]
+            if groups and set(groups[-1][0].over) == set(b.over):
+                groups[-1].append(b)
+            else:
+                groups.append([b])
+        for group in groups:
+            ranges = [tl.seg_ranges[s] for s in group[0].over if s in tl.seg_ranges]
             if not ranges:
                 continue
             start = min(r[0] for r in ranges)
             end = max(r[1] for r in ranges)
             if end - start < min_frames:
                 end = min(tl.total_frames, start + min_frames)
-            clip = analysis.clip(b.clip_id)
-            m = clip.media
-            want = end - start
+            cursor = start
+            for k, b in enumerate(group):
+                remaining = end - cursor
+                if remaining < 1:
+                    warnings.append(f"B-roll {b.clip_id}: no time left over {', '.join(b.over)}; skipped")
+                    continue
+                want = remaining if k == len(group) - 1 else max(1, remaining // (len(group) - k))
+                clip = analysis.clip(b.clip_id)
+                m = clip.media
+                if m.kind == "image":
+                    src_in, frames = Fraction(0), min(want, max_still)
+                else:
+                    hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
+                    src_in, frames = _video_window(m, want, fd, hint)
+                if frames < min(min_frames, want):
+                    warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
+                    continue
+                tl.connected.append(
+                    ConnectedClip(
+                        clip_id=b.clip_id,
+                        src_in=src_in,
+                        frames=frames,
+                        start=cursor,
+                        lane=lanes.free(cursor, cursor + frames),
+                        kind="broll",
+                        volume_db=volume_db if m.has_audio else None,
+                        note=b.reason,
+                    )
+                )
+                cursor += frames
+
+
+# ---------------------------------------------------------- picture fill
+
+
+def _extend_shot_before(tl: Timeline, analysis: Analysis, g0: int, g1: int) -> bool:
+    """Close a sliver of a gap by holding the previous shot a little longer."""
+    for c in tl.connected:
+        m = analysis.clip(c.clip_id).media
+        if c.end != g0 or not m.has_video:
+            continue
+        if m.kind == "image" or c.src_in + (c.frames + g1 - g0) * tl.frame_duration <= m.duration:
+            c.frames += g1 - g0
+            return True
+    return False
+
+_STOP = set(
+    """the and for are but not you all any can had her was one our out day get has him his how man new now old see two
+    way who boy did its let put say she too use this that with have from they will what when your there their them than
+    then these those some into over also just like been were more most much very about after before where which while
+    here being because through could would should going really right okay yeah well even still only other each such
+    own same both few many make made thing things people time year years jpg png mov mp4 final export copy""".split()
+)
+
+
+def _tokens(text: str) -> set[str]:
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)  # HondaCenter -> Honda Center
+    words = re.findall(r"[a-zA-Z]+", spaced.lower())
+    return {w for w in words if len(w) > 2 and w not in _STOP}
+
+
+_NAME = re.compile(r"\b(?:[A-Z][a-z]+|[A-Z]{2,})(?:[ -](?:[A-Z][a-z]+|[A-Z]{2,}))+")
+
+
+def _names(text: str) -> list[set[str]]:
+    """Multi-word proper names ("Orange County", "Honda Center") as token sets."""
+    names = []
+    for match in _NAME.finditer(text):
+        toks = _tokens(match.group(0))
+        if len(toks) >= 2:
+            names.append(toks)
+    return names
+
+
+def _match_score(clip_toks: set[str], said: set[str], names: list[set[str]], idf: dict[str, float]) -> float:
+    """How well a clip fits what's being said. Matching a whole name counts
+    double; matching one word of a name ("orange" from "Orange County") counts
+    for little."""
+    score = 0.0
+    for t in clip_toks & said:
+        weight = idf.get(t, 1.0)
+        for name in names:
+            if t in name:
+                weight *= 2.0 if name <= clip_toks else 0.3
+                break
+        score += weight
+    return score
+
+
+def _clip_tokens(clip: Clip) -> set[str]:
+    text = clip.media.stem
+    if clip.visual:
+        text += " " + clip.visual.get("description", "") + " " + " ".join(clip.visual.get("tags", []))
+    return _tokens(text)
+
+
+def _gaps_without_picture(tl: Timeline, analysis: Analysis) -> list[tuple[int, int]]:
+    """Frames where nothing visual is on screen: audio-only storyline, no cutaway."""
+    blank = [(sc.offset, sc.end) for sc in tl.spine if not analysis.clip(sc.clip_id).media.has_video]
+    covered = sorted((c.start, c.end) for c in tl.connected if analysis.clip(c.clip_id).media.has_video)
+    gaps: list[tuple[int, int]] = []
+    for start, end in blank:
+        cursor = start
+        for c0, c1 in covered:
+            if c1 <= cursor or c0 >= end:
+                continue
+            if c0 > cursor:
+                gaps.append((cursor, c0))
+            cursor = max(cursor, c1)
+        if cursor < end:
+            gaps.append((cursor, end))
+    merged: list[tuple[int, int]] = []
+    for g in sorted(gaps):
+        if merged and g[0] <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], g[1]))
+        else:
+            merged.append(g)
+    return merged
+
+
+MIN_MATCH = 2.0  # roughly one distinctive shared word
+
+
+def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: float | None, lanes: _Lanes) -> None:
+    """Cover narration the plan left without picture, so no frame is black.
+
+    Shots are chosen by matching what's being said to clip names and visual
+    descriptions (rare words count most), then by least used.
+    """
+    gaps = _gaps_without_picture(tl, analysis)
+    if not gaps:
+        return
+    pool = [c for c in analysis.clips if c.media.has_video and c.role in ("broll", "still") and not c.hidden]
+    if not pool:
+        tl.warnings.append("Narration has no picture and there are no B-roll clips or stills to fill it with.")
+        return
+    fd = tl.frame_duration
+    shot = max(1, tc.round_frames(Fraction(style.fill_shot).limit_denominator(1000), fd))
+    tiny = tc.round_frames(Fraction(1, 2), fd)
+    order = {c.id: i for i, c in enumerate(analysis.clips)}
+
+    docs = {c.id: _clip_tokens(c) for c in pool}
+    df: dict[str, int] = {}
+    for toks in docs.values():
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+    idf = {t: math.log((1 + len(pool)) / (1 + n)) + 1 for t, n in df.items()}
+
+    uses = {c.id: 0 for c in analysis.clips}
+    for c in tl.connected:
+        uses[c.clip_id] = uses.get(c.clip_id, 0) + 1
+    video_cursor: dict[str, Fraction] = {}
+    placed_frames = 0
+    placed_shots = 0
+    last_clip = None
+
+    def said_during(f0: int, f1: int) -> tuple[set[str], list[set[str]]]:
+        text = []
+        for seg_id, (s0, s1) in tl.seg_ranges.items():
+            if s1 > f0 - shot and s0 < f1:  # include the line leading in
+                seg = analysis.segment(seg_id)
+                if seg:
+                    text.append(seg.text)
+        joined = " ".join(text)
+        names = _names(joined)
+        # "OC Vibe" should also match files named OCVIBE_...
+        said = _tokens(joined) | {re.sub(r"[^a-z]", "", m.group(0).lower()) for m in _NAME.finditer(joined)}
+        return said, names
+
+    for g0, g1 in gaps:
+        if not pool:
+            break
+        if g1 - g0 < tiny and _extend_shot_before(tl, analysis, g0, g1):
+            placed_frames += g1 - g0
+            continue
+        cursor = g0
+        while cursor < g1 and pool:
+            remaining = g1 - cursor
+            want = remaining if remaining < shot + tiny else shot
+            said, names = said_during(cursor, cursor + want)
+
+            def rank(c: Clip) -> tuple:
+                # Long videos can be revisited (a new part each time); a still
+                # shown again reads as a mistake, so stills wear out fast.
+                wear = uses.get(c.id, 0) * (0.5 if c.media.kind == "video" else 10.0)
+                fit = _match_score(docs[c.id], said, names, idf) / (1 + wear)
+                if fit < MIN_MATCH:
+                    fit = 0.0  # a stray shared word isn't a reason to pick a shot
+                # With nothing to match, moving footage beats a random still.
+                return (fit, c.media.kind == "video", -uses.get(c.id, 0), -order[c.id])
+
+            candidates = [c for c in pool if c.id != last_clip] or pool
+            best = max(candidates, key=rank)
+            m = best.media
             if m.kind == "image":
-                src_in = Fraction(0)
-                frames = want
+                src_in, frames = Fraction(0), want
             else:
                 grid = m.frame_duration or fd
-                dur = m.duration
-                need = want * fd
-                if b.source_in >= 0:
-                    # Back off a late in-point so the cutaway still fills its spot.
-                    src = min(Fraction(b.source_in).limit_denominator(1000000), max(Fraction(0), dur - need))
-                else:
-                    src = min(dur * Fraction(15, 100), max(Fraction(0), dur - need))
-                src = max(Fraction(0), min(src, dur - grid))
-                src_in = tc.floor_frames(src, grid) * grid
-                frames = min(want, tc.floor_frames(dur - src_in, fd))
-            if frames < min(min_frames, want):
-                warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
+                start_at = video_cursor.get(best.id, m.duration * Fraction(1, 10))
+                if start_at + want * fd > m.duration:
+                    start_at = m.duration * Fraction(1, 10)
+                src_in, frames = _video_window(m, want, fd, start_at)
+                video_cursor[best.id] = src_in + frames * fd + 1
+            if frames < 1:
+                pool = [c for c in pool if c is not best]
                 continue
-            lane = 1
-            while any(not (start + frames <= s or start >= e) for s, e in lanes.get(lane, [])):
-                lane += 1
-            lanes.setdefault(lane, []).append((start, start + frames))
             tl.connected.append(
                 ConnectedClip(
-                    clip_id=b.clip_id,
+                    clip_id=best.id,
                     src_in=src_in,
                     frames=frames,
-                    start=start,
-                    lane=lane,
+                    start=cursor,
+                    lane=lanes.free(cursor, cursor + frames),
                     kind="broll",
                     volume_db=volume_db if m.has_audio else None,
-                    note=b.reason,
+                    note="auto-fill",
                 )
             )
+            uses[best.id] = uses.get(best.id, 0) + 1
+            last_clip = best.id
+            cursor += frames
+            placed_frames += frames
+            placed_shots += 1
+    if placed_shots:
+        tl.notes.append(
+            f"Filled {tc.seconds_to_clock(float(placed_frames * fd))} of narration with {placed_shots} B-roll shots "
+            "the plan didn't specify, matched to what's being said by clip names and descriptions."
+        )
 
 
 def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float, warnings: list[str]) -> None:

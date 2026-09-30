@@ -133,6 +133,9 @@ class FakeProvider:
         self.calls: list[dict] = []
         self.usage = UsageLog()
 
+    def verify(self):
+        return self.model
+
     def complete_json(self, system, parts, schema, *, schema_name, purpose, effort=None, max_tokens=64000):
         self.calls.append({"system": system, "parts": parts, "schema_name": schema_name, "purpose": purpose})
         if schema_name == "clip_log":

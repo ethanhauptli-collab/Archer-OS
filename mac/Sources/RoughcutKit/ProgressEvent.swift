@@ -76,10 +76,15 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
     public var ffprobe: String?
     public var transcriber: String?
     public var anthropicKey: Bool
+    /// ok / rejected / missing / unreachable / not checked (nil from older CLIs).
+    public var anthropicKeyStatus: String?
+    /// Why the key didn't work, in words the user can act on.
+    public var anthropicKeyMessage: String?
     public var openaiKey: Bool
     public var openaiInstalled: Bool
 
     public var hasFFmpeg: Bool { ffmpeg != nil && ffprobe != nil }
+    public var anthropicKeyWorks: Bool { anthropicKeyStatus.map { $0 == "ok" || $0 == "not checked" } ?? anthropicKey }
 }
 
 public enum JSONLines {

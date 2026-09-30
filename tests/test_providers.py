@@ -187,3 +187,66 @@ def test_openai_without_a_key_is_a_provider_error(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(ProviderError, match="openai"):
         make_provider("openai", model="some-model")
+
+
+# ------------------------------------------------------------ bad keys
+
+
+@pytest.mark.parametrize(
+    "env,expect",
+    [
+        ({}, "No Claude API key is set"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz"}, "sign-in token, not an API key"),
+        ({"ANTHROPIC_API_KEY": "my-key-1234567890abcdefgh"}, "doesn't look like an Anthropic API key"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"}, "rejected the key sk-ant-api03…wxyz"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-api03-x" * 3, "ANTHROPIC_BASE_URL": "http://localhost:8080"}, "ANTHROPIC_BASE_URL is set"),
+    ],
+)
+def test_key_problem_hints(env, expect):
+    from roughcut.providers.anthropic_provider import key_problem_hint
+
+    assert expect in key_problem_hint(env)
+
+
+def test_verify_turns_401_into_an_auth_error(monkeypatch):
+    from roughcut.providers import ProviderAuthError
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx2.Response(401, json={"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+
+    provider, httpx2 = _anthropic_provider(handler)
+    with pytest.raises(ProviderAuthError, match="rejected the key sk-ant-api03"):
+        provider.verify()
+    assert seen == ["/v1/models/claude-opus-5-5"]
+
+
+def test_verify_ok_and_unknown_model():
+    ok = {"type": "model", "id": "claude-opus-5-5", "display_name": "Claude Opus 5.5", "created_at": "2026-01-01T00:00:00Z"}
+
+    def handler(request):
+        if request.url.path.endswith("claude-opus-5-5"):
+            return httpx2.Response(200, json=ok)
+        return httpx2.Response(404, json={"type": "error", "error": {"type": "not_found_error", "message": "model not found"}})
+
+    provider, httpx2 = _anthropic_provider(handler)
+    assert provider.verify() == "Claude Opus 5.5"
+    provider.model = "claude-nope"
+    with pytest.raises(ProviderError, match="isn't available"):
+        provider.verify()
+
+
+def test_missing_credentials_are_an_auth_error(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    from roughcut.providers import ProviderAuthError
+    from roughcut.providers.anthropic_provider import AnthropicProvider
+
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    provider = AnthropicProvider(client=anthropic.Anthropic(base_url="http://127.0.0.1:9", max_retries=0))
+    with pytest.raises(ProviderAuthError, match="No Claude API key"):
+        provider.verify()

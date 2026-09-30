@@ -190,3 +190,52 @@ def test_telemetry_srt_is_not_a_transcript(tmp_path):
     srt.write_text("\n".join(cues))
     with pytest.raises(TranscriptionError, match="telemetry"):
         load_sidecar(srt)
+
+
+def test_rejected_key_stops_before_analysis(footage, tmp_path, monkeypatch, capsys):
+    """The first real run lost 19 minutes and then silently cut a stringout."""
+    import json
+
+    from roughcut import pipeline
+    from roughcut.cli import main
+    from roughcut.providers import ProviderAuthError
+
+    class RejectedKey(FakeProvider):
+        def verify(self):
+            raise ProviderAuthError("Anthropic rejected the key sk-ant-api03…abcd.")
+
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: RejectedKey())
+    out = tmp_path / "out"
+    code = main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--progress-json"])
+    assert code == 1
+    events = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert events[-1] == {"event": "error", "message": "Anthropic rejected the key sk-ant-api03…abcd."}
+    assert not any(e.get("stage") == "probe" for e in events)  # stopped before any analysis
+    assert not (out / "analysis.json").exists()
+
+
+def test_auth_failure_mid_run_is_fatal_and_stops_vision(footage, tmp_path, monkeypatch):
+    from roughcut import pipeline
+    from roughcut.pipeline import Options
+    from roughcut.providers import ProviderAuthError
+
+    class KeyRevokedMidRun(FakeProvider):
+        def complete_json(self, *a, **k):
+            self.calls.append(k.get("purpose"))
+            raise ProviderAuthError("rejected")
+
+    provider = KeyRevokedMidRun()
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    with pytest.raises(ProviderAuthError):
+        pipeline.build(Options(inputs=[footage], out=tmp_path / "o", transcriber="none", cache_dir=tmp_path / "c", workers=1))
+    assert provider.calls == ["visual log"]  # no further batches, no planning call, no fallback cut
+    assert not list((tmp_path / "o").glob("*.fcpxml"))
+
+
+def test_repeated_warnings_collapse():
+    from roughcut.report import collapse_warnings
+
+    ws = [f"visual log failed for V{i:02d}, I{i:03d}: Anthropic rejected the key." for i in range(1, 47)] + ["something else"]
+    out = collapse_warnings(ws)
+    assert len(out) == 2
+    assert "(x46: V01, I001" in out[0] and "and 84 more" in out[0]

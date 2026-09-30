@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .analyze import Analysis, Cache, Clip, log
 from .prompts import VISION_SCHEMA, VISION_SYSTEM
-from .providers import ImagePart, Provider, ProviderError, TextPart
+from .providers import ImagePart, Provider, ProviderAuthError, ProviderError, TextPart
 
 
 def sample_times(clip: Clip) -> list[float]:
@@ -65,7 +66,11 @@ def describe_clips(
     batches = [todo[i : i + batch_size] for i in range(0, len(todo), batch_size)]
     log(f"describing {len(todo)} clips visually in {len(batches)} request(s)")
 
+    stop = threading.Event()  # a rejected key fails every batch; stop after the first
+
     def run(batch: list[Clip]) -> list[str]:
+        if stop.is_set():
+            return []
         parts = []
         for clip in batch:
             parts.append(TextPart(f'Clip {clip.id} "{clip.media.name}" ({clip.media.kind}, {clip.duration:.0f}s):'))
@@ -76,6 +81,9 @@ def describe_clips(
             result = provider.complete_json(
                 VISION_SYSTEM, parts, VISION_SCHEMA, schema_name="clip_log", purpose="visual log", effort=effort, max_tokens=16000
             )
+        except ProviderAuthError:
+            stop.set()
+            raise
         except ProviderError as e:
             return [f"visual log failed for {', '.join(c.id for c in batch)}: {e}"]
         by_id = {str(r.get("id", "")).upper(): r for r in result.get("clips", []) if isinstance(r, dict)}

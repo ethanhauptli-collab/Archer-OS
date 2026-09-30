@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from .base import ImagePart, Part, Provider, ProviderError, TextPart, Usage, UsageLog, extract_json
+from .base import ImagePart, Part, Provider, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog, extract_json
 
 PROVIDERS = ("anthropic", "openai", "ollama", "openai-compatible", "none")
 
@@ -75,6 +75,7 @@ __all__ = [
     "ImagePart",
     "Part",
     "Provider",
+    "ProviderAuthError",
     "ProviderError",
     "TextPart",
     "Usage",

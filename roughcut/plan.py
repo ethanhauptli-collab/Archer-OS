@@ -35,7 +35,10 @@ PLAN_SCHEMA: dict = {
                     },
                     "broll": {
                         "type": "array",
-                        "description": "Cutaways layered over this section's spoken segments.",
+                        "description": (
+                            "Cutaways layered over this section's spoken segments, in order. Consecutive entries with the "
+                            "same 'over' play one after another and share that time."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
@@ -337,7 +340,8 @@ def heuristic_plan(analysis: Analysis, *, title: str = "Stringout") -> Plan:
     This is also the "stringout" project: all dialogue with dead air removed.
     """
     plan = Plan(title=title, logline="All spoken material in recording order with dead air removed.", source="heuristic")
-    talking = [c for c in analysis.clips if c.role in ("aroll", "voiceover") and c.segments]
+    # One version of each export and one take of the narration.
+    talking = [c for c in analysis.clips if c.role in ("aroll", "voiceover") and c.segments and not c.hidden and not c.take_of]
     for clip in talking:
         plan.sections.append(
             Section(
@@ -346,7 +350,7 @@ def heuristic_plan(analysis: Analysis, *, title: str = "Stringout") -> Plan:
             )
         )
     if not talking:
-        visuals = [c for c in analysis.clips if c.role in ("broll", "still")]
+        visuals = [c for c in analysis.clips if c.role in ("broll", "still") and not c.hidden]
         items = []
         for clip in visuals:
             if clip.role == "still":

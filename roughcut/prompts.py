@@ -23,7 +23,10 @@ segment IDs. Never write timestamps for speech: the software computes frame-accu
 pauses inside sentences and removes "um"/"uh" on its own.
 - To put a visual moment on the main storyline (establishing shot, reaction, montage beat, photo, \
 graphic), write a range item "CLIPID@start-end" in seconds from the start of that clip, e.g. \
-"V07@12.5-16". For stills, "I02@0-4" means four seconds on screen.
+"V07@12.5-16". For stills, "I02@0-4" means four seconds on screen. Use these as short breathers \
+(2-5 seconds) that belong to the story around them, not as jumps to unrelated footage.
+- Clips marked as another take or version of the narration script are alternatives: choose one \
+read per line. Footage exported more than once is listed once.
 
 What a good first cut does
 1. Story first. Open on the strongest hook available: a compelling line or moment, not a greeting \
@@ -39,9 +42,18 @@ without its setup.
 5. Length: if a target is given, hit it within about 10%. Each segment's duration is shown; the \
 cut is roughly the sum of selected segments and ranges (slightly shorter after pause trimming).
 6. B-roll: cover jump cuts and illustrate what is being said. Each cutaway sits "over" one or more \
-consecutive segments of the same section. Choose clips by their visual descriptions and file \
-names. Prefer variety; don't stack the same shot in back-to-back spots. source_in is where to \
-start inside the B-roll clip in seconds, or -1 to let the software pick a good spot.
+consecutive segments of the same section. Several cutaways with the same "over" play one after \
+another and share that time, so a 20-second line can get four 5-second shots. Hold shots about \
+3-6 seconds (stills 3-5). Choose clips by their visual descriptions and file names, matching \
+what the line is about: when the narration names a place, project or person, show that. Prefer \
+variety; don't repeat a shot. source_in is where to start inside the B-roll clip in seconds, or \
+-1 to let the software pick a good spot.
+6b. Narration (Voiceover clips) has no picture of its own. When the piece is carried by \
+narration, use one read of it as the backbone, bring in interview soundbites where they back up \
+what was just said, and cover every narrated segment with B-roll or stills from start to end. \
+Keep each interview soundbite to a complete thought; don't hop between interviewees mid-idea. \
+Any narration you leave uncovered is filled automatically with the closest-matching clips, which \
+is a fallback, not a substitute for your choices.
 7. Music: only when audio clips classified as Music exist and the brief doesn't rule it out. Give \
 the 0-based section range it should run under.
 8. Flags: when unsure (a cut line that might matter, a coin-flip between takes, a missing shot you \
@@ -85,7 +97,7 @@ VISION_SCHEMA: dict = {
 }
 
 
-def _clip_header(clip: Clip) -> str:
+def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     m = clip.media
     bits = [f'{clip.id} "{m.name}"', m.kind]
     if m.kind != "image":
@@ -100,11 +112,21 @@ def _clip_header(clip: Clip) -> str:
     bits.append(f"role {ROLE_LABELS.get(clip.role, clip.role)}")
     if clip.has_transcript:
         bits.append(f"{seconds_to_clock(clip.speech_seconds)} of speech")
+    if analysis is not None:
+        copies = [c for c in analysis.clips if c.duplicate_of == clip.id]
+        if copies:
+            bits.append("also exported as " + ", ".join(c.id for c in copies) + " (hidden; use this one)")
+    if clip.take_of:
+        kind = "another take" if clip.same_words >= 0.9 else "a different version"
+        bits.append(
+            f"{kind} of the narration script in {clip.take_of} ({clip.same_words:.0%} same words): "
+            "pick the better read for each line and never use the same line twice"
+        )
     return ", ".join(bits)
 
 
 def render_media(analysis: Analysis) -> str:
-    clips = analysis.clips
+    clips = [c for c in analysis.clips if not c.hidden]
     total = sum(float(c.media.duration) for c in clips)
     speech = sum(c.speech_seconds for c in clips if c.has_transcript)
     counts = {}
@@ -116,7 +138,7 @@ def render_media(analysis: Analysis) -> str:
         "",
     ]
     for clip in clips:
-        lines.append("## " + _clip_header(clip))
+        lines.append("## " + _clip_header(clip, analysis))
         if clip.visual:
             v = clip.visual
             tags = ", ".join(v.get("tags", []))

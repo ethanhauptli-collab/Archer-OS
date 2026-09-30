@@ -70,6 +70,13 @@ class Clip:
     segments: list[Segment] = field(default_factory=list)
     visual: dict | None = None
     frames: list[str] = field(default_factory=list)
+    duplicate_of: str | None = None  # same footage exported again: hidden
+    take_of: str | None = None  # another read of the same narration script
+    same_words: float = 0.0  # word overlap with take_of
+
+    @property
+    def hidden(self) -> bool:
+        return self.duplicate_of is not None
 
     @property
     def duration(self) -> float:
@@ -93,6 +100,9 @@ class Clip:
             "segments": [s.to_json() for s in self.segments],
             "visual": self.visual,
             "frames": self.frames,
+            "duplicate_of": self.duplicate_of,
+            "take_of": self.take_of,
+            "same_words": self.same_words,
         }
 
     @classmethod
@@ -106,6 +116,9 @@ class Clip:
             segments=[Segment.from_json(s) for s in d.get("segments", [])],
             visual=d.get("visual"),
             frames=d.get("frames", []),
+            duplicate_of=d.get("duplicate_of"),
+            take_of=d.get("take_of"),
+            same_words=d.get("same_words", 0.0),
         )
 
 
@@ -114,6 +127,7 @@ class Analysis:
     clips: list[Clip]
     created: str = ""
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def clip(self, clip_id: str) -> Clip | None:
         return next((c for c in self.clips if c.id == clip_id), None)
@@ -125,11 +139,16 @@ class Analysis:
         return next((s for s in clip.segments if s.id == seg_id), None)
 
     def to_json(self) -> dict:
-        return {"created": self.created, "warnings": self.warnings, "clips": [c.to_json() for c in self.clips]}
+        return {"created": self.created, "warnings": self.warnings, "notes": self.notes, "clips": [c.to_json() for c in self.clips]}
 
     @classmethod
     def from_json(cls, d: dict) -> "Analysis":
-        return cls(clips=[Clip.from_json(c) for c in d["clips"]], created=d.get("created", ""), warnings=d.get("warnings", []))
+        return cls(
+            clips=[Clip.from_json(c) for c in d["clips"]],
+            created=d.get("created", ""),
+            warnings=d.get("warnings", []),
+            notes=d.get("notes", []),
+        )
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(self.to_json(), indent=1))
@@ -192,6 +211,7 @@ def analyze(
     transcript_dirs: list[Path] | None = None,
     workers: int = 4,
     noise_db: float = -35.0,
+    prefer_vertical: bool = False,
 ) -> Analysis:
     t0 = time.monotonic()
     warnings: list[str] = []
@@ -281,4 +301,9 @@ def analyze(
     for clip in clips:
         clip.role = classify(clip)
 
-    return Analysis(clips=clips, created=datetime.now(timezone.utc).isoformat(timespec="seconds"), warnings=warnings)
+    from .duplicates import mark_duplicates
+
+    notes = mark_duplicates(clips, cache, prefer_vertical=prefer_vertical)
+    for note in notes:
+        log(note)
+    return Analysis(clips=clips, created=datetime.now(timezone.utc).isoformat(timespec="seconds"), warnings=warnings, notes=notes)

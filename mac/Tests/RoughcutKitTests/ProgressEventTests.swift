@@ -56,6 +56,12 @@ final class ProgressEventTests: XCTestCase {
         let report = try XCTUnwrap(JSONLines.doctor(from: line))
         XCTAssertEqual(report.transcriber, "mlx")
         XCTAssertTrue(report.anthropicKey)
+        XCTAssertTrue(report.anthropicKeyWorks)  // older CLI: no status, fall back to "set"
         XCTAssertFalse(report.hasFFmpeg)  // ffprobe missing
+
+        let rejected = #"{"version": "0.1.0", "python": "3.12.4", "executable": "/x", "ffmpeg": null, "ffprobe": null, "transcriber": null, "anthropic_key": true, "anthropic_key_status": "rejected", "anthropic_key_message": "Anthropic rejected the key.", "openai_key": false, "openai_installed": false}"#
+        let bad = try XCTUnwrap(JSONLines.doctor(from: rejected))
+        XCTAssertFalse(bad.anthropicKeyWorks)
+        XCTAssertEqual(bad.anthropicKeyMessage, "Anthropic rejected the key.")
     }
 }

@@ -314,8 +314,12 @@ final class AppModel {
         if doctor.transcriber == nil {
             issues.append("No transcriber installed. In the repo: pip install -e '.[mac]'")
         }
-        if options.provider == .anthropic && !doctor.anthropicKey {
-            issues.append("Add your Claude API key in Settings.")
+        if options.provider == .anthropic && !doctor.anthropicKeyWorks {
+            if let message = doctor.anthropicKeyMessage, !message.isEmpty {
+                issues.append(message)
+            } else {
+                issues.append("Add your Claude API key in Settings.")
+            }
         }
         if (options.provider == .openai || options.provider == .openaiCompatible) && !doctor.openaiInstalled {
             issues.append("OpenAI support isn't installed. In the repo: pip install -e '.[openai]'")

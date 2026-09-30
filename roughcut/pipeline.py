@@ -15,7 +15,7 @@ from .fcpxml import build_fcpxml
 from .media import require_tools, scan
 from .plan import PLAN_SCHEMA, Plan, heuristic_plan, normalize
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
-from .providers import Provider, ProviderError, TextPart, make_provider
+from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
 from .report import build_report
 from .timeline import STYLES, Style, Timeline, build_timeline
 from .transcribe import Transcriber, resolve_backend
@@ -47,6 +47,7 @@ class Options:
     broll_db: float | None = -20.0
     music_db: float = -14.0
     stringout: bool = True
+    fill: bool = True  # cover narration the plan left without picture
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -117,7 +118,15 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
         transcriber = Transcriber(backend, opts.whisper_model, opts.language, opts.verbatim)
         log(f"transcriber: {backend} ({transcriber.model})")
     cache = Cache(opts.cache_dir or default_cache_dir())
-    return analyze(files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers)
+    prefer_vertical = False
+    if opts.format:
+        from .timeline import parse_format
+
+        w, h, _ = parse_format(opts.format)
+        prefer_vertical = h > w
+    return analyze(
+        files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical
+    )
 
 
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
@@ -125,19 +134,32 @@ def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tu
         TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True),
         TextPart(render_brief(opts.context, opts.target_seconds, opts.script)),
     ]
-    raw = provider.complete_json(PLANNER_SYSTEM, parts, PLAN_SCHEMA, schema_name="edit_plan", purpose="edit plan", effort=opts.effort)
+    # Thinking counts against max_tokens; a long narration plan needs the room.
+    raw = provider.complete_json(
+        PLANNER_SYSTEM, parts, PLAN_SCHEMA, schema_name="edit_plan", purpose="edit plan", effort=opts.effort, max_tokens=128000
+    )
     return normalize(raw, analysis, source=f"{provider.name}:{provider.model}"), raw
 
 
 def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> tuple[Timeline, Timeline | None]:
     progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
-    rough = build_timeline(plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db)
+    rough = build_timeline(
+        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill
+    )
     stringout = None
     if opts.stringout:
         s_plan = heuristic_plan(analysis)
         if s_plan.sections:
-            stringout = build_timeline(s_plan, analysis, style=style, name=f"{name} - Stringout", format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}")
+            stringout = build_timeline(
+                s_plan,
+                analysis,
+                style=style,
+                name=f"{name} - Stringout",
+                format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}",
+                broll_db=opts.broll_db,
+                fill=opts.fill,
+            )
     return rough, stringout
 
 
@@ -160,12 +182,18 @@ def build(opts: Options) -> Result:
     out_dir = (opts.out or default_out_dir(opts.inputs)).expanduser().resolve()
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
 
+    # Check the key before spending minutes on transcription: a rejected key
+    # is fatal, never a silent fallback to the stringout.
+    provider = make_provider(opts.provider, model=opts.model, base_url=opts.base_url, api_key_env=opts.api_key_env, effort=opts.effort)
+    if provider is not None:
+        log(f"checking {provider.name} access ({provider.model})")
+        provider.verify()
+
     analysis = run_analysis(opts, out_dir)
     timings["analysis"] = time.monotonic() - t_start
     out_dir.mkdir(parents=True, exist_ok=True)
     analysis.save(out_dir / "analysis.json")
 
-    provider = make_provider(opts.provider, model=opts.model, base_url=opts.base_url, api_key_env=opts.api_key_env, effort=opts.effort)
     usage = []
     extra_warnings: list[str] = []
     if provider is not None:
@@ -177,6 +205,7 @@ def build(opts: Options) -> Result:
             vision_provider = provider
             if opts.vision_model and opts.vision_model != provider.model:
                 vision_provider = make_provider(opts.provider, model=opts.vision_model, base_url=opts.base_url, api_key_env=opts.api_key_env, vision=True)
+                vision_provider.verify()
                 usage.append(vision_provider.usage)
             t = time.monotonic()
             cache = Cache(opts.cache_dir or default_cache_dir())
@@ -198,6 +227,8 @@ def build(opts: Options) -> Result:
         log(f"planning the edit with {provider.name}:{provider.model}")
         try:
             plan, raw_plan = plan_with_model(provider, analysis, opts)
+        except ProviderAuthError:
+            raise
         except ProviderError as e:
             log(f"AI planning failed: {e}")
             extra_warnings.append(f"AI planning failed, so this cut is the stringout only: {e}")

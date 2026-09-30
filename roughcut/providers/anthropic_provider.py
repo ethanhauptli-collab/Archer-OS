@@ -4,12 +4,45 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
 
-from .base import ImagePart, Part, ProviderError, TextPart, Usage, UsageLog
+from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def _mask(key: str) -> str:
+    return f"{key[:12]}…{key[-4:]}" if len(key) > 20 else "(too short)"
+
+
+def key_problem_hint(env: dict | None = None) -> str:
+    """Explain the most likely reason Anthropic rejected (or never got) a key."""
+    env = os.environ if env is None else env
+    key = env.get("ANTHROPIC_API_KEY", "").strip()
+    token = env.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    base = env.get("ANTHROPIC_BASE_URL", "").strip()
+    where = "In the Mac app: Settings → API Keys. In Terminal: export ANTHROPIC_API_KEY=… in ~/.zshrc."
+    if base and "api.anthropic.com" not in base:
+        return (
+            f"ANTHROPIC_BASE_URL is set to {base}, so requests aren't going to Anthropic's API. "
+            "Unset it (unset ANTHROPIC_BASE_URL) unless you meant to use a proxy."
+        )
+    if not key and not token:
+        return f"No Claude API key is set. Create one at console.anthropic.com → API Keys. {where}"
+    shown = key or token
+    if shown.startswith("sk-ant-oat"):
+        return (
+            f"The key ({_mask(shown)}) is a Claude.ai / Claude Code sign-in token, not an API key. "
+            f"Roughcut needs an API key from console.anthropic.com (API usage is billed separately from a Claude subscription). {where}"
+        )
+    if key and not key.startswith("sk-ant-"):
+        return f"ANTHROPIC_API_KEY ({_mask(key)}) doesn't look like an Anthropic API key; those start with sk-ant-api. {where}"
+    return (
+        f"Anthropic rejected the key {_mask(shown)}. It may be mistyped, revoked, or in a workspace without "
+        f"API credit. Check it at console.anthropic.com → API Keys. {where}"
+    )
 
 
 class AnthropicProvider:
@@ -24,9 +57,28 @@ class AnthropicProvider:
         self._anthropic = anthropic
         self.model = model or DEFAULT_MODEL
         self.effort = effort
-        self.client = client or anthropic.Anthropic()
+        self.client = client or anthropic.Anthropic(max_retries=3)
         self.use_fallbacks = use_fallbacks
         self.usage = UsageLog()
+
+    def verify(self) -> str:
+        """One free request (no tokens): is the key accepted and the model available?"""
+        anthropic = self._anthropic
+        try:
+            info = self.client.models.retrieve(self.model)
+        except TypeError as e:  # the SDK found no credentials at all
+            if "authentication" not in str(e).lower():
+                raise
+            raise ProviderAuthError(key_problem_hint()) from e
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+            raise ProviderAuthError(key_problem_hint()) from e
+        except anthropic.NotFoundError as e:
+            raise ProviderError(f"Model {self.model!r} isn't available to this API key. Try --model claude-opus-5-5.") from e
+        except anthropic.APIConnectionError as e:
+            raise ProviderError(f"Couldn't reach the Anthropic API ({e}). Check your internet connection.") from e
+        except anthropic.APIStatusError as e:
+            raise ProviderError(f"Anthropic API error {e.status_code} while checking the key: {e}") from e
+        return getattr(info, "display_name", None) or self.model
 
     def _content(self, parts: list[Part]) -> list[dict]:
         blocks: list[dict] = []
@@ -82,8 +134,12 @@ class AnthropicProvider:
         try:
             with self.client.beta.messages.stream(**params) as stream:
                 message = stream.get_final_message()
-        except anthropic.AuthenticationError as e:
-            raise ProviderError("Anthropic rejected the API key. Set ANTHROPIC_API_KEY (or run `ant auth login`).") from e
+        except TypeError as e:  # the SDK found no credentials at all
+            if "authentication" not in str(e).lower():
+                raise
+            raise ProviderAuthError(key_problem_hint()) from e
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+            raise ProviderAuthError(key_problem_hint()) from e
         except anthropic.BadRequestError as e:
             if self.use_fallbacks and "fallback" in str(e).lower():
                 self.use_fallbacks = False

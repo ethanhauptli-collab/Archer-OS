@@ -38,7 +38,9 @@ roughcut build ~/Movies/Talk --provider none
 roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
 ```
 
-`roughcut doctor` checks that ffmpeg, transcription and your API key are set up.
+`roughcut doctor` checks that ffmpeg and transcription are installed, and tests your API key against Anthropic.
+
+**About the key:** it has to be an API key from [console.anthropic.com](https://console.anthropic.com) → API Keys (starts with `sk-ant-api`). A Claude Pro/Max subscription or Claude Code sign-in doesn't give API access. If the key is missing or rejected, `roughcut build` stops right away and says why.
 
 Then in Final Cut Pro choose **File → Import → XML…** and pick the `.fcpxml` in the output folder (by default `<footage folder>_roughcut/`, next to your footage).
 
@@ -72,6 +74,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--language` | detect | e.g. `en` |
 | `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
 | `--broll-db`, `--music-db` | -20, -14 | Levels for B-roll nat sound and music |
+| `--no-fill` | | Don't auto-cover narration the plan left without picture |
 
 ### Other models
 
@@ -97,12 +100,14 @@ A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.v
 1. **Analyze** (cached, so re-runs are fast): `ffprobe` reads rate, size, rotation and timecode; `ffmpeg silencedetect` maps silence; Whisper transcribes with word timestamps. Words over silence are dropped as hallucinations. Words are grouped into sentence segments with IDs like `V03.S012`, and clips are classified as A-roll, B-roll, voiceover, music or stills.
 2. **Look** (optional): three frames per B-roll clip go to a vision model, which writes a description and keywords.
 3. **Plan**: the model gets the transcripts, clip descriptions and your brief. It returns a structured plan that picks segments by ID; it never writes timestamps. The transcript block is prompt-cached, so re-planning with a new brief is cheaper.
-4. **Cut**: deterministic code turns the plan into frame-accurate edits: it trims pauses, cuts fillers, pads each cut, snaps to the source frame grid, places B-roll and music on lanes, and adds markers. Invalid IDs from the model are dropped with a warning, never passed through.
+4. **Cut**: deterministic code turns the plan into frame-accurate edits: it trims pauses, cuts fillers, pads each cut, snaps to the source frame grid, places B-roll and music on lanes, and adds markers. Invalid IDs from the model are dropped with a warning, never passed through. Narration never plays over black: anything the plan left uncovered is filled with the stills and B-roll whose names and descriptions best match what's being said.
+
+Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip saved twice) is detected and used once. Several reads of the same narration script are offered to the planner as takes of each line.
 5. **Write**: FCPXML 1.10 (Final Cut Pro 10.6 and later), checked in tests against Apple's DTD.
 
 ## Development
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 93 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 116 tests; generates synthetic footage with ffmpeg, no API key needed
 ```
