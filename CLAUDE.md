@@ -20,6 +20,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/fcpxml.py` | `Timeline` → FCPXML 1.10 |
 | `roughcut/pipeline.py`, `cli.py` | `roughcut build` / `render` / `doctor` |
 | `roughcut/progress.py` | `--progress-json` JSON-lines events for the Mac app |
+| `roughcut/keys.py` | API keys: environment first, then the macOS Keychain entry shared with the app (service `com.roughcut.app`, account = env var name); `roughcut key set/status/remove` |
 | `mac/` | SwiftUI app (see `mac/README.md`): `RoughcutKit` (Foundation-only: options→args, event decoding, process runner) + `Roughcut` (views, `AppModel`, Keychain) |
 
 ## Invariants: don't break these
@@ -60,7 +61,7 @@ The Mac app (`mac/`) was written in that cloud session with **no Swift toolchain
 
 ### CLI verification (cloud)
 
-Verified there: 121 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
+Verified there: 131 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
 Not verifiable in the cloud: a live Claude call, real mlx-whisper transcription (Hugging Face was blocked), and importing into Final Cut Pro. Those depend on runs on the Mac; record the results here.
 
 ### First run on the Mac: checklist

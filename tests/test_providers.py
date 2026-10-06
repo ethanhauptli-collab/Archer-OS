@@ -94,7 +94,7 @@ def test_anthropic_auth_error_is_friendly():
         return httpx2.Response(401, json={"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
 
     provider, httpx2 = _anthropic_provider(handler)
-    with pytest.raises(ProviderError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(ProviderError, match="roughcut key set"):
         provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="edit plan")
 
 

@@ -25,7 +25,7 @@ def key_problem_hint(env: dict | None = None) -> str:
     key = env.get("ANTHROPIC_API_KEY", "").strip()
     token = env.get("ANTHROPIC_AUTH_TOKEN", "").strip()
     base = env.get("ANTHROPIC_BASE_URL", "").strip()
-    where = "In the Mac app: Settings → API Keys. In Terminal: export ANTHROPIC_API_KEY=… in ~/.zshrc."
+    where = "To save one, run `roughcut key set` in Terminal (or use Settings → API Keys in the Mac app); both share it."
     if base and "api.anthropic.com" not in base:
         return (
             f"ANTHROPIC_BASE_URL is set to {base}, so requests aren't going to Anthropic's API. "

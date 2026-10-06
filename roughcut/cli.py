@@ -72,7 +72,73 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
     d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic")
+
+    k = sub.add_parser("key", help="save, check or remove your API key (stored in the macOS Keychain, shared with the Mac app)")
+    k.add_argument("action", choices=["set", "status", "remove"])
+    k.add_argument("--openai", action="store_true", help="the OpenAI / compatible-server key instead of Claude's")
     return parser
+
+
+def _key_command(action: str, openai: bool) -> int:
+    import getpass
+
+    from . import keys
+    from .providers.anthropic_provider import _mask, key_problem_hint
+
+    account = "OPENAI_API_KEY" if openai else "ANTHROPIC_API_KEY"
+    label = "OpenAI" if openai else "Claude (Anthropic)"
+    if action == "status":
+        source = keys.source_of(account)
+        if source is None:
+            print(f"No {label} key found. Save one with: roughcut key set" + (" --openai" if openai else ""))
+            return 1
+        value = os.environ.get(account, "").strip() if source == "environment" else keys.keychain_get(account) or ""
+        print(f"{label} key {_mask(value)} from the {source}" + (" (exported in your shell; this wins over the Keychain)" if source == "environment" else ""))
+        if not openai:
+            os.environ[account] = value
+            status, message = check_anthropic_key()
+            print("Anthropic accepted it." if status == "ok" else message)
+            return 0 if status == "ok" else 1
+        return 0
+    if action == "remove":
+        removed = keys.keychain_delete(account)
+        print(f"Removed the {label} key from the Keychain." if removed else f"No {label} key in the Keychain.")
+        if os.environ.get(account, "").strip():
+            print(f"{account} is still exported in this shell (probably ~/.zshrc); delete that line too if it's old.")
+        return 0
+
+    # set
+    exported = os.environ.get(account, "").strip()
+    if not keys.keychain_available():
+        print(f"The macOS Keychain isn't available here. Add this to your shell profile instead:\n  export {account}=your-key")
+        return 1
+    value = getpass.getpass(f"Paste your {label} API key (it won't show as you paste), then press Return: ").strip()
+    if not value:
+        print("Nothing entered; no changes made.")
+        return 1
+    if not openai:
+        if not value.startswith("sk-ant-api"):
+            print(key_problem_hint({"ANTHROPIC_API_KEY": value}))
+            return 1
+        os.environ[account] = value
+        status, message = check_anthropic_key()
+        if status == "rejected":
+            print(message + "\nNot saved.")
+            return 1
+        if status != "ok":
+            print(f"Couldn't check the key right now ({message}). Saving it anyway.")
+    try:
+        keys.keychain_set(account, value)
+    except keys.KeychainError as e:
+        print(e)
+        return 1
+    print(f"Saved {_mask(value)} to your Keychain. Terminal runs and the Roughcut app both use it now.")
+    if exported and exported != value:
+        print(f"Note: a different {account} is exported in this shell and takes priority. Remove it from ~/.zshrc, then open a new Terminal window.")
+    return 0
+
+
+KEY_SOURCES: dict[str, str] = {}  # filled from keys.load_into_environ() at startup
 
 
 def check_anthropic_key(offline: bool = False) -> tuple[str, str]:
@@ -111,6 +177,7 @@ def doctor_report(offline: bool = False) -> dict:
         "anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
         "anthropic_key_status": key_status,
         "anthropic_key_message": key_message,
+        "anthropic_key_source": KEY_SOURCES.get("ANTHROPIC_API_KEY"),
         "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
         "openai_installed": importlib.util.find_spec("openai") is not None,
     }
@@ -120,7 +187,12 @@ def _print_doctor(r: dict) -> int:
     rows = [
         ("ffmpeg", r["ffmpeg"] and r["ffprobe"], r["ffmpeg"] or "missing: brew install ffmpeg"),
         ("transcriber", r["transcriber"], r["transcriber"] or "missing: pip install -e '.[mac]'"),
-        ("Claude API key", r["anthropic_key_status"] == "ok", {"ok": "accepted by Anthropic", "not checked": "set (not tested)"}.get(r["anthropic_key_status"], r["anthropic_key_message"])),
+        (
+            "Claude API key",
+            r["anthropic_key_status"] == "ok",
+            {"ok": "accepted by Anthropic", "not checked": "set (not tested)"}.get(r["anthropic_key_status"], r["anthropic_key_message"])
+            + (f" (from the {r['anthropic_key_source']})" if r.get("anthropic_key_source") and r["anthropic_key_status"] in ("ok", "not checked") else ""),
+        ),
         ("OpenAI", r["openai_key"] and r["openai_installed"], "ready" if r["openai_key"] and r["openai_installed"] else "optional, not set up"),
     ]
     print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
@@ -131,6 +203,14 @@ def _print_doctor(r: dict) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "key":
+        # Works on the real environment: what the shell exports vs the Keychain.
+        return _key_command(args.action, args.openai)
+    # Keys saved by `roughcut key set` or the Mac app live in the Keychain.
+    from . import keys
+
+    KEY_SOURCES.clear()
+    KEY_SOURCES.update(keys.load_into_environ())
     if args.command == "doctor":
         report = doctor_report(offline=args.offline)
         if args.json:

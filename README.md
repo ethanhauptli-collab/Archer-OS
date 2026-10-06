@@ -13,7 +13,7 @@ brew install ffmpeg python@3.12
 git clone https://github.com/ethanhauptli-collab/Archer-OS.git && cd Archer-OS
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e '.[mac,dev]'          # mlx-whisper for fast on-device transcription
-export ANTHROPIC_API_KEY=sk-ant-...  # add to ~/.zshrc to keep it
+roughcut key set                     # paste your Claude API key; saved in the macOS Keychain
 ```
 
 The first transcription downloads the Whisper model (`whisper-large-v3-turbo`, about 1.6 GB) once.
@@ -41,6 +41,8 @@ roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
 `roughcut doctor` checks that ffmpeg and transcription are installed, and tests your API key against Anthropic.
 
 **About the key:** it has to be an API key from [console.anthropic.com](https://console.anthropic.com) → API Keys (starts with `sk-ant-api`). A Claude Pro/Max subscription or Claude Code sign-in doesn't give API access. If the key is missing or rejected, `roughcut build` stops right away and says why.
+
+`roughcut key set` checks the key with Anthropic and stores it in your login Keychain, shared with the Mac app (Settings → API Keys writes the same entry). `roughcut key status` shows where the key comes from, and `roughcut key remove` deletes it. An `ANTHROPIC_API_KEY` exported in your shell still works and takes priority. The first time Terminal reads a key the app saved (or the other way round), macOS asks for permission; click **Always Allow**.
 
 Then in Final Cut Pro choose **File → Import → XML…** and pick the `.fcpxml` in the output folder (by default `<footage folder>_roughcut/`, next to your footage).
 
@@ -109,5 +111,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 121 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 131 tests; generates synthetic footage with ffmpeg, no API key needed
 ```
