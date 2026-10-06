@@ -13,8 +13,11 @@ brew install ffmpeg python@3.12
 git clone https://github.com/ethanhauptli-collab/Archer-OS.git && cd Archer-OS
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e '.[mac,dev]'          # mlx-whisper for fast on-device transcription
+ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut   # `roughcut` in every Terminal window
 roughcut key set                     # paste your Claude API key; saved in the macOS Keychain
 ```
+
+The link means you don't have to `source .venv/bin/activate` in each new window. To update later: `cd ~/Archer-OS && git pull`.
 
 The first transcription downloads the Whisper model (`whisper-large-v3-turbo`, about 1.6 GB) once.
 
