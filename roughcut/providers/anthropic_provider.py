@@ -10,6 +10,8 @@ import time
 from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
+# Short names accepted for --model / --vision-model.
+MODEL_ALIASES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
@@ -55,7 +57,7 @@ class AnthropicProvider:
         except ImportError as e:  # pragma: no cover - it's a hard dependency
             raise ProviderError("the anthropic package is not installed: pip install anthropic") from e
         self._anthropic = anthropic
-        self.model = model or DEFAULT_MODEL
+        self.model = MODEL_ALIASES.get((model or "").strip().lower(), model) if model else DEFAULT_MODEL
         self.effort = effort
         self.client = client or anthropic.Anthropic(max_retries=3)
         self.use_fallbacks = use_fallbacks
@@ -115,7 +117,7 @@ class AnthropicProvider:
         anthropic = self._anthropic
         output_config: dict = {"format": {"type": "json_schema", "schema": schema}}
         effort = effort or self.effort
-        if effort:
+        if effort and not self.model.startswith("claude-haiku"):  # Haiku 4.5 rejects effort
             output_config["effort"] = effort
         params = dict(
             model=self.model,

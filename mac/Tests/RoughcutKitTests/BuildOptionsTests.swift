@@ -68,6 +68,20 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertTrue(args.contains("--name=Trip, Day 1"))
     }
 
+    func testSonnetForPlanningAndDescribing() {
+        var o = options()
+        o.model = "claude-sonnet-5-5"
+        o.visionModel = "claude-sonnet-5-5"
+        let args = o.arguments()
+        XCTAssertTrue(args.contains("--model=claude-sonnet-5-5"))
+        XCTAssertTrue(args.contains("--vision-model=claude-sonnet-5-5"))
+        o.vision = false
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--vision-model") })
+        // The default Opus choice sends no --model, so the CLI default applies.
+        XCTAssertEqual(ClaudeModelChoice.planners.first?.id, "")
+        XCTAssertFalse(options().arguments().contains { $0.hasPrefix("--model") })
+    }
+
     func testTargetIsSentAsSeconds() {
         var o = options()
         o.targetLength = "8 min"

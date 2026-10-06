@@ -81,6 +81,23 @@ public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable
     }
 }
 
+/// Claude models offered in the app's menus. An empty id means the CLI default (Opus).
+public struct ClaudeModelChoice: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let title: String
+
+    public static let planners: [ClaudeModelChoice] = [
+        ClaudeModelChoice(id: "", title: "Claude Opus 5.5 (best judgment)"),
+        ClaudeModelChoice(id: "claude-sonnet-5-5", title: "Claude Sonnet 5.5 (faster, half the price)"),
+    ]
+
+    /// For describing clips; most of a big shoot's tokens are spent here.
+    public static let describers: [ClaudeModelChoice] = [
+        ClaudeModelChoice(id: "", title: "Same as above"),
+        ClaudeModelChoice(id: "claude-sonnet-5-5", title: "Claude Sonnet 5.5 (cheaper for big shoots)"),
+    ]
+}
+
 /// Reasoning effort for Claude (`--effort`).
 public enum Effort: String, CaseIterable, Codable, Identifiable, Sendable {
     case low, medium, high, xhigh, max
@@ -99,6 +116,8 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var format: SequenceFormat = .auto
     public var provider: ModelProvider = .anthropic
     public var model: String = ""
+    /// Model for clip descriptions; empty = same as `model`.
+    public var visionModel: String = ""
     public var baseURL: String = ""
     public var effort: Effort = .high
     public var vision: Bool = true
@@ -164,6 +183,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
                 args.append("--api-key-env=OPENAI_API_KEY")
             }
             args.append(vision ? "--vision" : "--no-vision")
+            if vision && !visionModel.trimmed.isEmpty {
+                args.append("--vision-model=\(visionModel.trimmed)")
+            }
         }
         if keepFillers {
             args.append("--keep-fillers")

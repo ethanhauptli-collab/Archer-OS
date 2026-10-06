@@ -250,3 +250,37 @@ def test_missing_credentials_are_an_auth_error(monkeypatch):
     provider = AnthropicProvider(client=anthropic.Anthropic(base_url="http://127.0.0.1:9", max_retries=0))
     with pytest.raises(ProviderAuthError, match="No Claude API key"):
         provider.verify()
+
+
+@pytest.mark.parametrize("given,sent", [("sonnet", "claude-sonnet-5-5"), ("claude-sonnet-5-5", "claude-sonnet-5-5"), ("Opus", "claude-opus-5-5"), (None, "claude-opus-5-5")])
+def test_sonnet_and_aliases_reach_the_api(given, sent):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    from roughcut.providers.anthropic_provider import AnthropicProvider
+
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_sse('{"ok": true}'))
+
+    client = anthropic.Anthropic(api_key="k", base_url="https://api.anthropic.test", http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)), max_retries=0)
+    provider = AnthropicProvider(model=given, effort="high", client=client)
+    provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="p", max_tokens=128000)
+    body = seen["body"]
+    assert body["model"] == sent
+    assert body["output_config"]["effort"] == "high" and body["max_tokens"] == 128000
+    assert body["fallbacks"] == "default"  # Sonnet 5.5 accepts the "default" form on the Claude API
+    assert "thinking" not in body and "temperature" not in body
+
+
+def test_haiku_gets_no_effort():
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_sse('{"ok": true}'))
+
+    seen = []
+    provider, httpx2 = _anthropic_provider(handler)
+    provider.model = "claude-haiku-4-5"
+    provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="p")
+    assert "effort" not in seen[0]["output_config"]

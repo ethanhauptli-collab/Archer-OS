@@ -112,8 +112,16 @@ struct BuildForm: View {
                             Text(provider.title).tag(provider)
                         }
                     }
-                    if model.options.provider != .none {
+                    if model.options.provider == .anthropic {
+                        Picker("Model", selection: $model.options.model) {
+                            ForEach(ClaudeModelChoice.planners) { choice in
+                                Text(choice.title).tag(choice.id)
+                            }
+                        }
+                    } else if model.options.provider != .none {
                         TextField("Model", text: $model.options.model, prompt: Text(model.options.provider.modelPlaceholder))
+                    }
+                    if model.options.provider != .none {
                         if model.options.provider.usesBaseURL {
                             TextField("Server URL", text: $model.options.baseURL, prompt: Text("http://localhost:1234/v1"))
                         }
@@ -125,6 +133,13 @@ struct BuildForm: View {
                             }
                         }
                         Toggle("Look at the footage (better B-roll picks, costs a little more)", isOn: $model.options.vision)
+                        if model.options.provider == .anthropic && model.options.vision {
+                            Picker("Describe clips with", selection: $model.options.visionModel) {
+                                ForEach(ClaudeModelChoice.describers) { choice in
+                                    Text(choice.title).tag(choice.id)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -159,6 +174,9 @@ struct BuildForm: View {
         .onChange(of: model.options.provider) {
             // Local and compatible servers are usually text-only models.
             model.options.vision = model.options.provider == .anthropic || model.options.provider == .openai
+            // Model names don't carry over between providers.
+            model.options.model = ""
+            model.options.visionModel = ""
         }
     }
 }
