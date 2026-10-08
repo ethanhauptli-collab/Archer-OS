@@ -47,8 +47,9 @@ def build_report(
     usage: list[UsageLog] | None = None,
     timings: dict[str, float] | None = None,
     extra_warnings: list[str] | None = None,
+    graphics: list | None = None,
 ) -> str:
-    raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image")
+    raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role != "graphic")
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
     L = [f"# {plan.title}", ""]
     failures = [w for w in (extra_warnings or []) if "planning failed" in w or "no usable sections" in w]
@@ -59,7 +60,7 @@ def build_report(
         L += [f"_{plan.logline}_", ""]
     L += [
         f"- **Rough cut:** {seconds_to_clock(tl.seconds)} ({tl.width}x{tl.height}, {tl.frame_duration.denominator / tl.frame_duration.numerator:.3f} fps)",
-        f"- **Raw media:** {seconds_to_clock(raw)} across {len(analysis.clips)} clips; {seconds_to_clock(speech)} of transcribed speech",
+        f"- **Raw media:** {seconds_to_clock(raw)} across {sum(1 for c in analysis.clips if c.role != 'graphic')} clips; {seconds_to_clock(speech)} of transcribed speech",
     ]
     if stringout is not None and stringout.spine:
         L.append(f"- **Stringout** (all dialogue, dead air removed): {seconds_to_clock(stringout.seconds)}")
@@ -136,8 +137,21 @@ def build_report(
     if plan.cut_notes:
         L += ["## What was left out", "", plan.cut_notes, ""]
 
+    if graphics:
+        rendered = {c.id: c for c in analysis.clips if c.role == "graphic"}
+        L += ["## Motion graphics", "", "Rendered clips and their HTML designs are in `graphics/`. Edit a design and run `roughcut render` to re-render just that one.", ""]
+        L += ["| Time | ID | Kind | On screen | File |", "|---|---|---|---|---|"]
+        for g in graphics:
+            text = g.spec.text + (f" / {g.spec.subtext}" if g.spec.subtext else "")
+            clip = rendered.get(g.id)
+            file = f"`graphics/{clip.media.name}`" if clip else "not rendered (see Warnings)"
+            L.append(f"| `{_tc(g.start, tl)}` | {g.id} | {g.spec.kind.replace('_', ' ')} | {text.replace('|', '/')} | {file} |")
+        L.append("")
+
     L += ["## Media", "", "| ID | File | Role | Length | Notes |", "|---|---|---|---|---|"]
     for c in analysis.clips:
+        if c.role == "graphic":
+            continue  # listed under Motion graphics
         length = "still" if c.media.kind == "image" else seconds_to_clock(float(c.media.duration))
         desc = (c.visual or {}).get("description", "")
         if not desc and c.has_transcript and c.segments:

@@ -22,6 +22,7 @@ ROLE_LABELS = {
     "voiceover": "Voiceover",
     "music": "Music & Audio",
     "still": "Stills",
+    "graphic": "Graphics",
 }
 
 

@@ -149,6 +149,11 @@ struct BuildForm: View {
                             Text(format.title).tag(format)
                         }
                     }
+                    Toggle("Motion graphics (Claude designs lower thirds, stats and captions from the transcript)", isOn: $model.options.graphics)
+                        .disabled(model.options.provider == .none)
+                    if model.options.graphics && model.options.provider != .none {
+                        TextField("Graphics style", text: $model.options.graphicsStyle, prompt: Text("Brand colors, fonts, mood, e.g. orange #FF6A13, bold sans, minimal"))
+                    }
                     TextField("Project name", text: $model.options.projectName, prompt: Text("Defaults to the folder name"))
                     Toggle("Also build a Stringout (all dialogue, dead air removed)", isOn: $model.options.stringout)
                     Toggle("Keep “um” and “uh”", isOn: $model.options.keepFillers)

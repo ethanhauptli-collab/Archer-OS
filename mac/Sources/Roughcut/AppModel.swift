@@ -46,7 +46,7 @@ final class AppModel {
     var isRunning: Bool { phase == .running }
 
     var visibleStages: [Stage] {
-        isRecut ? [.cut, .write] : Stage.allCases
+        isRecut ? [.cut, .graphics, .write] : Stage.allCases
     }
 
     func status(of stage: Stage) -> StageStatus {
@@ -320,6 +320,9 @@ final class AppModel {
             } else {
                 issues.append("Add your Claude API key in Settings.")
             }
+        }
+        if options.graphics, let problem = doctor.graphics, problem != "not checked" {
+            issues.append(problem)
         }
         if options.provider == .claudeCode {
             if doctor.claudeCode == nil {

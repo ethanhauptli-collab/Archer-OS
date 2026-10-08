@@ -128,6 +128,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var keepFillers: Bool = false
     public var stringout: Bool = true
     public var language: String = ""
+    /// Claude-designed motion graphics rendered above the footage (`--graphics`).
+    public var graphics: Bool = false
+    /// Look for the graphics: brand colors, fonts, mood (`--graphics-style`).
+    public var graphicsStyle: String = ""
 
     public init() {}
 
@@ -146,6 +150,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         }
         if provider.usesBaseURL && baseURL.trimmed.isEmpty {
             list.append("Enter the server URL, e.g. http://localhost:1234/v1.")
+        }
+        if graphics && provider == .none {
+            list.append("Motion graphics are designed by the AI: choose a provider other than None.")
         }
         return list
     }
@@ -199,6 +206,12 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         }
         if !language.trimmed.isEmpty {
             args.append("--language=\(language.trimmed)")
+        }
+        if graphics && provider != .none {
+            args.append("--graphics")
+            if !graphicsStyle.trimmed.isEmpty {
+                args.append("--graphics-style=\(graphicsStyle.trimmed)")
+            }
         }
         return args
     }

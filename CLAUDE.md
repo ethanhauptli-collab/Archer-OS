@@ -17,6 +17,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/providers/` | `anthropic_provider.py` (official SDK, streaming, structured outputs, `fallbacks: "default"`), `claude_code.py` (`--provider claude-code`: runs `claude -p` on the user's Pro/Max plan; images go to temp files read with the Read tool), `openai_compat.py` (OpenAI/Ollama/LM Studio, degrades schema → JSON mode → text) |
 | `roughcut/plan.py` | `PLAN_SCHEMA`, lenient `normalize()` of model output, `heuristic_plan()` (stringout / no-AI mode) |
 | `roughcut/timeline.py` | Plan → `Timeline` in integer sequence frames: padding, filler cuts, merges, B-roll lanes, music, markers |
+| `roughcut/graphics.py` | `--graphics`: place planned graphics on the transcript, one design request (HTML/CSS animations), render with Playwright (seek every animation per frame) to ProRes 4444 alpha, connect above B-roll; `graphics.json` + editable `graphics/*.html` drive re-renders |
 | `roughcut/fcpxml.py` | `Timeline` → FCPXML 1.10 |
 | `roughcut/pipeline.py`, `cli.py` | `roughcut build` / `render` / `doctor` |
 | `roughcut/progress.py` | `--progress-json` JSON-lines events for the Mac app |
@@ -33,6 +34,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 - **A rejected API key stops the run** (`ProviderAuthError`): `build` calls `provider.verify()` before any analysis, and auth errors during vision/planning are fatal. Only non-auth model failures may fall back to the stringout, and that fallback is announced at the top of the report and in the CLI output.
 - **Dead air is cut by the silence map, not by word times.** mlx-whisper's word times are contiguous (no gaps), and the word next to a pause is stretched over it on either side. `timeline._cut_silences` runs last and removes every silence longer than the style's `max_gap` that has sound on both sides inside a kept piece (talking-footage ranges too, at a longer threshold). It never removes sound. `tests/test_dead_air.py` covers the 10-14 s gap case.
 - **Subscription use goes only through the Claude Code program.** `claude_code.py` runs `claude -p` (signed in by the user) and strips `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from its environment so it can't bill the API. Never read or forward subscription OAuth credentials to the API ourselves: Anthropic's terms forbid it. `verify()` refuses an `api_key` sign-in.
+- **Graphics follow the same timing rule as the cut.** The planner names a segment and the exact words; `graphics.place` finds them in the transcript and the timeline. Designs are self-contained HTML rendered offline (network blocked) by seeking `document.getAnimations()` and `window.seek(t)` per frame, so they must never depend on wall-clock timers. Rendering runs in threads, one Playwright instance per thread (never processes: spawn breaks under embedding).
 - **An audio-only storyline (narration) never plays over black**: `timeline._fill_picture` covers any gap the plan left, matching narration words (multi-word names count double) to clip names/visual tags, preferring moving footage, never repeating a still. Several B-roll entries with the same `over` play back to back.
 - Claude calls use `claude-opus-5-5` by default (`claude-sonnet-5-5` via the Terminal model menu, `--model sonnet`, or the app's menu; `anthropic_provider.resolve_model` turns any spelling like `Claude-Sonnet.5.5` into the id; same request shape works for both), adaptive thinking (implicit on this model), `output_config.effort`, streaming, and structured outputs via `output_config.format`. Don't add `thinking: {type: "disabled"}` or `budget_tokens` (400 on this model) or forced `tool_choice`.
 
@@ -69,7 +71,7 @@ The Mac app (`mac/`) was written in that cloud session with **no Swift toolchain
 
 ### CLI verification (cloud)
 
-Verified there: 188 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
+Verified there: 194 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
 Not verifiable in the cloud: a live Claude call, real mlx-whisper transcription (Hugging Face was blocked), and importing into Final Cut Pro. Those depend on runs on the Mac; record the results here.
 
 ### First run on the Mac: checklist

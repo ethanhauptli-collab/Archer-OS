@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 
@@ -13,7 +13,7 @@ from . import progress
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log
 from .fcpxml import build_fcpxml
 from .media import require_tools, scan
-from .plan import PLAN_SCHEMA, Plan, heuristic_plan, normalize
+from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
 from .report import build_report
@@ -48,6 +48,8 @@ class Options:
     music_db: float = -14.0
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
+    graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
+    graphics_style: str = ""  # look and brand for them: colors, fonts, mood
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -133,11 +135,11 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
     parts = [
         TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True),
-        TextPart(render_brief(opts.context, opts.target_seconds, opts.script)),
+        TextPart(render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)),
     ]
     # Thinking counts against max_tokens; a long narration plan needs the room.
     raw = provider.complete_json(
-        PLANNER_SYSTEM, parts, PLAN_SCHEMA, schema_name="edit_plan", purpose="edit plan", effort=opts.effort, max_tokens=128000
+        PLANNER_SYSTEM, parts, plan_schema(opts.graphics), schema_name="edit_plan", purpose="edit plan", effort=opts.effort, max_tokens=128000
     )
     return normalize(raw, analysis, source=f"{provider.name}:{provider.model}"), raw
 
@@ -189,6 +191,15 @@ def build(opts: Options) -> Result:
     if provider is not None:
         log(f"checking {provider.name} access ({provider.model})")
         provider.verify()
+    if opts.graphics:
+        # Same idea as the key check: find out now, not after transcribing everything.
+        if provider is None:
+            raise RoughcutError("Motion graphics are designed by the AI, so they need a provider (not --provider none).")
+        from . import graphics
+
+        problem = graphics.renderer_problem()
+        if problem:
+            raise RoughcutError(problem)
 
     analysis = run_analysis(opts, out_dir)
     timings["analysis"] = time.monotonic() - t_start
@@ -215,7 +226,8 @@ def build(opts: Options) -> Result:
             analysis.save(out_dir / "analysis.json")
 
     (out_dir / "prompt.md").write_text(
-        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n" + render_brief(opts.context, opts.target_seconds, opts.script)
+        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n"
+        + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)
     )
 
     fell_back = False
@@ -245,16 +257,30 @@ def build(opts: Options) -> Result:
         raise RoughcutError("Nothing to cut: no speech or visual clips were found.")
 
     rough, stringout = make_timelines(plan, analysis, opts, name)
+    placed, with_graphics = [], analysis
+    if opts.graphics and provider is not None and not fell_back:
+        if plan.graphics:
+            from . import graphics
+
+            t = time.monotonic()
+            g_clips, placed, g_warnings = graphics.make(
+                provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
+            )
+            extra_warnings += g_warnings
+            with_graphics = replace(analysis, clips=analysis.clips + g_clips)
+            timings["graphics"] = time.monotonic() - t
+        else:
+            extra_warnings.append("Motion graphics were on, but the plan didn't ask for any.")
     timings["total"] = time.monotonic() - t_start
     fcpxml_path, report_path = write_outputs(
         out_dir,
         name,
         plan,
         raw_plan,
-        analysis,
+        with_graphics,
         rough,
         stringout,
-        dict(usage=usage, timings=timings, extra_warnings=extra_warnings),
+        dict(usage=usage, timings=timings, extra_warnings=extra_warnings, graphics=placed),
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
     return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout))
@@ -272,5 +298,20 @@ def rerender(out_dir: Path, opts: Options) -> Result:
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     rough, stringout = make_timelines(plan, analysis, opts, name)
-    fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), analysis, rough, stringout, {})
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=plan.warnings + rough.warnings, dead_air=dead_air(analysis.clips, stringout))
+    graphics_warnings: list[str] = []
+    placed, with_graphics = [], analysis
+    if (out_dir / "graphics.json").is_file():
+        # Re-time the saved designs (and any hand edits) to the new cut; only changes re-render.
+        from . import graphics
+
+        problem = graphics.renderer_problem()
+        if problem:
+            graphics_warnings.append(f"Graphics left out of this re-cut: {problem}")
+        else:
+            specs, html, style = graphics.saved_designs(out_dir)
+            g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
+            graphics_warnings += g_warnings
+            with_graphics = replace(analysis, clips=analysis.clips + g_clips)
+    fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings})
+    warnings = plan.warnings + rough.warnings + graphics_warnings
+    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout))

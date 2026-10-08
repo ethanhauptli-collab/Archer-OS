@@ -19,6 +19,7 @@ mac = ["mlx-whisper>=0.4"]
 whisper = ["faster-whisper>=1.1"]
 # OpenAI, Ollama, LM Studio, OpenRouter and other OpenAI-compatible endpoints.
 openai = ["openai>=1.50"]
+graphics = ["playwright>=1.40"]
 dev = ["pytest>=8", "lxml>=5"]
 
 [project.scripts]

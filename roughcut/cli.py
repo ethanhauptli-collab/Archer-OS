@@ -56,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
     ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
+    gfx = b.add_argument_group("motion graphics")
+    gfx.add_argument("--graphics", action="store_true", help="have Claude design animated graphics (lower thirds, stats, kinetic captions...) from the transcript, rendered to ProRes 4444 above the footage")
+    gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'orange #F26B21, Gotham, bold and minimal'")
     tr = b.add_argument_group("transcription")
     tr.add_argument("--transcriber", choices=["auto", "mlx", "faster-whisper", "none"], default="auto")
     tr.add_argument("--whisper-model", help="override the Whisper model")
@@ -239,7 +242,15 @@ def doctor_report(offline: bool = False) -> dict:
         "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
         "openai_installed": importlib.util.find_spec("openai") is not None,
         **claude_code_report(offline),
+        "graphics": _graphics_problem() if not offline else "not checked",
     }
+
+
+def _graphics_problem() -> str | None:
+    """None when motion graphics can render here, else what to install."""
+    from .graphics import renderer_problem
+
+    return renderer_problem()
 
 
 def claude_code_report(offline: bool = False) -> dict:
@@ -281,6 +292,7 @@ def _print_doctor(r: dict) -> int:
         ),
         ("OpenAI", r["openai_key"] and r["openai_installed"], "ready" if r["openai_key"] and r["openai_installed"] else "optional, not set up"),
         ("Claude Code", r.get("claude_code_auth") not in (None, "api_key"), _claude_code_detail(r)),
+        ("Graphics", r.get("graphics") is None, "ready for --graphics" if r.get("graphics") is None else f"optional: {r.get('graphics')}"),
     ]
     print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
     for label, ok, detail in rows:
@@ -352,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
                 transcript_dirs=[Path(p) for p in args.transcripts],
                 cache_dir=Path(args.cache_dir) if args.cache_dir else None,
                 workers=args.workers,
+                graphics=args.graphics,
+                graphics_style=args.graphics_style,
                 **common,
             )
             result = build(opts)

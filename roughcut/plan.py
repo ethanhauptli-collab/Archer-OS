@@ -7,8 +7,9 @@ model says can produce an invalid timeline.
 
 from __future__ import annotations
 
+import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from .analyze import Analysis
 
@@ -152,6 +153,52 @@ class MusicCue:
     source_in: float = 0.0
 
 
+GRAPHIC_KINDS = ("lower_third", "stat", "title_card", "kinetic_caption", "quote", "list")
+DEFAULT_SECONDS = {"lower_third": 4.0, "stat": 4.0, "title_card": 3.0, "kinetic_caption": 3.0, "quote": 5.0, "list": 6.0}
+
+GRAPHICS_SCHEMA = {
+    "type": "array",
+    "description": "Motion graphics, designed and rendered after planning. Each is anchored on words in a segment of the cut.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": list(GRAPHIC_KINDS)},
+            "segment": {"type": "string", "description": "Segment ID (in this cut) the graphic appears over."},
+            "words": {"type": "string", "description": "The exact words from that segment where it appears, copied."},
+            "text": {"type": "string", "description": "Main on-screen text, short."},
+            "subtext": {"type": "string", "description": "Optional second line, or empty."},
+            "seconds": {"type": "number", "description": "How long it holds, 2-8; 0 for kinetic captions (they follow the speech)."},
+            "direction": {"type": "string", "description": "Look or motion notes, or empty."},
+        },
+        "required": ["kind", "segment", "words", "text", "subtext", "seconds", "direction"],
+        "additionalProperties": False,
+    },
+}
+
+
+def plan_schema(graphics: bool = False) -> dict:
+    """The plan schema, with a graphics list when the run asks for motion graphics."""
+    if not graphics:
+        return PLAN_SCHEMA
+    schema = copy.deepcopy(PLAN_SCHEMA)
+    schema["properties"]["graphics"] = GRAPHICS_SCHEMA
+    schema["required"] = schema["required"] + ["graphics"]
+    return schema
+
+
+@dataclass
+class GraphicSpec:
+    """One graphic as the planner asked for it."""
+
+    kind: str
+    segment: str
+    words: str
+    text: str
+    subtext: str = ""
+    seconds: float = 0.0
+    direction: str = ""
+
+
 @dataclass
 class Plan:
     title: str
@@ -163,6 +210,7 @@ class Plan:
     cut_notes: str = ""
     source: str = ""
     warnings: list[str] = field(default_factory=list)
+    graphics: list[GraphicSpec] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {
@@ -188,6 +236,7 @@ class Plan:
             "cut_notes": self.cut_notes,
             "source": self.source,
             "warnings": self.warnings,
+            "graphics": [asdict(g) for g in self.graphics],
         }
 
 
@@ -284,6 +333,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         plan.music.append(MusicCue(clip.id, min(kept), max(kept), source_in))
 
     plan.cut_notes = str(raw.get("cut_notes") or "")
+    plan.graphics = parse_specs(raw.get("graphics") or [], analysis, used_segments, warnings)
     plan.warnings = warnings
     return plan
 
@@ -361,3 +411,41 @@ def heuristic_plan(analysis: Analysis, *, title: str = "Stringout") -> Plan:
         if items:
             plan.sections.append(Section(name="Montage", items=items))
     return plan
+
+
+def parse_specs(raw: list, analysis: Analysis, used_segments: set[str], warnings: list[str]) -> list[GraphicSpec]:
+    """The plan's graphics entries, checked against the transcript. Never raises."""
+    specs = []
+    for g in raw or []:
+        if not isinstance(g, dict):
+            continue
+        seg_id = str(g.get("segment") or "").strip().upper()
+        text = str(g.get("text") or "").strip()
+        kind = str(g.get("kind") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        if kind not in GRAPHIC_KINDS:
+            kind = "quote"  # still designed; the direction says what it should be
+        if not text:
+            warnings.append(f"graphic on {seg_id or '?'} has no text; skipped")
+            continue
+        if analysis.segment(seg_id) is None:
+            warnings.append(f"graphic {text!r}: unknown segment {seg_id!r}; skipped")
+            continue
+        if seg_id not in used_segments:
+            warnings.append(f"graphic {text!r}: {seg_id} isn't in the cut; skipped")
+            continue
+        try:
+            seconds = float(g.get("seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        specs.append(
+            GraphicSpec(
+                kind=kind,
+                segment=seg_id,
+                words=str(g.get("words") or "").strip(),
+                text=text[:120],
+                subtext=str(g.get("subtext") or "").strip()[:160],
+                seconds=seconds,
+                direction=str(g.get("direction") or "").strip()[:400],
+            )
+        )
+    return specs

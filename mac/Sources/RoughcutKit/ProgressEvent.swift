@@ -2,7 +2,7 @@ import Foundation
 
 /// Pipeline stages, in the order the CLI reports them (`roughcut/progress.py`).
 public enum Stage: String, CaseIterable, Codable, Identifiable, Sendable {
-    case scan, probe, silence, transcribe, vision, plan, cut, write
+    case scan, probe, silence, transcribe, vision, plan, cut, graphics, write
 
     public var id: String { rawValue }
     public var order: Int { Stage.allCases.firstIndex(of: self) ?? 0 }
@@ -16,6 +16,7 @@ public enum Stage: String, CaseIterable, Codable, Identifiable, Sendable {
         case .vision: return "Look at the footage"
         case .plan: return "Plan the edit"
         case .cut: return "Cut"
+        case .graphics: return "Motion graphics"
         case .write: return "Write the Final Cut file"
         }
     }
@@ -29,6 +30,7 @@ public enum Stage: String, CaseIterable, Codable, Identifiable, Sendable {
         case .vision: return "eye"
         case .plan: return "sparkles"
         case .cut: return "scissors"
+        case .graphics: return "wand.and.stars"
         case .write: return "square.and.arrow.down"
         }
     }
@@ -86,6 +88,8 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
     public var claudeCode: String?
     /// How Claude Code is signed in: claude.ai / oauth_token / api_key; nil when signed out.
     public var claudeCodeAuth: String?
+    /// Why motion graphics can't render here (nil = ready, or an older CLI).
+    public var graphics: String?
 
     public var hasFFmpeg: Bool { ffmpeg != nil && ffprobe != nil }
     public var claudeCodeUsesSubscription: Bool { claudeCodeAuth.map { $0 != "api_key" } ?? false }

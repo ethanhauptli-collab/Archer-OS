@@ -18,7 +18,7 @@ import json
 import sys
 import threading
 
-STAGES = ("scan", "probe", "silence", "transcribe", "vision", "plan", "cut", "write")
+STAGES = ("scan", "probe", "silence", "transcribe", "vision", "plan", "cut", "graphics", "write")
 
 _enabled = False
 _lock = threading.Lock()

@@ -80,6 +80,21 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
 | `--broll-db`, `--music-db` | -20, -14 | Levels for B-roll nat sound and music |
 | `--no-fill` | | Don't auto-cover narration the plan left without picture |
+| `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below) |
+
+### Motion graphics
+
+```bash
+roughcut build ~/Movies/OCVIBE --graphics \
+  -c "Promo for OC Vibe. Lower third for each speaker, call out the big numbers, kinetic caption on the hook." \
+  --graphics-style "navy #0B1F3A and orange #FF6A13, bold geometric sans, premium and energetic"
+```
+
+With `--graphics`, Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
+
+Each clip's design is saved next to it in `graphics/` as an `.html` file. Edit one (text, colors, timing) and run `roughcut render <output folder>` to re-render just that graphic. A re-cut with a different `--style` re-times the graphics and only re-renders the ones whose length changed.
+
+Setup: `pip install -e '.[graphics]'`. Rendering uses Google Chrome if it's installed; otherwise run `playwright install chromium` once. `roughcut doctor` shows whether graphics are ready. Expect about a minute of design time per eight graphics, and roughly 25 MB per 4-second 1080p graphic.
 
 ### Use your Claude subscription instead of an API key
 
@@ -124,5 +139,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 188 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 194 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

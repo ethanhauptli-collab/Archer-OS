@@ -146,7 +146,25 @@ class FakeProvider:
                     for i in ids
                 ]
             }
+        if schema_name == "graphics":
+            import re
+
+            ids = re.findall(r"\bG\d\d\b", parts[-1].text.split("<graphics>")[-1])
+            return {"style": "test plate", "graphics": [{"id": i, "html": GRAPHIC_HTML.replace("TEXT", i)} for i in dict.fromkeys(ids)]}
         return self.plan
+
+
+# A design that follows the renderer's contract: CSS animations plus a seek hook.
+GRAPHIC_HTML = """<!doctype html><html><head><style>
+html,body{margin:0;background:transparent;overflow:hidden}
+.plate{position:absolute;left:5%;bottom:12%;padding:12px 20px;background:#F26B21;color:#fff;
+ font:700 48px -apple-system,'Helvetica Neue',Arial,sans-serif;
+ animation:in .4s ease-out both,out .3s ease-in calc(var(--d,2s) - .3s) both}
+@keyframes in{from{transform:translateX(-120%)}to{transform:none}}
+@keyframes out{to{opacity:0}}
+</style></head><body><div class="plate">TEXT <span id="n">0</span></div>
+<script>window.seek=function(t){document.getElementById('n').textContent=Math.round(t*10)}</script>
+</body></html>"""
 
 
 # ------------------------------------------------------------ in-memory clips

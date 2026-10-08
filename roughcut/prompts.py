@@ -155,7 +155,25 @@ def render_media(analysis: Analysis) -> str:
     return "\n".join(lines)
 
 
-def render_brief(context: str, target_seconds: float | None, script: str | None) -> str:
+GRAPHICS_BRIEF = """\
+<motion_graphics>
+Also plan animated motion graphics for this cut in "graphics". They are designed and rendered \
+after you plan; you choose the moments and the words, the software times them to the speech.
+- kind: lower_third (who is speaking, the first time each on-camera person talks: a name and \
+role taken from the transcript, file names or brief, never invented), stat (a number that \
+matters, e.g. "$325M"), title_card (a section or chapter title on the section's first line), \
+kinetic_caption (the spoken words animated word by word, for the hook or a punchline), quote (a \
+short key line pulled out on screen), list (two to four short items the speaker lists).
+- segment: a segment ID that is in your cut. words: copy the exact words from that segment where \
+the graphic should appear. text: what is on screen, short (six words or fewer for the main line). \
+subtext: an optional second line, or "". seconds: how long it holds, 2-8 (0 for kinetic \
+captions). direction: a line on look or motion when it matters, or "".
+- Follow the brief's directions about graphics. Space them out (usually one every 10-20 seconds \
+at most, never two at once), and add none where the footage gives no good moment.
+</motion_graphics>"""
+
+
+def render_brief(context: str, target_seconds: float | None, script: str | None, *, graphics: bool = False, graphics_style: str = "") -> str:
     parts = []
     parts.append("<brief>\n" + (context.strip() or "No brief given. Make the strongest cut the footage supports.") + "\n</brief>")
     if target_seconds:
@@ -167,5 +185,9 @@ def render_brief(context: str, target_seconds: float | None, script: str | None)
             "<script>\nThe editor's script, outline or reference transcript. Follow its structure and match "
             "footage to it where possible.\n\n" + script.strip() + "\n</script>"
         )
+    if graphics:
+        parts.append(GRAPHICS_BRIEF)
+        if graphics_style.strip():
+            parts.append("<graphics_style>\n" + graphics_style.strip() + "\n</graphics_style>")
     parts.append("Build the rough cut plan.")
     return "\n\n".join(parts)
