@@ -8,7 +8,7 @@ from .analyze import ROLE_LABELS, Analysis
 from .plan import Plan
 from .providers import UsageLog, estimate_cost
 from .timecode import seconds_to_clock
-from .timeline import Timeline
+from .timeline import Timeline, dead_air
 
 
 def _tc(frames: int, tl: Timeline) -> str:
@@ -63,6 +63,9 @@ def build_report(
     ]
     if stringout is not None and stringout.spine:
         L.append(f"- **Stringout** (all dialogue, dead air removed): {seconds_to_clock(stringout.seconds)}")
+        talk, kept = dead_air(analysis.clips, stringout)
+        if talk > 0:
+            L.append(f"- **Dead air removed:** {seconds_to_clock(max(0.0, talk - kept))} of {seconds_to_clock(talk)} talking footage ({max(0.0, 1 - kept / talk):.0%})")
     L.append(f"- **Planned by:** {plan.source}")
     if usage:
         calls = [c for u in usage for c in u.calls]

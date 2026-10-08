@@ -190,6 +190,16 @@ def _silence_clamp_start(t: float, word_end: float, silences: list[tuple[float, 
     return t
 
 
+def _pause_between(prev_start: float, next_end: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
+    """Longest measured silence between two words.
+
+    Whisper often stretches a word across the pause after it (or starts the
+    next word early), so the words' own times can show no gap at all. The
+    silence map still sees the pause.
+    """
+    return max((e - s for s, e in silences if s >= prev_start + eps and e <= next_end - eps), default=0.0)
+
+
 def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[_Piece]:
     dur = clip.duration
     if not seg.words:
@@ -208,7 +218,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
             continue
         if current:
             prev = all_words[current[-1]]
-            gap = w.start - prev.end
+            gap = max(w.start - prev.end, _pause_between(prev.start, w.end, clip.silences))
             if gap > style.max_gap or (removed_since_last and gap > 0.25):
                 runs.append(current)
                 current = []
@@ -221,9 +231,17 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     # of a cut retake or the start of the next sentence.
     idx = next((i for i, s in enumerate(clip.segments) if s.id == seg.id), -1)
     base = sum(len(s.words) for s in clip.segments[:idx]) if idx > 0 else 0
-    prev_end = clip.segments[idx - 1].words[-1].end if idx > 0 and clip.segments[idx - 1].words else 0.0
+    sil = clip.silences
+
+    def end_of(w) -> float:  # where a neighbouring word's sound really stops / starts
+        return _silence_clamp_end(w.end, w.start, sil)
+
+    def start_of(w) -> float:
+        return _silence_clamp_start(w.start, w.end, sil)
+
+    prev_end = end_of(clip.segments[idx - 1].words[-1]) if idx > 0 and clip.segments[idx - 1].words else 0.0
     next_start = (
-        clip.segments[idx + 1].words[0].start
+        start_of(clip.segments[idx + 1].words[0])
         if 0 <= idx < len(clip.segments) - 1 and clip.segments[idx + 1].words
         else dur
     )
@@ -235,8 +253,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         wa = _silence_clamp_start(first.start, first.end, clip.silences)
         wb = _silence_clamp_end(last.end, last.start, clip.silences)
         # Padding never reaches into a neighbouring word (including cut fillers).
-        lo = (all_words[first_i - 1].end if first_i > 0 else prev_end) + 0.02
-        hi = (all_words[last_i + 1].start if last_i + 1 < len(all_words) else next_start) - 0.02
+        lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
+        hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:
@@ -725,3 +743,13 @@ def timeline_stats(tl: Timeline) -> dict:
         "rate": tc.rate_label(tl.frame_duration),
         "size": f"{tl.width}x{tl.height}",
     }
+
+
+def dead_air(clips, stringout: "Timeline | None") -> tuple[float, float] | None:
+    """(talking footage seconds, stringout seconds): how much pause and filler the cut removed."""
+    if stringout is None or not stringout.spine:
+        return None
+    by_id = {c.id: c for c in clips}
+    talk = sum(by_id[cid].duration for cid in {s.clip_id for s in stringout.spine} if cid in by_id)
+    return talk, stringout.seconds
+

@@ -7,7 +7,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | Module | Job |
 |---|---|
 | `roughcut/media.py` | Scan folders, `ffprobe` → `MediaInfo` (exact `Fraction` durations, timecode start, rotation, VFR) |
-| `roughcut/ffmpeg_ops.py` | Silence map (`silencedetect`), frame grabs |
+| `roughcut/ffmpeg_ops.py` | Per-clip noise floor (`window_peaks` → `noise_threshold`), silence map (`silencedetect`), frame grabs |
 | `roughcut/transcribe.py` | mlx-whisper / faster-whisper / sidecar `.srt/.vtt/.json` → `Word`s |
 | `roughcut/segments.py` | Words → sentence `Segment`s with IDs `V01.S003` |
 | `roughcut/analyze.py` | Orchestrates stage 1, role classification, on-disk cache (`~/Library/Caches/roughcut`) |
@@ -61,7 +61,7 @@ The Mac app (`mac/`) was written in that cloud session with **no Swift toolchain
 
 ### CLI verification (cloud)
 
-Verified there: 162 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
+Verified there: 171 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
 Not verifiable in the cloud: a live Claude call, real mlx-whisper transcription (Hugging Face was blocked), and importing into Final Cut Pro. Those depend on runs on the Mac; record the results here.
 
 ### First run on the Mac: checklist
@@ -74,7 +74,7 @@ Not verifiable in the cloud: a live Claude call, real mlx-whisper transcription 
 6. Mixed frame rates (e.g. 25fps clip in a 23.98 project): real FCP exports add `<conform-rate>`; we don't. Check how FCP conforms them on import.
 7. If FCP rejects the XML, it names the line. Fix `fcpxml.py`, add a regression test, and re-validate against the DTD.
 
-Things most likely to need adjustment after real-world runs: Whisper word-end timing vs `pad_out`; the `silencedetect` threshold (`-35dB`) for noisy footage; the `aroll`/`broll` classification thresholds in `analyze.classify`; whether mlx-whisper with `condition_on_previous_text=True` (verbatim mode, needed so um/uh keep getting transcribed after the first 30s) loops or hallucinates on long clips (fall back with `--no-verbatim`); and the planner prompt.
+Things most likely to need adjustment after real-world runs: Whisper word-end timing vs `pad_out`; the per-clip silence level (`ffmpeg_ops.noise_threshold`: default −35 dB, raised above a loud background and lowered under quiet speech; falls back to −35 if it would drop real words); the `aroll`/`broll` classification thresholds in `analyze.classify`; whether mlx-whisper with `condition_on_previous_text=True` (verbatim mode, needed so um/uh keep getting transcribed after the first 30s) loops or hallucinates on long clips (fall back with `--no-verbatim`); and the planner prompt.
 
 ## Roadmap
 

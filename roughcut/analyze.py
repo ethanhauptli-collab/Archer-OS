@@ -73,6 +73,8 @@ class Clip:
     duplicate_of: str | None = None  # same footage exported again: hidden
     take_of: str | None = None  # another read of the same narration script
     same_words: float = 0.0  # word overlap with take_of
+    silence_db: float | None = None  # level the silence map was detected at
+    background_db: float | None = None  # this clip's measured background (peak dBFS)
 
     @property
     def hidden(self) -> bool:
@@ -103,6 +105,8 @@ class Clip:
             "duplicate_of": self.duplicate_of,
             "take_of": self.take_of,
             "same_words": self.same_words,
+            "silence_db": self.silence_db,
+            "background_db": self.background_db,
         }
 
     @classmethod
@@ -119,6 +123,8 @@ class Clip:
             duplicate_of=d.get("duplicate_of"),
             take_of=d.get("take_of"),
             same_words=d.get("same_words", 0.0),
+            silence_db=d.get("silence_db"),
+            background_db=d.get("background_db"),
         )
 
 
@@ -181,6 +187,21 @@ def assign_ids(infos: list[MediaInfo]) -> list[tuple[str, MediaInfo]]:
     return out
 
 
+def pause_warning(clip: Clip) -> str | None:
+    """Talking footage with no pauses found means no dead air can be cut: say so, and why."""
+    if clip.role not in ("aroll", "voiceover") or clip.duration < 10:
+        return None
+    quiet = sum(e - s for s, e in clip.silences)
+    if quiet >= 0.03 * clip.duration:
+        return None
+    why = (
+        f" The background is about {clip.background_db:.0f} dB, close to the speech level, so pauses can't be told apart from it."
+        if clip.background_db is not None and clip.background_db > -40
+        else ""
+    )
+    return f"{clip.media.name}: found almost no pauses, so little dead air could be cut.{why}"
+
+
 def classify(clip: Clip) -> str:
     m = clip.media
     if m.kind == "image":
@@ -210,7 +231,7 @@ def analyze(
     cache: Cache,
     transcript_dirs: list[Path] | None = None,
     workers: int = 4,
-    noise_db: float = -35.0,
+    noise_db: float | None = None,
     prefer_vertical: bool = False,
 ) -> Analysis:
     t0 = time.monotonic()
@@ -245,16 +266,34 @@ def analyze(
 
     clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos)]
 
+    default_maps: dict[str, list[tuple[float, float]]] = {}
+
+    def _silence_at(m: MediaInfo, db: float) -> list[tuple[float, float]]:
+        key = f"silence{db:g}.json"
+        cached = cache.get(m.fingerprint, key)
+        if cached is None:
+            cached = ffmpeg_ops.detect_silences(Path(m.path), float(m.duration), noise_db=db)
+            cache.put(m.fingerprint, key, cached)
+        return [tuple(s) for s in cached]
+
     def _silence(clip: Clip) -> None:
         m = clip.media
         if not m.has_audio:
             return
-        key = f"silence{noise_db:g}.json"
-        cached = cache.get(m.fingerprint, key)
-        if cached is None:
-            cached = ffmpeg_ops.detect_silences(Path(m.path), float(m.duration), noise_db=noise_db)
-            cache.put(m.fingerprint, key, cached)
-        clip.silences = [tuple(s) for s in cached]
+        if noise_db is not None:  # fixed level asked for
+            clip.silence_db = noise_db
+            clip.silences = _silence_at(m, noise_db)
+            return
+        # Measure this clip's background so noisy rooms and quiet recordings both get pauses.
+        level = cache.get(m.fingerprint, "noise-floor-v1.json")
+        if level is None:
+            db, floor = ffmpeg_ops.noise_threshold(ffmpeg_ops.window_peaks(Path(m.path)))
+            level = {"db": db, "floor": floor}
+            cache.put(m.fingerprint, "noise-floor-v1.json", level)
+        clip.silence_db, clip.background_db = level["db"], level["floor"]
+        clip.silences = _silence_at(m, clip.silence_db)
+        if clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB:
+            default_maps[clip.id] = _silence_at(m, ffmpeg_ops.DEFAULT_NOISE_DB)
 
     t1 = time.monotonic()
     progress.stage("silence", "Finding the pauses")
@@ -288,6 +327,11 @@ def analyze(
                 log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
         if transcript is not None:
             words = drop_words_in_silence(transcript.words, clip.silences)
+            fallback = default_maps.get(clip.id)
+            if fallback is not None and len(words) < len(transcript.words) - max(2, len(transcript.words) // 10):
+                # The measured level swallowed real words: go back to the standard one.
+                clip.silences, clip.silence_db = fallback, ffmpeg_ops.DEFAULT_NOISE_DB
+                words = drop_words_in_silence(transcript.words, clip.silences)
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:
@@ -306,4 +350,11 @@ def analyze(
     notes = mark_duplicates(clips, cache, prefer_vertical=prefer_vertical)
     for note in notes:
         log(note)
+    for clip in clips:
+        if clip.silence_db is not None and clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB and clip.role in ("aroll", "voiceover"):
+            louder = clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB
+            log(f"{clip.media.name}: {'noisy background' if louder else 'quiet recording'}, pauses detected below {clip.silence_db:g} dB")
+        warning = None if clip.hidden else pause_warning(clip)
+        if warning:
+            warnings.append(warning)
     return Analysis(clips=clips, created=datetime.now(timezone.utc).isoformat(timespec="seconds"), warnings=warnings, notes=notes)

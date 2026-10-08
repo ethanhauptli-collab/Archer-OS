@@ -17,7 +17,7 @@ from .plan import PLAN_SCHEMA, Plan, heuristic_plan, normalize
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
 from .report import build_report
-from .timeline import STYLES, Style, Timeline, build_timeline
+from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
 
 
@@ -66,6 +66,7 @@ class Result:
     stringout: Timeline | None
     fell_back: bool = False
     warnings: list[str] = field(default_factory=list)
+    dead_air: tuple[float, float] | None = None  # (talking footage, stringout) seconds
 
 
 def result_summary(result: Result) -> dict:
@@ -256,7 +257,7 @@ def build(opts: Options) -> Result:
         dict(usage=usage, timings=timings, extra_warnings=extra_warnings),
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings)
+    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout))
 
 
 def rerender(out_dir: Path, opts: Options) -> Result:
@@ -272,4 +273,4 @@ def rerender(out_dir: Path, opts: Options) -> Result:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     rough, stringout = make_timelines(plan, analysis, opts, name)
     fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), analysis, rough, stringout, {})
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=plan.warnings + rough.warnings)
+    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=plan.warnings + rough.warnings, dead_air=dead_air(analysis.clips, stringout))

@@ -28,8 +28,49 @@ def parse_silencedetect(stderr: str, duration: float) -> list[tuple[float, float
     return silences
 
 
+DEFAULT_NOISE_DB = -35.0
+
+
+def window_peaks(path: Path, window: float = 0.05) -> list[float]:
+    """Peak level (dBFS) of each 50 ms of the first audio track; [] if it can't be read."""
+    af = (
+        f"aformat=channel_layouts=mono,aresample=48000,asetnsamples=n={int(48000 * window)}:p=0,"
+        "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file=-"
+    )
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    peaks = []
+    for line in proc.stdout.splitlines():
+        if "Peak_level=" in line:
+            try:
+                peaks.append(max(-120.0, float(line.split("=", 1)[1])))
+            except ValueError:
+                peaks.append(-120.0)
+    return peaks
+
+
+def noise_threshold(peaks: list[float], default: float = DEFAULT_NOISE_DB) -> tuple[float, float | None]:
+    """(silencedetect level, background level) for one clip.
+
+    A fixed -35 dB finds no pauses at all when the room, wind or crowd is
+    louder than that, and marks everything as silence in a very quiet
+    recording. So sit the level a little above this clip's own background
+    and well below its loud parts; clean recordings keep the default.
+    """
+    if len(peaks) < 40:  # under two seconds: not enough to judge
+        return default, None
+    v = sorted(peaks)
+    floor, loud = v[len(v) // 10], v[(len(v) * 9) // 10]
+    if loud - floor < 10:  # background as loud as everything else: can't separate them
+        return default, floor
+    level = max(default, floor + min(12.0, max(4.0, 0.3 * (loud - floor))))
+    return round(min(level, loud - 12.0), 1), floor
+
+
 def detect_silences(
-    path: Path, duration: float, noise_db: float = -35.0, min_silence: float = 0.35
+    path: Path, duration: float, noise_db: float = DEFAULT_NOISE_DB, min_silence: float = 0.35
 ) -> list[tuple[float, float]]:
     cmd = [
         "ffmpeg",

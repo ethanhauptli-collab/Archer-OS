@@ -347,6 +347,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nRough cut: {seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
     if result.stringout is not None:
         print(f"Stringout: {seconds_to_clock(result.stringout.seconds)}")
+    if result.dead_air and result.dead_air[0] > 0:
+        talk, kept = result.dead_air
+        print(f"Dead air removed: {seconds_to_clock(max(0.0, talk - kept))} of {seconds_to_clock(talk)} talking footage ({max(0.0, 1 - kept / talk):.0%})")
+    for w in result.warnings:
+        if "almost no pauses" in w:
+            print(f"  ! {w}")
     print(f"FCPXML:    {result.fcpxml}")
     print(f"Report:    {result.report}")
     print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
