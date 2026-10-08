@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
     ai = b.add_argument_group("model")
     ai.add_argument("--provider", choices=PROVIDERS, default="anthropic", help="who plans the edit (default: anthropic; 'none' = silence cutting only)")
-    ai.add_argument("--model", help="model id. Claude: claude-opus-5-5 (default) or claude-sonnet-5-5 (faster, half the price); 'opus'/'sonnet' work too")
+    ai.add_argument("--model", help="Claude: opus (default) or sonnet (faster, half the price); spellings like 'Sonnet 5.5' work. Leave it off in Terminal to pick from a menu. Other providers: the model's name")
     ai.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default="high", help="reasoning effort for the plan (Claude)")
     ai.add_argument("--base-url", help="endpoint for openai / ollama / openai-compatible providers")
     ai.add_argument("--api-key-env", help="environment variable holding the API key for openai-compatible providers")
@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--vision", dest="vision", action="store_true", default=None, help="describe clips from sampled frames (default when the provider supports images)")
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
+    ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
     tr = b.add_argument_group("transcription")
     tr.add_argument("--transcriber", choices=["auto", "mlx", "faster-whisper", "none"], default="auto")
     tr.add_argument("--whisper-model", help="override the Whisper model")
@@ -145,6 +146,42 @@ def _key_command(action: str, openai: bool) -> int:
         print(f"Note: a different {account} is exported in this shell and takes priority over the Keychain, so runs would still use the old key.")
         print(override_note(account) or f"Remove the `export {account}=` line from your shell profile, then open a new Terminal window.")
     return 0
+
+
+# The Terminal version of the Mac app's model menus: (label, why, planner, describer or None = same).
+MODEL_MENU = [
+    ("Claude Opus 5.5 plans and looks at clips", "best judgment", "claude-opus-5-5", None),
+    ("Claude Opus 5.5 plans, Claude Sonnet 5.5 looks at clips", "cheaper on big shoots", "claude-opus-5-5", "claude-sonnet-5-5"),
+    ("Claude Sonnet 5.5 for both", "faster, about half the price", "claude-sonnet-5-5", None),
+]
+MODEL_MENU_NO_VISION = [
+    ("Claude Opus 5.5", "best judgment", "claude-opus-5-5", None),
+    ("Claude Sonnet 5.5", "faster, about half the price", "claude-sonnet-5-5", None),
+]
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def choose_claude_models(vision: bool, ask=input) -> tuple[str, str | None]:
+    """Numbered menu; Return takes the first (default) choice."""
+    options = MODEL_MENU if vision else MODEL_MENU_NO_VISION
+    print("Which Claude model should cut this?")
+    for i, (label, why, _, _) in enumerate(options, 1):
+        print(f"  {i}  {label}  ({why}){'  [default]' if i == 1 else ''}")
+    while True:
+        try:
+            answer = ask(f"Press Return for 1, or type 1-{len(options)}: ").strip()
+        except EOFError:
+            answer = ""
+        if not answer:
+            answer = "1"
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            label, _, planner, describer = options[int(answer) - 1]
+            print(f"Using {label}.\n")
+            return planner, describer
+        print(f"Type a number from 1 to {len(options)}.")
 
 
 KEY_SOURCES: dict[str, str] = {}  # filled from keys.load_into_environ() at startup
@@ -258,6 +295,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "render":
             result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common))
         else:
+            if args.provider == "anthropic":
+                from .providers.anthropic_provider import resolve_model
+
+                if args.model is None and args.vision_model is None and args.menu and not json_mode and _interactive():
+                    args.model, args.vision_model = choose_claude_models(vision=args.vision is not False)
+                args.model = resolve_model(args.model) if args.model else None
+                args.vision_model = resolve_model(args.vision_model) if args.vision_model else None
             context = "\n\n".join(t for t in (args.context, _read(args.context_file)) if t.strip())
             opts = Options(
                 inputs=[Path(p) for p in args.inputs],

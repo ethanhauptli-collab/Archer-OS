@@ -5,18 +5,39 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 
 from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
-# Short names accepted for --model / --vision-model.
-MODEL_ALIASES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}
+SONNET = "claude-sonnet-5-5"
+# A bare family name means its current model.
+MODEL_ALIASES = {"opus": DEFAULT_MODEL, "sonnet": SONNET, "haiku": "claude-haiku-5-5", "fable": "claude-fable-5-1"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Credentials that start like an API key but can never call the Messages API with x-api-key.
 SIGN_IN_TOKENS = ("sk-ant-oat", "sk-ant-ort", "sk-ant-sid")
 ADMIN_KEYS = ("sk-ant-admin",)
 NOT_API_KEYS = SIGN_IN_TOKENS + ADMIN_KEYS
+
+
+def resolve_model(name: str | None) -> str:
+    """Forgiving model names: 'Claude-Sonnet.5.5', 'sonnet 5.5', 'Sonnet' -> 'claude-sonnet-5-5'.
+
+    Anything that isn't a family name plus an optional version passes through
+    unchanged, for Anthropic to accept or reject.
+    """
+    if not name or not name.strip():
+        return DEFAULT_MODEL
+    raw = name.strip()
+    squashed = re.sub(r"[^a-z0-9]", "", raw.lower()).removeprefix("claude")
+    m = re.fullmatch(r"(opus|sonnet|haiku|fable|mythos)(\d)?(\d)?", squashed)
+    if not m:
+        return raw
+    family, major, minor = m.groups()
+    if not major:
+        return MODEL_ALIASES.get(family, raw)
+    return f"claude-{family}-{major}" + (f"-{minor}" if minor else "")
 
 
 def _mask(key: str) -> str:
@@ -117,7 +138,7 @@ class AnthropicProvider:
         except ImportError as e:  # pragma: no cover - it's a hard dependency
             raise ProviderError("the anthropic package is not installed: pip install anthropic") from e
         self._anthropic = anthropic
-        self.model = MODEL_ALIASES.get((model or "").strip().lower(), model) if model else DEFAULT_MODEL
+        self.model = resolve_model(model)
         self.effort = effort
         # An explicit api_key stops the SDK from also sending ANTHROPIC_AUTH_TOKEN
         # (a leftover sign-in token there would get a good key rejected).
@@ -137,7 +158,10 @@ class AnthropicProvider:
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise auth_error(e, self.model) from e
         except anthropic.NotFoundError as e:
-            raise ProviderError(f"Model {self.model!r} isn't available to this API key. Try --model claude-opus-5-5.") from e
+            raise ProviderError(
+                f"Claude has no model called {self.model!r} that this key can use. Use --model opus (Claude Opus 5.5) "
+                "or --model sonnet (Claude Sonnet 5.5), or leave --model off to pick from a menu."
+            ) from e
         except anthropic.APIConnectionError as e:
             raise ProviderError(f"Couldn't reach the Anthropic API ({e}). Check your internet connection.") from e
         except anthropic.APIStatusError as e:

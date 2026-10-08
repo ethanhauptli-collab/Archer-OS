@@ -239,7 +239,7 @@ def test_verify_ok_and_unknown_model():
     provider, httpx2 = _anthropic_provider(handler)
     assert provider.verify() == "Claude Opus 5.5"
     provider.model = "claude-nope"
-    with pytest.raises(ProviderError, match="isn't available"):
+    with pytest.raises(ProviderError, match="no model called 'claude-nope'.*--model sonnet"):
         provider.verify()
 
 
@@ -318,3 +318,25 @@ def test_401_quotes_anthropic_and_403_says_the_key_was_accepted(monkeypatch):
     status["code"] = 403
     with pytest.raises(ProviderAuthError, match="accepted the key but refused the request \\(Your workspace cannot use"):
         provider.verify()
+
+
+@pytest.mark.parametrize(
+    "typed,model",
+    [
+        ("Claude-Sonnet.5.5", "claude-sonnet-5-5"),  # what the user actually typed
+        ("Claude Sonnet 5.5", "claude-sonnet-5-5"),
+        ("sonnet-5.5", "claude-sonnet-5-5"),
+        ("SONNET", "claude-sonnet-5-5"),
+        ("claude-sonnet-5-5", "claude-sonnet-5-5"),
+        ("Opus 5.5", "claude-opus-5-5"),
+        ("opus", "claude-opus-5-5"),
+        ("sonnet 4.6", "claude-sonnet-4-6"),
+        ("claude-opus-4-5-20251101", "claude-opus-4-5-20251101"),  # dated ids pass through
+        ("", "claude-opus-5-5"),
+        (None, "claude-opus-5-5"),
+    ],
+)
+def test_model_names_are_forgiving(typed, model):
+    from roughcut.providers.anthropic_provider import resolve_model
+
+    assert resolve_model(typed) == model

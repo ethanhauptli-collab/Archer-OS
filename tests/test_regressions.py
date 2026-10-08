@@ -239,3 +239,58 @@ def test_repeated_warnings_collapse():
     out = collapse_warnings(ws)
     assert len(out) == 2
     assert "(x46: V01, I001" in out[0] and "and 84 more" in out[0]
+
+
+
+# Typing exact model ids in Terminal was "a nightmare": menu + forgiving names.
+
+
+def test_model_menu_defaults_and_choices(capsys):
+    from roughcut.cli import choose_claude_models
+
+    assert choose_claude_models(vision=True, ask=lambda _: "") == ("claude-opus-5-5", None)
+    assert choose_claude_models(vision=True, ask=lambda _: "2") == ("claude-opus-5-5", "claude-sonnet-5-5")
+    assert choose_claude_models(vision=True, ask=lambda _: "3") == ("claude-sonnet-5-5", None)
+    assert choose_claude_models(vision=False, ask=lambda _: "2") == ("claude-sonnet-5-5", None)
+    answers = iter(["sonnet", "9", "3"])
+    assert choose_claude_models(vision=True, ask=lambda _: next(answers)) == ("claude-sonnet-5-5", None)
+    out = capsys.readouterr().out
+    assert "Type a number from 1 to 3" in out and "[default]" in out
+
+    def eof(_):
+        raise EOFError
+
+    assert choose_claude_models(vision=True, ask=eof) == ("claude-opus-5-5", None)
+
+
+def _captured_options(monkeypatch, argv, interactive):
+    import roughcut.cli as cli
+    import roughcut.pipeline as pipeline
+
+    seen = {}
+
+    def fake_build(opts):
+        seen["opts"] = opts
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(pipeline, "build", fake_build)
+    monkeypatch.setattr(cli, "_interactive", lambda: interactive)
+    monkeypatch.setattr(cli, "choose_claude_models", lambda vision: seen.setdefault("menu", ("claude-sonnet-5-5", None)))
+    assert cli.main(argv) == 1
+    return seen
+
+
+def test_build_asks_for_a_model_in_terminal(monkeypatch, tmp_path):
+    seen = _captured_options(monkeypatch, ["build", str(tmp_path)], interactive=True)
+    assert "menu" in seen and seen["opts"].model == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize(
+    "extra,interactive",
+    [(["--model", "Claude-Sonnet.5.5"], True), (["--no-menu"], True), ([], False), (["--progress-json"], True), (["--provider", "none"], True)],
+)
+def test_build_skips_the_menu_when_it_should(monkeypatch, tmp_path, extra, interactive):
+    seen = _captured_options(monkeypatch, ["build", str(tmp_path), *extra], interactive=interactive)
+    assert "menu" not in seen
+    if "--model" in extra:
+        assert seen["opts"].model == "claude-sonnet-5-5"

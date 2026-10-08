@@ -71,7 +71,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--keep-fillers` | off | Don't cut um/uh |
 | `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
 | `--provider` | `anthropic` | `anthropic`, `openai`, `ollama`, `openai-compatible`, `none` |
-| `--model` | `claude-opus-5-5` | Any model the provider serves. `sonnet` = Claude Sonnet 5.5: faster, half the price |
+| `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it. Other providers: the model's name |
 | `--effort` | `high` | Claude reasoning effort: `low` … `max` |
 | `--no-vision` | | Skip visual descriptions of clips (cheaper, worse B-roll picks) |
 | `--vision-model` | same as `--model` | A different model for describing clips, e.g. `sonnet` while Opus plans (most tokens on a big shoot go to descriptions) |
@@ -114,5 +114,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 144 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 162 tests; generates synthetic footage with ffmpeg, no API key needed
 ```
