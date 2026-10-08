@@ -112,7 +112,7 @@ struct BuildForm: View {
                             Text(provider.title).tag(provider)
                         }
                     }
-                    if model.options.provider == .anthropic {
+                    if model.options.provider.usesClaudeModels {
                         Picker("Model", selection: $model.options.model) {
                             ForEach(ClaudeModelChoice.planners) { choice in
                                 Text(choice.title).tag(choice.id)
@@ -125,7 +125,7 @@ struct BuildForm: View {
                         if model.options.provider.usesBaseURL {
                             TextField("Server URL", text: $model.options.baseURL, prompt: Text("http://localhost:1234/v1"))
                         }
-                        if model.options.provider == .anthropic {
+                        if model.options.provider.usesClaudeModels {
                             Picker("Effort", selection: $model.options.effort) {
                                 ForEach(Effort.allCases) { effort in
                                     Text(effort.title).tag(effort)
@@ -133,7 +133,7 @@ struct BuildForm: View {
                             }
                         }
                         Toggle("Look at the footage (better B-roll picks, costs a little more)", isOn: $model.options.vision)
-                        if model.options.provider == .anthropic && model.options.vision {
+                        if model.options.provider.usesClaudeModels && model.options.vision {
                             Picker("Describe clips with", selection: $model.options.visionModel) {
                                 ForEach(ClaudeModelChoice.describers) { choice in
                                     Text(choice.title).tag(choice.id)
@@ -173,7 +173,7 @@ struct BuildForm: View {
         }
         .onChange(of: model.options.provider) {
             // Local and compatible servers are usually text-only models.
-            model.options.vision = model.options.provider == .anthropic || model.options.provider == .openai
+            model.options.vision = model.options.provider.usesClaudeModels || model.options.provider == .openai
             // Model names don't carry over between providers.
             model.options.model = ""
             model.options.visionModel = ""

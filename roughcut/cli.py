@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("--script", help="script, outline or reference transcript to follow (text file)")
     brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
     ai = b.add_argument_group("model")
-    ai.add_argument("--provider", choices=PROVIDERS, default="anthropic", help="who plans the edit (default: anthropic; 'none' = silence cutting only)")
+    ai.add_argument("--provider", choices=PROVIDERS, default="anthropic", help="who plans the edit (default: anthropic = API key; claude-code = your Claude Pro/Max subscription through Claude Code; 'none' = silence cutting only)")
     ai.add_argument("--model", help="Claude: opus (default) or sonnet (faster, half the price); spellings like 'Sonnet 5.5' work. Leave it off in Terminal to pick from a menu. Other providers: the model's name")
     ai.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default="high", help="reasoning effort for the plan (Claude)")
     ai.add_argument("--base-url", help="endpoint for openai / ollama / openai-compatible providers")
@@ -238,7 +238,35 @@ def doctor_report(offline: bool = False) -> dict:
         "anthropic_key_source": KEY_SOURCES.get("ANTHROPIC_API_KEY"),
         "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
         "openai_installed": importlib.util.find_spec("openai") is not None,
+        **claude_code_report(offline),
     }
+
+
+def claude_code_report(offline: bool = False) -> dict:
+    """Is Claude Code installed and signed in with a subscription (for --provider claude-code)?"""
+    from .providers import ProviderError
+    from .providers.claude_code import auth_status, find_claude
+
+    binary = find_claude()
+    method = None
+    if binary and not offline:
+        try:
+            info = auth_status(binary)
+        except ProviderError:
+            info = {}
+        method = info.get("authMethod") if info.get("loggedIn") else None
+    return {"claude_code": binary, "claude_code_auth": method}
+
+
+def _claude_code_detail(r: dict) -> str:
+    if not r.get("claude_code"):
+        return "optional: install it to use your Claude subscription (--provider claude-code)"
+    auth = r.get("claude_code_auth")
+    if auth is None:
+        return "installed, not signed in: run `claude` and type /login to use your subscription"
+    if auth == "api_key":
+        return "signed in with an API key, not a subscription"
+    return "signed in with your subscription: --provider claude-code uses it"
 
 
 def _print_doctor(r: dict) -> int:
@@ -252,6 +280,7 @@ def _print_doctor(r: dict) -> int:
             + (f" (from the {r['anthropic_key_source']})" if r.get("anthropic_key_source") and r["anthropic_key_status"] in ("ok", "not checked") else ""),
         ),
         ("OpenAI", r["openai_key"] and r["openai_installed"], "ready" if r["openai_key"] and r["openai_installed"] else "optional, not set up"),
+        ("Claude Code", r.get("claude_code_auth") not in (None, "api_key"), _claude_code_detail(r)),
     ]
     print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
     for label, ok, detail in rows:
@@ -295,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "render":
             result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common))
         else:
-            if args.provider == "anthropic":
+            if args.provider in ("anthropic", "claude-code"):
                 from .providers.anthropic_provider import resolve_model
 
                 if args.model is None and args.vision_model is None and args.menu and not json_mode and _interactive():

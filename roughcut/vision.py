@@ -45,7 +45,9 @@ def describe_clips(
 ) -> list[str]:
     """Fill clip.visual for every clip with pictures. Returns warnings."""
     warnings: list[str] = []
-    key = f"vision-{provider.name}-{provider.model}.json".replace("/", "_")
+    # Claude Code runs the same Claude models, so it shares descriptions with the API.
+    family = "anthropic" if provider.name == "claude-code" else provider.name
+    key = f"vision-{family}-{provider.model}.json".replace("/", "_")
     visual_clips = [c for c in analysis.clips if c.media.has_video]
     todo: list[Clip] = []
     for clip in visual_clips:

@@ -321,6 +321,13 @@ final class AppModel {
                 issues.append("Add your Claude API key in Settings.")
             }
         }
+        if options.provider == .claudeCode {
+            if doctor.claudeCode == nil {
+                issues.append("Claude Code isn't installed. In Terminal: npm install -g @anthropic-ai/claude-code")
+            } else if !doctor.claudeCodeUsesSubscription {
+                issues.append("Sign Claude Code in with your subscription: in Terminal run claude, then type /login.")
+            }
+        }
         if (options.provider == .openai || options.provider == .openaiCompatible) && !doctor.openaiInstalled {
             issues.append("OpenAI support isn't installed. In the repo: pip install -e '.[openai]'")
         } else if options.provider == .openai && !doctor.openaiKey {

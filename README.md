@@ -70,7 +70,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--style` | `medium` | `tight`, `medium`, `loose`: how much pause is kept |
 | `--keep-fillers` | off | Don't cut um/uh |
 | `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
-| `--provider` | `anthropic` | `anthropic`, `openai`, `ollama`, `openai-compatible`, `none` |
+| `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
 | `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it. Other providers: the model's name |
 | `--effort` | `high` | Claude reasoning effort: `low` … `max` |
 | `--no-vision` | | Skip visual descriptions of clips (cheaper, worse B-roll picks) |
@@ -80,6 +80,16 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
 | `--broll-db`, `--music-db` | -20, -14 | Levels for B-roll nat sound and music |
 | `--no-fill` | | Don't auto-cover narration the plan left without picture |
+
+### Use your Claude subscription instead of an API key
+
+```bash
+roughcut build ~/Movies/Trip --provider claude-code
+```
+
+This sends the AI steps through [Claude Code](https://claude.com/claude-code) signed in with your own Pro or Max plan, so runs count against your plan's usage limits instead of API credit. Anthropic's terms allow running the Claude Code program with your own subscription from your own scripts, but not calling the API directly with subscription credentials, so roughcut never touches your sign-in. It just runs `claude -p`.
+
+Setup: install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude`, and type `/login`. `roughcut doctor` shows whether it's ready. Claude Code would bill an API key instead of your plan whenever one is set, so roughcut hides `ANTHROPIC_API_KEY` from it. Big shoots use a lot of your plan's allowance on clip descriptions; `--vision-model sonnet` or `--no-vision` stretches it. The model menu and `--model` work the same as with an API key.
 
 ### Other models
 
@@ -114,5 +124,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 180 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 188 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

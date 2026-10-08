@@ -6,7 +6,7 @@ import os
 
 from .base import ImagePart, Part, Provider, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog, extract_json
 
-PROVIDERS = ("anthropic", "openai", "ollama", "openai-compatible", "none")
+PROVIDERS = ("anthropic", "claude-code", "openai", "ollama", "openai-compatible", "none")
 
 # Published per-million-token prices for cost estimates in the report.
 # (input, output, cache read); cache writes bill at 1.25x input.
@@ -32,6 +32,10 @@ def make_provider(
         from .anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(model=model, effort=effort)
+    if name == "claude-code":
+        from .claude_code import ClaudeCodeProvider
+
+        return ClaudeCodeProvider(model=model, effort=effort)
 
     from .openai_compat import OpenAICompatProvider
 

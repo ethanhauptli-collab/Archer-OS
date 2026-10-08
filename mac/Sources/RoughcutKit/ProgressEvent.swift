@@ -82,8 +82,13 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
     public var anthropicKeyMessage: String?
     public var openaiKey: Bool
     public var openaiInstalled: Bool
+    /// Path to the `claude` program, if installed (nil from older CLIs too).
+    public var claudeCode: String?
+    /// How Claude Code is signed in: claude.ai / oauth_token / api_key; nil when signed out.
+    public var claudeCodeAuth: String?
 
     public var hasFFmpeg: Bool { ffmpeg != nil && ffprobe != nil }
+    public var claudeCodeUsesSubscription: Bool { claudeCodeAuth.map { $0 != "api_key" } ?? false }
     public var anthropicKeyWorks: Bool { anthropicKeyStatus.map { $0 == "ok" || $0 == "not checked" } ?? anthropicKey }
 }
 

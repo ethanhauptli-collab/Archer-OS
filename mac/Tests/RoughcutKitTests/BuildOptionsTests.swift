@@ -82,6 +82,19 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertFalse(options().arguments().contains { $0.hasPrefix("--model") })
     }
 
+    func testClaudeCodeUsesTheSubscriptionProvider() {
+        var o = options()
+        o.provider = .claudeCode
+        o.model = "claude-sonnet-5-5"
+        XCTAssertEqual(o.problems, [])
+        let args = o.arguments()
+        XCTAssertTrue(args.contains("claude-code"))
+        XCTAssertTrue(args.contains("--model=claude-sonnet-5-5"))
+        XCTAssertTrue(args.contains("--effort"))
+        XCTAssertNil(ModelProvider.claudeCode.apiKeyVariable)  // no API key: the subscription sign-in
+        XCTAssertTrue(ModelProvider.claudeCode.usesClaudeModels)
+    }
+
     func testTargetIsSentAsSeconds() {
         var o = options()
         o.targetLength = "8 min"

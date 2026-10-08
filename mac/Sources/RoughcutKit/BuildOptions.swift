@@ -42,6 +42,7 @@ public enum SequenceFormat: String, CaseIterable, Codable, Identifiable, Sendabl
 /// Who plans the edit (`--provider`).
 public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable {
     case anthropic
+    case claudeCode = "claude-code"
     case openai
     case ollama
     case openaiCompatible = "openai-compatible"
@@ -51,7 +52,8 @@ public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var title: String {
         switch self {
-        case .anthropic: return "Claude (Anthropic)"
+        case .anthropic: return "Claude (API key)"
+        case .claudeCode: return "Claude (your Pro/Max plan, via Claude Code)"
         case .openai: return "OpenAI"
         case .ollama: return "Ollama (on this Mac)"
         case .openaiCompatible: return "OpenAI-compatible server"
@@ -62,10 +64,12 @@ public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable
     /// The CLI has no default model for these providers.
     public var requiresModel: Bool { self == .openai || self == .ollama || self == .openaiCompatible }
     public var usesBaseURL: Bool { self == .openaiCompatible }
+    /// Claude through the API or through Claude Code: same models, same menus.
+    public var usesClaudeModels: Bool { self == .anthropic || self == .claudeCode }
 
     public var modelPlaceholder: String {
         switch self {
-        case .anthropic: return "claude-opus-5-5 (default)"
+        case .anthropic, .claudeCode: return "claude-opus-5-5 (default)"
         case .ollama: return "e.g. a model you've pulled in Ollama"
         default: return "model name"
         }
@@ -76,7 +80,7 @@ public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable
         switch self {
         case .anthropic: return "ANTHROPIC_API_KEY"
         case .openai, .openaiCompatible: return "OPENAI_API_KEY"
-        case .ollama, .none: return nil
+        case .claudeCode, .ollama, .none: return nil  // Claude Code uses your subscription sign-in
         }
     }
 }
@@ -175,7 +179,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
             if !model.trimmed.isEmpty {
                 args.append("--model=\(model.trimmed)")
             }
-            if provider == .anthropic {
+            if provider.usesClaudeModels {
                 args += ["--effort", effort.rawValue]
             }
             if provider.usesBaseURL {
