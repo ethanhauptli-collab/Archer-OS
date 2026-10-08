@@ -13,6 +13,10 @@ DEFAULT_MODEL = "claude-opus-5-5"
 # Short names accepted for --model / --vision-model.
 MODEL_ALIASES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# Credentials that start like an API key but can never call the Messages API with x-api-key.
+SIGN_IN_TOKENS = ("sk-ant-oat", "sk-ant-ort", "sk-ant-sid")
+ADMIN_KEYS = ("sk-ant-admin",)
+NOT_API_KEYS = SIGN_IN_TOKENS + ADMIN_KEYS
 
 
 def _mask(key: str) -> str:
@@ -63,16 +67,21 @@ def key_problem_hint(env: dict | None = None) -> str:
     if not key and not token:
         return f"No Claude API key is set. Create one at console.anthropic.com → API Keys. {where}"
     shown = key or token
-    if shown.startswith("sk-ant-oat"):
+    if shown.startswith(SIGN_IN_TOKENS):
         return (
             f"The key ({_mask(shown)}) is a Claude.ai / Claude Code sign-in token, not an API key. "
             f"Roughcut needs an API key from console.anthropic.com (API usage is billed separately from a Claude subscription). {where}"
+        )
+    if shown.startswith(ADMIN_KEYS):
+        return (
+            f"The key ({_mask(shown)}) is an Admin API key: it manages your organization but can't run Claude. "
+            f"Create a regular key at console.anthropic.com → API Keys. {where}"
         )
     note = override_note() if real and key else ""
     if note:
         return f"Anthropic rejected the key {_mask(key)}. {note}"
     if key and not key.startswith("sk-ant-"):
-        return f"ANTHROPIC_API_KEY ({_mask(key)}) doesn't look like an Anthropic API key; those start with sk-ant-api. {where}"
+        return f"ANTHROPIC_API_KEY ({_mask(key)}) doesn't look like an Anthropic API key; those start with sk-ant-. {where}"
     return (
         f"Anthropic rejected the key {_mask(shown)}. It may be mistyped, revoked, or in a workspace without "
         f"API credit. Check it at console.anthropic.com → API Keys. {where}"

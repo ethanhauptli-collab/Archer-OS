@@ -239,3 +239,26 @@ def test_pasted_key_rejection_talks_about_the_pasted_key(keychain, tmp_path, mon
     assert seen == [KEY]
     assert status == "rejected"
     assert "the key you pasted" in message and "invalid x-api-key" in message and "overriding" not in message
+
+
+def test_set_sends_new_style_keys_to_anthropic(keychain, monkeypatch, capsys):
+    """Console keys now start sk-ant-usr-; the first version refused them without asking Anthropic."""
+    import roughcut.cli as cli
+
+    new_key = "sk-ant-usr-1" + "c" * 60 + "_AAA"
+    monkeypatch.setattr("getpass.getpass", lambda prompt: new_key)
+    checked = []
+    monkeypatch.setattr(cli, "check_anthropic_key", lambda offline=False, pasted=None: checked.append(pasted) or ("ok", ""))
+    assert main(["key", "set"]) == 0
+    assert checked == [new_key]
+    assert keys.keychain_get("ANTHROPIC_API_KEY") == new_key
+
+
+def test_set_explains_an_admin_key(keychain, monkeypatch, capsys):
+    import roughcut.cli as cli
+
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-ant-admin01-" + "d" * 40)
+    monkeypatch.setattr(cli, "check_anthropic_key", lambda **kw: pytest.fail("should not call Anthropic"))
+    assert main(["key", "set"]) == 1
+    out = capsys.readouterr().out
+    assert "Admin API key" in out and "rejected" not in out

@@ -43,7 +43,7 @@ roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
 
 `roughcut doctor` checks that ffmpeg and transcription are installed, and tests your API key against Anthropic.
 
-**About the key:** it has to be an API key from [console.anthropic.com](https://console.anthropic.com) → API Keys (starts with `sk-ant-api`). A Claude Pro/Max subscription or Claude Code sign-in doesn't give API access. If the key is missing or rejected, `roughcut build` stops right away and says why.
+**About the key:** it has to be an API key from [console.anthropic.com](https://console.anthropic.com) → API Keys (starts with `sk-ant-`: `sk-ant-usr-` for new keys, `sk-ant-api03-` for older ones). A Claude Pro/Max subscription or Claude Code sign-in doesn't give API access. If the key is missing or rejected, `roughcut build` stops right away and says why.
 
 `roughcut key set` checks the key with Anthropic and stores it in your login Keychain, shared with the Mac app (Settings → API Keys writes the same entry). `roughcut key status` shows where the key comes from, and `roughcut key remove` deletes it. An `ANTHROPIC_API_KEY` exported in your shell still works and takes priority. The first time Terminal reads a key the app saved (or the other way round), macOS asks for permission; click **Always Allow**.
 
@@ -114,5 +114,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 139 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 144 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

@@ -83,7 +83,7 @@ def _key_command(action: str, openai: bool) -> int:
     import getpass
 
     from . import keys
-    from .providers.anthropic_provider import _mask, key_problem_hint, override_note
+    from .providers.anthropic_provider import NOT_API_KEYS, _mask, key_problem_hint, override_note
 
     account = "OPENAI_API_KEY" if openai else "ANTHROPIC_API_KEY"
     label = "OpenAI" if openai else "Claude (Anthropic)"
@@ -124,7 +124,9 @@ def _key_command(action: str, openai: bool) -> int:
         )
         return 1
     if not openai:
-        if not value.startswith("sk-ant-api"):
+        # Anthropic decides what's valid (new console keys start sk-ant-usr-, older ones
+        # sk-ant-api03-); only kinds that can never run Claude are stopped here.
+        if not value.startswith("sk-ant-") or value.startswith(NOT_API_KEYS):
             print(key_problem_hint({"ANTHROPIC_API_KEY": value}))
             return 1
         status, message = check_anthropic_key(pasted=value)

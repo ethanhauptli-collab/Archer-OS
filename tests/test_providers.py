@@ -197,6 +197,9 @@ def test_openai_without_a_key_is_a_provider_error(monkeypatch):
     [
         ({}, "No Claude API key is set"),
         ({"ANTHROPIC_API_KEY": "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz"}, "sign-in token, not an API key"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-ort01-abcdefghijklmnopqrstuvwxyz"}, "sign-in token, not an API key"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-admin01-abcdefghijklmnopqrstuvwxyz"}, "Admin API key"),
+        ({"ANTHROPIC_API_KEY": "sk-ant-usr-1abcdefghijklmnopqrstuvwxyz"}, "rejected the key sk-ant-usr-1…wxyz"),
         ({"ANTHROPIC_API_KEY": "my-key-1234567890abcdefgh"}, "doesn't look like an Anthropic API key"),
         ({"ANTHROPIC_API_KEY": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"}, "rejected the key sk-ant-api03…wxyz"),
         ({"ANTHROPIC_API_KEY": "sk-ant-api03-x" * 3, "ANTHROPIC_BASE_URL": "http://localhost:8080"}, "ANTHROPIC_BASE_URL is set"),
