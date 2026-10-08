@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
 from . import timecode as tc
@@ -268,6 +268,34 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     return pieces
 
 
+def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> list[_Piece]:
+    """Remove long silences inside kept talking footage, wherever they ended up.
+
+    Whisper stretches a word over the pause beside it, before or after, by
+    any amount, so a pause can hide inside a word, between two sentences that
+    were joined, or inside a timed range. Cutting the silence itself never
+    removes sound, so this runs last. Only silences with sound on both sides
+    inside the piece go: a quiet reaction shot or B-roll stays as chosen.
+    """
+    out: list[_Piece] = []
+    for p in pieces:
+        clip = analysis.clip(p.clip_id)
+        if p.seg_ids:
+            longest = style.max_gap
+        elif clip.role in ("aroll", "voiceover"):  # a timed range of talking footage
+            longest = max(1.0, 2 * style.max_gap)
+        else:
+            out.append(p)
+            continue
+        cur = p
+        for s, e in sorted(clip.silences):
+            if e - s > longest and cur.wa < s and e < cur.wb:
+                out.append(replace(cur, b=min(cur.b, s + style.pad_out), wb=s, w1=None, b_tight=False, seg_ids=list(cur.seg_ids)))
+                cur = replace(cur, a=max(cur.a, e - style.pad_in), wa=e, w0=None, a_tight=False, seg_ids=list(cur.seg_ids))
+        out.append(cur)
+    return out
+
+
 def _merge(pieces: list[_Piece], max_gap: float, warnings: list[str] | None = None) -> list[_Piece]:
     """Join back-to-back sentences from the same take when the pause between them is natural.
 
@@ -325,7 +353,7 @@ def build_timeline(
                 raw_pieces.extend(speech_pieces(seg, clip, style, s_idx))
             else:
                 raw_pieces.append(_Piece(clip.id, item.start, item.end, item.start, item.end, s_idx, []))
-    pieces = _merge(raw_pieces, style.max_gap, warnings)
+    pieces = _cut_silences(_merge(raw_pieces, style.max_gap, warnings), analysis, style)
 
     width, height, seq_fd = choose_format(pieces, analysis, format_override)
     tl = Timeline(name=name, frame_duration=seq_fd, width=width, height=height)

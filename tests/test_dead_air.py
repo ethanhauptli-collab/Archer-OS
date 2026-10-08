@@ -128,3 +128,61 @@ def test_talking_clip_without_pauses_says_why():
     assert "almost no pauses" in warning and "-28 dB" in warning
     clip.silences = [(10.0, 12.0)]
     assert pause_warning(clip) is None
+
+
+# The report after the first fix: "a solid gap between 10-14 seconds, nothing is being cut".
+# Whisper's word times are contiguous (no gaps at all), and the word next to a pause is
+# stretched over it with its boundary drifting a little past the silence. The old clamps
+# then failed and the two halves were merged back together.
+
+GAP = (10.1, 14.0)  # what the silence map hears
+
+
+def gap_clip(boundary: float, sentence_break: bool):
+    a_text = "So this is the new arena district coming to Anaheim and the first phase opens next year"
+    b_text = "And honestly it is not even built yet."
+    a = [Word(**w) for w in spread_words(0.2, 9.9, a_text + ("." if sentence_break else ","))]
+    b = [Word(**w) for w in spread_words(14.1, 19.0, b_text)]
+    words = a + b
+    for x, y in zip(words, words[1:]):  # Whisper: no gaps between words
+        x.end = y.start
+    a[-1].end = b[0].start = boundary  # where Whisper put the pause
+    clip = make_clip("V01", seconds=20.5, role="aroll", silences=[(0.0, 0.18), GAP, (19.3, 20.5)])
+    clip.segments = build_segments("V01", words)
+    return clip
+
+
+def kept_spans(tl) -> list[tuple[float, float]]:
+    return [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]
+
+
+def assert_gap_cut(spans):
+    inside = [(a, b) for a, b in spans if a < 13.5 and b > 10.6]
+    assert not inside, f"the 10-14 s pause is still in the cut: {spans}"
+    assert any(b >= 9.9 for a, b in spans if a < 9.9) and any(a <= 14.1 for a, b in spans if b > 14.1)  # speech kept
+
+
+@pytest.mark.parametrize("boundary", [10.0, 12.0, 14.1, 14.35])
+@pytest.mark.parametrize("sentence_break", [True, False])
+def test_a_pause_is_cut_wherever_whisper_put_it(boundary, sentence_break):
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import build_timeline
+
+    analysis = Analysis(clips=[gap_clip(boundary, sentence_break)])
+    tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES["medium"], name="t")
+    assert_gap_cut(kept_spans(tl))
+
+
+def test_a_timed_range_of_talking_footage_loses_its_dead_air():
+    from roughcut.plan import normalize
+    from roughcut.timeline import build_timeline
+
+    analysis = Analysis(clips=[gap_clip(14.1, True), make_clip("V02", seconds=20, silences=[GAP])])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01@0-19.2"], "broll": []}]}, analysis)
+    assert_gap_cut(kept_spans(build_timeline(plan, analysis, style=STYLES["medium"], name="t")))
+
+    # A quiet moment chosen on purpose stays, and so does B-roll.
+    for item in ("V01@10.5-13.5", "V02@5-18"):
+        plan = normalize({"sections": [{"name": "x", "items": [item], "broll": []}]}, analysis)
+        tl = build_timeline(plan, analysis, style=STYLES["medium"], name="t")
+        assert len(tl.spine) == 1, item
