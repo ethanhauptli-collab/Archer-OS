@@ -356,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"FCPXML:    {result.fcpxml}")
     print(f"Report:    {result.report}")
     print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
+    print(f"Then open the project \"{tl.name}\" in the new event. The clip itself in the browser stays your untouched original.")
     return 3 if result.fell_back else 0
 
 

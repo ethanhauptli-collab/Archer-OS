@@ -60,6 +60,12 @@ The Mac app (`mac/`) was written in that cloud session with **no Swift toolchain
 - Project shape exposed gaps now fixed: duplicate exports (16:9/9:16/4:3), three takes of one narration script, narration-led structure with 5-25 s sentences needing multiple shots.
 - Not yet seen: an actual AI-planned cut. Next run needs a working key (console.anthropic.com API key).
 
+### Single-clip test on the Mac (4K 24p action-cam clip, outdoor cafe)
+
+- The FCPXML imports into Final Cut Pro 11; A-Roll and vision keywords show up on the clip.
+- "No cuts" turned out to be the original clip in the browser, not the Rough Cut project. The CLI now names the project to open.
+- That hunt still found real bugs: a fixed −35 dB silence level missed pauses under room tone, and the silence clamps failed when Whisper's stretched word overshot the silence by a tenth of a second (fixed by `_cut_silences`).
+
 ### CLI verification (cloud)
 
 Verified there: 180 tests (including a regression test for each finding from an independent code review, and the app's progress contract), DTD validation, a 4,500-plan fuzz of the timeline/FCPXML math (no DTD errors, off-grid edits, or out-of-media reads), the real Anthropic SDK against a mocked HTTP transport, and the Whisper glue with stubbed modules.
