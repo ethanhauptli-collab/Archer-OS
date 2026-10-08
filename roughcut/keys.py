@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 SERVICE = "com.roughcut.app"  # must match mac/Sources/Roughcut/Keychain.swift
 ACCOUNTS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
@@ -72,6 +73,28 @@ def source_of(account: str) -> str | None:
     if keychain_get(account):
         return "keychain"
     return None
+
+
+SHELL_FILES = (".zshrc", ".zprofile", ".zshenv", ".bash_profile", ".bashrc", ".profile")
+
+
+def shell_files_setting(account: str) -> list[str]:
+    """Shell startup files that mention the variable, as "~/.zshrc" etc."""
+    found = []
+    for name in SHELL_FILES:
+        try:
+            if account in (Path.home() / name).read_text(errors="ignore"):
+                found.append(f"~/{name}")
+        except OSError:
+            continue
+    return found
+
+
+def shadowed_keychain_key(account: str) -> str | None:
+    """The Keychain key, when a different exported one is overriding it."""
+    exported = os.environ.get(account, "").strip()
+    saved = keychain_get(account) if exported else None
+    return saved if saved and saved != exported else None
 
 
 def load_into_environ() -> dict[str, str]:

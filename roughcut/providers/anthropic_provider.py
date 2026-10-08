@@ -19,8 +19,37 @@ def _mask(key: str) -> str:
     return f"{key[:12]}…{key[-4:]}" if len(key) > 20 else "(too short)"
 
 
+def override_note(account: str = "ANTHROPIC_API_KEY") -> str:
+    """When an exported key hides a different one saved in the Keychain, say where and how to fix it."""
+    from .. import keys
+
+    saved = keys.shadowed_keychain_key(account)
+    if not saved:
+        return ""
+    files = keys.shell_files_setting(account)
+    if files:
+        fix = " ".join(f"sed -i '' '/{account}/d' {f};" for f in files)
+        return (
+            f"An older {account} exported in {', '.join(files)} is overriding the key you saved with "
+            f"`roughcut key set` ({_mask(saved)}). Remove it with:  {fix} unset {account}  "
+            "(or open a new Terminal window after removing it)."
+        )
+    return (
+        f"{account} is set in this Terminal window and is overriding the key you saved with "
+        f"`roughcut key set` ({_mask(saved)}). Run `unset {account}` or open a new window."
+    )
+
+
+def _api_said(e: Exception) -> str:
+    body = getattr(e, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict) and body["error"].get("message"):
+        return str(body["error"]["message"])
+    return str(getattr(e, "message", "") or e)
+
+
 def key_problem_hint(env: dict | None = None) -> str:
     """Explain the most likely reason Anthropic rejected (or never got) a key."""
+    real = env is None
     env = os.environ if env is None else env
     key = env.get("ANTHROPIC_API_KEY", "").strip()
     token = env.get("ANTHROPIC_AUTH_TOKEN", "").strip()
@@ -39,12 +68,34 @@ def key_problem_hint(env: dict | None = None) -> str:
             f"The key ({_mask(shown)}) is a Claude.ai / Claude Code sign-in token, not an API key. "
             f"Roughcut needs an API key from console.anthropic.com (API usage is billed separately from a Claude subscription). {where}"
         )
+    note = override_note() if real and key else ""
+    if note:
+        return f"Anthropic rejected the key {_mask(key)}. {note}"
     if key and not key.startswith("sk-ant-"):
         return f"ANTHROPIC_API_KEY ({_mask(key)}) doesn't look like an Anthropic API key; those start with sk-ant-api. {where}"
     return (
         f"Anthropic rejected the key {_mask(shown)}. It may be mistyped, revoked, or in a workspace without "
         f"API credit. Check it at console.anthropic.com → API Keys. {where}"
     )
+
+
+def refused_message(said: str, model: str) -> str:
+    return (
+        f"Anthropic accepted the key but refused the request ({said}). Check at console.anthropic.com that "
+        f"the key's workspace has API credit and can use {model}."
+    )
+
+
+def auth_error(e: Exception, model: str) -> ProviderAuthError:
+    """401: the key itself is bad. 403: the key works but isn't allowed this request."""
+    said = _api_said(e)
+    status = getattr(e, "status_code", None)
+    if status == 403 and not override_note():
+        err = ProviderAuthError(refused_message(said, model))
+    else:
+        err = ProviderAuthError(f"{key_problem_hint()} (Anthropic said: {said})")
+    err.said, err.status = said, status
+    return err
 
 
 class AnthropicProvider:
@@ -59,7 +110,9 @@ class AnthropicProvider:
         self._anthropic = anthropic
         self.model = MODEL_ALIASES.get((model or "").strip().lower(), model) if model else DEFAULT_MODEL
         self.effort = effort
-        self.client = client or anthropic.Anthropic(max_retries=3)
+        # An explicit api_key stops the SDK from also sending ANTHROPIC_AUTH_TOKEN
+        # (a leftover sign-in token there would get a good key rejected).
+        self.client = client or anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() or None, max_retries=3)
         self.use_fallbacks = use_fallbacks
         self.usage = UsageLog()
 
@@ -73,7 +126,7 @@ class AnthropicProvider:
                 raise
             raise ProviderAuthError(key_problem_hint()) from e
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
-            raise ProviderAuthError(key_problem_hint()) from e
+            raise auth_error(e, self.model) from e
         except anthropic.NotFoundError as e:
             raise ProviderError(f"Model {self.model!r} isn't available to this API key. Try --model claude-opus-5-5.") from e
         except anthropic.APIConnectionError as e:
@@ -141,7 +194,7 @@ class AnthropicProvider:
                 raise
             raise ProviderAuthError(key_problem_hint()) from e
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
-            raise ProviderAuthError(key_problem_hint()) from e
+            raise auth_error(e, self.model) from e
         except anthropic.BadRequestError as e:
             if self.use_fallbacks and "fallback" in str(e).lower():
                 self.use_fallbacks = False

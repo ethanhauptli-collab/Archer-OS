@@ -114,5 +114,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 131 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 139 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

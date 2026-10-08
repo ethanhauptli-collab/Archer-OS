@@ -83,7 +83,7 @@ def _key_command(action: str, openai: bool) -> int:
     import getpass
 
     from . import keys
-    from .providers.anthropic_provider import _mask, key_problem_hint
+    from .providers.anthropic_provider import _mask, key_problem_hint, override_note
 
     account = "OPENAI_API_KEY" if openai else "ANTHROPIC_API_KEY"
     label = "OpenAI" if openai else "Claude (Anthropic)"
@@ -116,12 +116,18 @@ def _key_command(action: str, openai: bool) -> int:
     if not value:
         print("Nothing entered; no changes made.")
         return 1
+    if "..." in value or "…" in value or "*" in value:
+        print(
+            f"That's the shortened key from the list on the API Keys page ({_mask(value)}), not the key itself. "
+            "The full key is shown only once, right after you create it: create a new key, click Copy in that "
+            "window, and run `roughcut key set` again."
+        )
+        return 1
     if not openai:
         if not value.startswith("sk-ant-api"):
             print(key_problem_hint({"ANTHROPIC_API_KEY": value}))
             return 1
-        os.environ[account] = value
-        status, message = check_anthropic_key()
+        status, message = check_anthropic_key(pasted=value)
         if status == "rejected":
             print(message + "\nNot saved.")
             return 1
@@ -134,28 +140,41 @@ def _key_command(action: str, openai: bool) -> int:
         return 1
     print(f"Saved {_mask(value)} to your Keychain. Terminal runs and the Roughcut app both use it now.")
     if exported and exported != value:
-        print(f"Note: a different {account} is exported in this shell and takes priority. Remove it from ~/.zshrc, then open a new Terminal window.")
+        print(f"Note: a different {account} is exported in this shell and takes priority over the Keychain, so runs would still use the old key.")
+        print(override_note(account) or f"Remove the `export {account}=` line from your shell profile, then open a new Terminal window.")
     return 0
 
 
 KEY_SOURCES: dict[str, str] = {}  # filled from keys.load_into_environ() at startup
 
 
-def check_anthropic_key(offline: bool = False) -> tuple[str, str]:
-    """(status, message): status is ok / rejected / missing / unreachable / not checked."""
-    from .providers import ProviderAuthError
-    from .providers.anthropic_provider import AnthropicProvider, key_problem_hint
+def check_anthropic_key(offline: bool = False, pasted: str | None = None) -> tuple[str, str]:
+    """(status, message): status is ok / rejected / missing / unreachable / not checked.
 
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+    `pasted` checks a key the user is about to save instead of the one in the environment.
+    """
+    from .providers import ProviderAuthError
+    from .providers.anthropic_provider import DEFAULT_MODEL, AnthropicProvider, _mask, key_problem_hint, refused_message
+
+    key = pasted or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not (key or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         return "missing", key_problem_hint()
     if offline:
         return "not checked", ""
     try:
         import anthropic
 
-        AnthropicProvider(client=anthropic.Anthropic(max_retries=0, timeout=10)).verify()
+        AnthropicProvider(client=anthropic.Anthropic(api_key=key or None, max_retries=0, timeout=10)).verify()
     except ProviderAuthError as e:
-        return "rejected", str(e)
+        if not pasted:
+            return "rejected", str(e)
+        said = getattr(e, "said", "") or str(e)
+        if getattr(e, "status", None) == 403:
+            return "rejected", refused_message(said, DEFAULT_MODEL)
+        return "rejected", (
+            f"Anthropic rejected the key you pasted ({_mask(pasted)}): {said}. Copy it again from "
+            "console.anthropic.com → API Keys. The full key is shown only once, right after you create it."
+        )
     except ProviderError as e:
         return "unreachable", str(e)
     return "ok", ""

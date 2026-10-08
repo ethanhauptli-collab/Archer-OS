@@ -284,3 +284,34 @@ def test_haiku_gets_no_effort():
     provider.model = "claude-haiku-4-5"
     provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="p")
     assert "effort" not in seen[0]["output_config"]
+
+
+def test_a_leftover_sign_in_token_is_not_sent_with_the_api_key(monkeypatch):
+    pytest.importorskip("anthropic")
+    from roughcut.providers.anthropic_provider import AnthropicProvider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat01-stale-stale-stale")
+    client = AnthropicProvider().client
+    assert client.api_key == "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+    assert client.auth_token is None and "Authorization" not in client.auth_headers
+
+
+def test_401_quotes_anthropic_and_403_says_the_key_was_accepted(monkeypatch):
+    from roughcut.providers import ProviderAuthError
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    status = {"code": 401}
+
+    def handler(request):
+        kind = "authentication_error" if status["code"] == 401 else "permission_error"
+        msg = "invalid x-api-key" if status["code"] == 401 else "Your workspace cannot use this model"
+        return httpx2.Response(status["code"], json={"type": "error", "error": {"type": kind, "message": msg}})
+
+    provider, httpx2 = _anthropic_provider(handler)
+    with pytest.raises(ProviderAuthError, match="Anthropic said: invalid x-api-key"):
+        provider.verify()
+    status["code"] = 403
+    with pytest.raises(ProviderAuthError, match="accepted the key but refused the request \\(Your workspace cannot use"):
+        provider.verify()
