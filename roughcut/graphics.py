@@ -18,7 +18,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
@@ -292,10 +294,12 @@ def launch_browser(p):
             return p.chromium.launch(executable_path=path)
         except Exception as e:  # noqa: BLE001
             errors.append(str(e).strip().splitlines()[0][:160])
-    raise GraphicsError("No browser to render graphics with. Install Google Chrome, or run: playwright install chromium")
+    raise GraphicsError(f"No browser to render graphics with. Install Google Chrome, or run:  {_PY} -m playwright install chromium")
 
 
-INSTALL_HELP = "Motion graphics need Playwright: pip install -e '.[graphics]' (and Google Chrome, or: playwright install chromium)."
+# Spelled with this interpreter's path: `pip` alone isn't on PATH when the venv isn't activated.
+_PY = shlex.quote(sys.executable)
+INSTALL_HELP = f"Motion graphics need Playwright. Install it with:  {_PY} -m pip install 'playwright>=1.40'"
 
 
 def renderer_problem() -> str | None:

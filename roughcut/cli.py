@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -283,7 +284,7 @@ def _claude_code_detail(r: dict) -> str:
 def _print_doctor(r: dict) -> int:
     rows = [
         ("ffmpeg", r["ffmpeg"] and r["ffprobe"], r["ffmpeg"] or "missing: brew install ffmpeg"),
-        ("transcriber", r["transcriber"], r["transcriber"] or "missing: pip install -e '.[mac]'"),
+        ("transcriber", r["transcriber"], r["transcriber"] or f"missing: {shlex.quote(sys.executable)} -m pip install mlx-whisper"),
         (
             "Claude API key",
             r["anthropic_key_status"] == "ok",
