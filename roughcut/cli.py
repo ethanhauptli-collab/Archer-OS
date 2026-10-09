@@ -301,6 +301,13 @@ def _print_doctor(r: dict) -> int:
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
 
 
+def _log_end(line: str) -> None:
+    from .analyze import log_file_only, log_to
+
+    log_file_only(line)
+    log_to(None)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "key":
@@ -373,10 +380,18 @@ def main(argv: list[str] | None = None) -> int:
     except (ProviderError, ValueError, RuntimeError, OSError) as e:
         print(f"roughcut: {e}", file=sys.stderr)
         progress.emit("error", message=str(e))
+        _log_end(f"STOPPED: {e}")
         return 1
+    except KeyboardInterrupt:
+        _log_end("STOPPED: interrupted (Ctrl-C)")
+        raise
     except Exception as e:  # a bug: tell the app, then show the traceback
         progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}")
+        import traceback
+
+        _log_end("STOPPED by a bug:\n" + traceback.format_exc())
         raise
+    _log_end(f"FINISHED: {result.fcpxml.name} and {result.report.name} written")
 
     if json_mode:
         progress.emit("done", result=result_summary(result))

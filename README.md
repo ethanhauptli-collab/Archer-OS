@@ -57,6 +57,7 @@ Then in Final Cut Pro choose **File → Import → XML…** and pick the `.fcpxm
 | `edit_report.md` | Paper edit: sections, every line used, B-roll choices, alternate takes, YouTube chapters, what was cut and why, warnings |
 | `plan.json` | The model's plan (edit it by hand and run `roughcut render` to rebuild) |
 | `analysis.json`, `prompt.md` | Transcripts and clip data, and the exact prompt the model saw |
+| `roughcut.log` | Every step of every run with times, ending in FINISHED or STOPPED (and why). If the other files are older than your run, this says what happened |
 
 In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag decisions to double-check, and **standard markers** name the alternate takes of a line.
 
@@ -139,5 +140,5 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 195 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest            # 196 tests; generates synthetic footage with ffmpeg, no API key needed
 ```

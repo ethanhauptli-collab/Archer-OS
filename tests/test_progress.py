@@ -126,3 +126,16 @@ def test_swift_fixture_matches_the_cli_contract():
 
     live = result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None))
     assert set(done["result"]) == set(live)
+
+
+def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):
+    """A run that never finished looked like a finished one (old files, no graphics): the log tells them apart."""
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 0
+    text = (out / "roughcut.log").read_text()
+    assert "roughcut build started" in text and "FINISHED" in text
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert main(["build", str(empty), "-o", str(tmp_path / "out2"), "--provider", "none", "--transcriber", "none"]) == 1
+    assert "STOPPED: No media files" in (tmp_path / "out2" / "roughcut.log").read_text()

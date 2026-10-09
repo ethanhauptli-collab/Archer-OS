@@ -26,9 +26,29 @@ ROLE_LABELS = {
 }
 
 
+_log_file: Path | None = None
+
+
+def log_to(path: Path | None) -> None:
+    """Also append every log line to `path` (the run's roughcut.log), or stop with None."""
+    global _log_file
+    _log_file = path
+
+
 def log(msg: str) -> None:
     print(f"[roughcut] {msg}", file=sys.stderr, flush=True)
     progress.emit("log", message=msg)
+    log_file_only(msg)
+
+
+def log_file_only(msg: str) -> None:
+    """A line for roughcut.log alone (the app and Terminal already got it another way)."""
+    if _log_file is not None:
+        try:
+            with open(_log_file, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+        except OSError:
+            pass
 
 
 def default_cache_dir() -> Path:

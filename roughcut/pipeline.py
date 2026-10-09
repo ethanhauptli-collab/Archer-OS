@@ -179,11 +179,21 @@ def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, a
     return fcpxml_path, report_path
 
 
+def start_log(out_dir: Path, command: str) -> None:
+    """Every run leaves roughcut.log in its output folder: what ran, and how it ended."""
+    from .analyze import log_to
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_to(out_dir / "roughcut.log")
+    log(f"=== roughcut {command} started (output: {out_dir})")
+
+
 def build(opts: Options) -> Result:
     t_start = time.monotonic()
     timings: dict[str, float] = {}
     out_dir = (opts.out or default_out_dir(opts.inputs)).expanduser().resolve()
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
+    start_log(out_dir, "build")
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
@@ -290,6 +300,7 @@ def rerender(out_dir: Path, opts: Options) -> Result:
     """Rebuild the FCPXML from a saved analysis + plan (no model calls)."""
     if not (out_dir / "analysis.json").is_file() or not (out_dir / "plan.json").is_file():
         raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
+    start_log(out_dir, "render")
     analysis = Analysis.load(out_dir / "analysis.json")
     saved = json.loads((out_dir / "plan.json").read_text())
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
