@@ -276,10 +276,13 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
     were joined, or inside a timed range. Cutting the silence itself never
     removes sound, so this runs last. Only silences with sound on both sides
     inside the piece go: a quiet reaction shot or B-roll stays as chosen.
+    A "silence" that holds a whole transcribed word is quiet speech under a
+    raised level (music bed, loud room), not dead air, so it stays too.
     """
     out: list[_Piece] = []
     for p in pieces:
         clip = analysis.clip(p.clip_id)
+        spoken = [(w.start, w.end) for seg in clip.segments for w in seg.words]
         if p.seg_ids:
             longest = style.max_gap
         elif clip.role in ("aroll", "voiceover"):  # a timed range of talking footage
@@ -289,7 +292,7 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
             continue
         cur = p
         for s, e in sorted(clip.silences):
-            if e - s > longest and cur.wa < s and e < cur.wb:
+            if e - s > longest and cur.wa < s and e < cur.wb and not any(s <= ws and we <= e for ws, we in spoken):
                 out.append(replace(cur, b=min(cur.b, s + style.pad_out), wb=s, w1=None, b_tight=False, seg_ids=list(cur.seg_ids)))
                 cur = replace(cur, a=max(cur.a, e - style.pad_in), wa=e, w0=None, a_tight=False, seg_ids=list(cur.seg_ids))
         out.append(cur)

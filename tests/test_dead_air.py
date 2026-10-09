@@ -113,12 +113,37 @@ def test_noisy_clip_with_whisper_timing_gets_its_pauses_cut(noisy_talk, tmp_path
     assert "Dead air removed:" in (out / "edit_report.md").read_text()
 
 
-def test_a_level_that_swallows_words_falls_back(noisy_talk, tmp_path, monkeypatch):
+def test_a_raised_level_never_deletes_or_cuts_real_words(noisy_talk, tmp_path, monkeypatch):
+    """Promos with a music bed got levels near -14 dB: quiet words under the music must survive."""
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import build_timeline
+
     monkeypatch.setattr(ffmpeg_ops, "noise_threshold", lambda peaks: (-3.0, -30.0))  # absurd: above the speech
     analysis = analyze([noisy_talk / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache"))
     clip = analysis.clips[0]
-    assert clip.silence_db == -35.0
-    assert sum(len(s.words) for s in clip.segments) == len(whisper_words(SENTENCES))
+    assert clip.silence_db == -3.0
+    assert sum(len(s.words) for s in clip.segments) == len(whisper_words(SENTENCES))  # nothing dropped
+    tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES["medium"], name="t")
+    kept = [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]
+    for start, end, _ in SENTENCES:  # every sentence is still in the cut
+        assert any(a <= start + 0.1 and b >= end - 0.1 for a, b in kept), (start, end, kept)
+
+
+def test_quiet_word_inside_a_silence_is_not_cut():
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import build_timeline
+
+    clip = make_clip("V01", seconds=8, role="aroll")
+    # "all" is spoken softly under the music; a raised level hears 2.2-3.0 as silence.
+    clip.segments = build_segments("V01", [
+        Word(1.0, 1.4, "We"), Word(1.4, 1.8, "built"), Word(1.8, 2.2, "it"),
+        Word(2.3, 2.9, "all"), Word(3.0, 3.6, "together."),
+    ])
+    clip.silences = [(2.2, 3.0)]
+    analysis = Analysis(clips=[clip])
+    tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES["medium"], name="t")
+    kept = [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]
+    assert any(a <= 2.3 and b >= 2.9 for a, b in kept), kept
 
 
 def test_talking_clip_without_pauses_says_why():

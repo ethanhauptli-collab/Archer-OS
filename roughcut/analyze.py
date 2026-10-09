@@ -327,12 +327,9 @@ def analyze(
                 cache.put(m.fingerprint, key, transcript.to_json())
                 log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
         if transcript is not None:
-            words = drop_words_in_silence(transcript.words, clip.silences)
-            fallback = default_maps.get(clip.id)
-            if fallback is not None and len(words) < len(transcript.words) - max(2, len(transcript.words) // 10):
-                # The measured level swallowed real words: go back to the standard one.
-                clip.silences, clip.silence_db = fallback, ffmpeg_ops.DEFAULT_NOISE_DB
-                words = drop_words_in_silence(transcript.words, clip.silences)
+            # Only true silence proves a word was invented. A raised level (music bed, loud
+            # room) can sit above a quiet real word, so it never deletes words.
+            words = drop_words_in_silence(transcript.words, default_maps.get(clip.id, clip.silences))
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:
