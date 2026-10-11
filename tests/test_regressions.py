@@ -119,7 +119,7 @@ def test_late_broll_in_point_backs_off():
     tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
     cut = next(c for c in tl.connected if c.kind == "broll")
     f0, f1 = tl.seg_ranges["V01.S005"]
-    assert cut.frames == f1 - f0
+    assert cut.start <= f0 and cut.end >= f1 and cut.frames == tl.total_frames  # the whole line, snapped to the timeline's ends
     assert cut.src_in + cut.frames * NTSC <= a.clip("V02").media.duration
 
 

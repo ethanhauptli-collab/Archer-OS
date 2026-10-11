@@ -42,13 +42,13 @@ def test_broll_comes_in_on_the_words_it_illustrates():
     tl = build_timeline(plan, a, style=STYLES["medium"], name="t", fill=False)
     shots = {c.clip_id: c for c in tl.connected}
     line_start, line_end = tl.seg_ranges["A01.S003"]
-    assert shots["I01"].start == line_start  # the first shot starts with the line
+    assert shots["I01"].start == 0 < line_start  # the first shot starts with the line: on frame 0, not after its padding
     assert abs(shots["I02"].start - _word_frame(tl, a, "A01.S003", "Honda")) <= 2
     assert abs(shots["V01"].start - _word_frame(tl, a, "A01.S003", "two")) <= 2
     assert abs(shots["I04"].start - _word_frame(tl, a, "A01.S003", "parks")) <= 2
     assert shots["I01"].end == shots["I02"].start  # an anchored shot ends the one before it
     assert shots["V01"].end == shots["I04"].start
-    assert max(c.end for c in tl.connected) <= line_end
+    assert max(c.end for c in tl.connected) == tl.total_frames > line_end  # and runs to the end, not to the padding
     assert not [w for w in tl.warnings if "B-roll" in w]
 
 
@@ -87,7 +87,7 @@ def test_unanchored_shots_share_the_time_up_to_the_next_anchor():
     parks = _word_frame(tl, a, "A01.S003", "parks")
     assert abs(shots["I04"].start - parks) <= 2
     # I01, I02 and V01 split the time before "parks"; the stills are capped, the video fills its share.
-    assert shots["I01"].start == tl.seg_ranges["A01.S003"][0]
+    assert shots["I01"].start == 0  # the line opens the timeline: on frame 0, not after the padding
     assert shots["V01"].end == shots["I04"].start
 
 
@@ -654,6 +654,50 @@ def test_pauses_over_a_music_bed_stay_up_to_a_second(bed, pieces):
 # ------------------------------------------------------------ review fixes
 
 
+def test_a_cutaway_named_on_later_words_still_covers_the_jump_cut_before_them():
+    from conftest import SPEECH
+
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH), make_clip("V02", seconds=10)])
+    raw = {"sections": [{"name": "x", "items": ["V01.S003", "V01.S005"], "broll": [
+        {"clip": "V02", "over": ["V01.S003", "V01.S005"], "words": "kids have been asking", "source_in": -1, "reason": "cover the jump cut"},
+    ]}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    edit = next(sc.offset for sc in tl.spine if "V01.S005" in sc.seg_ids)
+    v02 = next(c for c in tl.connected if c.clip_id == "V02")
+    assert v02.start == edit  # on the jump, not after it at "kids"
+    assert tl.review.jump_cuts == [] and not [m for m in tl.markers if m.value.startswith("Jump cut")]
+
+
+def test_cutaways_at_the_very_start_and_end_never_flash():
+    from conftest import SPEECH
+
+    from roughcut.timeline import ConnectedClip, _extend_shot_after
+
+    a = narration_project()
+    raw = {"sections": [{"name": "x", "items": ["A01.S001", "A01.S002"], "broll": [
+        {"clip": "V01", "over": ["A01.S001"], "words": "", "source_in": 0, "reason": ""},
+    ]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    _no_flashes_or_repeated_stills(tl, a)
+    first = min(tl.connected, key=lambda c: c.start)
+    assert (first.clip_id, first.start, first.src_in) == ("V01", 0, 0)  # no stray still before it, and the still isn't used up
+
+    # On camera: a cutaway over the first and last lines covers the whole cut, not 3..total-6.
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH), make_clip("V02", seconds=30)])
+    lines = ["V01.S003", "V01.S004", "V01.S005"]
+    raw = {"sections": [{"name": "x", "items": lines, "broll": [{"clip": "V02", "over": lines, "words": "", "source_in": -1, "reason": ""}]}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    assert [(c.start, c.end) for c in tl.connected] == [(0, tl.total_frames)]
+
+    # A video already at the head of its source closes a sliver before it by playing on longer.
+    a = narration_project()
+    tl = build_timeline(normalize({"sections": [{"name": "x", "items": ["A01.S003"]}]}, a), a, style=STYLES["medium"], name="t", fill=False)
+    shot = ConnectedClip("V01", Fraction(0), 100, 10, 1, "broll")
+    tl.connected = [shot]
+    assert _extend_shot_after(tl, a, 5, 10, max_still=150)
+    assert (shot.start, shot.src_in, shot.frames) == (5, 0, 105)
+
+
 def test_render_of_a_stringout_plays_every_line_again(tmp_path):
     import json
 
@@ -746,4 +790,3 @@ def test_a_long_recording_renders_and_cuts_in_seconds():
     build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
     assert breath_candidates(split, words)
     assert time.monotonic() - began < 10  # was minutes: every segment and piece scanned the whole clip
-

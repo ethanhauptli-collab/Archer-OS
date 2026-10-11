@@ -712,16 +712,22 @@ def _snap_to_edits(tl: Timeline, start: int, end: int, reach: int) -> tuple[int,
     """Start and end a cutaway on the edit next to its lines, not a few frames of padding away.
 
     Starting three frames after a cut would flash the speaker (or show the
-    jump the cutaway is there to hide). The very start and end of the
-    timeline aren't edits, so they're left alone.
+    jump the cutaway is there to hide). The same goes for the very start and
+    end of the timeline: a cutaway over the first line starts on frame 0
+    rather than after the padding, and one over the last line runs to the end.
     """
     head = tl.spine_at(start)
-    if head is not None and head.offset > 0 and 0 < start - head.offset <= reach:
+    if head is not None and 0 < start - head.offset <= reach:
         start = head.offset
     tail = tl.spine_at(end - 1)
-    if tail is not None and tail.end < tl.total_frames and 0 < tail.end - end <= reach:
+    if tail is not None and 0 < tail.end - end <= reach:
         end = tail.end
     return start, end
+
+
+def _is_jump(a: SpineClip, b: SpineClip, analysis: Analysis, fd: Fraction) -> bool:
+    """Is the edit from a to b a jump cut: the same camera clip, picking up somewhere else?"""
+    return a.clip_id == b.clip_id and analysis.clip(b.clip_id).media.kind == "video" and a.src_in + a.frames * fd != b.src_in
 
 
 BROLL_LEAD = 0.07  # a cutaway named on words comes in about two frames before them
@@ -736,7 +742,7 @@ def _word_frame(tl: Timeline, analysis: Analysis, b, after: int, start: int, end
         w = seg.words[i]
         clip = analysis.clip(seg.clip_id)
         # Whisper often starts a word early, over the pause before it; the sound starts later.
-        f = frame_at(tl, seg.clip_id, _silence_clamp_start(w.start, w.end, clip.silences))
+        f = frame_at(tl, seg.clip_id, _index(clip).silences.clamp_start(w.start, w.end))
         if f is None:
             f = frame_at(tl, seg.clip_id, w.start)
         if f is None or not (start <= f < end) or f - lead <= after:
@@ -771,16 +777,21 @@ def _broll_runs(
     before it); shots without words share the time up to the next anchored
     one evenly. The first shot starts with the lines unless its words come
     later (over half a second in): then the shot before holds, or the
-    speaker, or auto-fill under narration, has the lines until them. Words
+    speaker, or auto-fill under narration, has the lines until them. It never
+    comes in after a jump cut it covers: it starts on that edit instead. Words
     that aren't in the cut fall back to the even split, with a warning.
     """
+    fd = tl.frame_duration
     firsts: list[int] = []
     at: dict[int, int] = {}
     prev, count = start, 0  # last fixed start, and how many shots share the time since it
     for k, b in enumerate(group):
         anchor = None
         if b.words:
-            anchor = _word_frame(tl, analysis, b, prev if k else -1, start, end)
+            # Words said twice: the time after the shots before it have had their minimum first.
+            anchor = _word_frame(tl, analysis, b, prev + min_frames * count - 1 if k else -1, start, end)
+            if anchor is None and k:
+                anchor = _word_frame(tl, analysis, b, prev, start, end)
             if anchor is None:
                 warnings.append(f'B-roll {b.clip_id}: "{b.words}" isn\'t heard in {", ".join(b.over)} (or was cut); shared the time evenly instead')
             else:
@@ -790,8 +801,15 @@ def _broll_runs(
                     anchor = None
                 else:
                     anchor = min(max(anchor, lo), hi)
-                    if k == 0 and anchor - start < reach:
-                        anchor = start  # the words open the line: start with it
+                    if k == 0:
+                        # A jump cut before the words would show again: come in on it instead.
+                        jump = next(
+                            (b2.offset for b1, b2 in zip(tl.spine, tl.spine[1:]) if start < b2.offset < anchor and _is_jump(b1, b2, analysis, fd)),
+                            None,
+                        )
+                        anchor = anchor if jump is None else jump
+                        if anchor - start < reach:
+                            anchor = start  # the words open the line: start with it
         if k == 0 and anchor is None:
             anchor = start
         if anchor is None:
@@ -834,8 +852,10 @@ def _extend_shot_before(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_
 def _extend_shot_after(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_still: int) -> bool:
     """Close a sliver of a gap by starting the next shot a little earlier.
 
-    A video starts earlier in its source; a still grows, or, already at its
-    longest, moves earlier when nothing follows it (the fill covers its tail).
+    A video starts earlier in its source (or, already at the head of its
+    source, plays on a little longer from the same in-point); a still grows,
+    or, already at its longest, moves earlier when nothing follows it (the
+    fill covers its tail).
     """
     fd = tl.frame_duration
     for c in tl.connected:
@@ -850,8 +870,8 @@ def _extend_shot_after(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_s
             c.start = g0
             return True
         grid = m.frame_duration or fd
-        src_in = tc.floor_frames(c.src_in - (g1 - g0) * fd, grid) * grid
-        if src_in < 0:
+        src_in = max(Fraction(0), tc.floor_frames(c.src_in - (g1 - g0) * fd, grid) * grid)
+        if src_in + (c.frames + g1 - g0) * fd > m.duration:
             continue
         c.src_in, c.start, c.frames = src_in, g0, c.frames + g1 - g0
         return True
@@ -1208,8 +1228,7 @@ def review(tl: Timeline, plan: Plan, analysis: Analysis, target_seconds: float |
     pictures = [c for c in tl.connected if c.kind == "broll" and analysis.clip(c.clip_id).media.has_video]
     jumps = []
     for a, b in zip(tl.spine, tl.spine[1:]):
-        m = analysis.clip(b.clip_id).media
-        if a.clip_id != b.clip_id or m.kind != "video" or a.src_in + a.frames * fd == b.src_in:
+        if not _is_jump(a, b, analysis, fd):
             continue
         if any(c.start <= b.offset <= c.end for c in pictures):
             continue  # a cutaway hides it
