@@ -479,8 +479,13 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
     return specs, html, str(data.get("style", ""))
 
 
-def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int, saved_html: dict[int, str] | None = None) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
-    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings)."""
+def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int, saved_html: dict[int, str] | None = None, logo: str | None = None) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
+    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
+
+    With a `logo`, designs may show it as <img src="brand:logo">; the saved HTML carries it inline.
+    """
+    from .presets import inline_logo, with_logo
+
     warnings: list[str] = []
     placed = place(specs, tl, analysis, warnings)
     if not placed:
@@ -489,7 +494,8 @@ def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, o
     if saved_html is not None:
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
     else:
-        html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings)
+        html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=with_logo(style, logo), width=tl.width, height=tl.height, warnings=warnings)
+        html = {k: inline_logo(v, logo) for k, v in html.items()}
     files = render(placed, html, out_dir / "graphics", tl, workers=workers, warnings=warnings)
     clips = attach(tl, placed, files, warnings)
     write_manifest(out_dir, placed, files, html, tl, style)

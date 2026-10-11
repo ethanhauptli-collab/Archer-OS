@@ -50,6 +50,7 @@ class Options:
     fill: bool = True  # cover narration the plan left without picture
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
     graphics_style: str = ""  # look and brand for them: colors, fonts, mood
+    graphics_logo: str | None = None  # logo file designs may show (<img src="brand:logo">)
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -274,7 +275,8 @@ def build(opts: Options) -> Result:
 
             t = time.monotonic()
             g_clips, placed, g_warnings = graphics.make(
-                provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
+                provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
+                logo=opts.graphics_logo,
             )
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -359,3 +360,250 @@ def test_update_command_is_wired(monkeypatch):
     seen = []
     monkeypatch.setattr(update, "update", lambda: seen.append(True) or 0)
     assert main(["update"]) == 0 and seen == [True]
+
+
+# ------------------------------------------------------------ T13: presets
+
+
+class Captured(Exception):
+    """Stops main() at the pipeline with the Options it built."""
+
+
+@pytest.fixture
+def config(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("ROUGHCUT_CONFIG_DIR", str(tmp_path / "config"))
+    return tmp_path / "config"
+
+
+@pytest.fixture
+def capture(monkeypatch):
+    from roughcut import pipeline
+
+    seen = {}
+
+    def grab(kind):
+        def fn(*args):
+            seen[kind] = args
+            raise Captured
+
+        return fn
+
+    monkeypatch.setattr(pipeline, "build", grab("build"))
+    monkeypatch.setattr(pipeline, "rerender", grab("render"))
+    return seen
+
+
+def _opts(capture, argv):
+    from roughcut.cli import main
+
+    with pytest.raises(Captured):
+        main(argv)
+    return capture["build"][0]
+
+
+def test_built_in_presets(config):
+    from roughcut import presets
+
+    vo, stk = presets.load("venture-oc"), presets.load("Save-The-Kid")
+    assert (vo.target, vo.style, vo.graphics) == ("90s", "tight", True)
+    assert (stk.target, stk.style, stk.graphics) == ("10m", "loose", True)
+    assert vo.graphics_style == presets.VENTURE_OC_LOOK and stk.graphics_style == presets.SAVE_THE_KID_LOOK
+    assert "fatherhood" in stk.brief and "minimal" in stk.brief.lower() and "Venture" not in stk.brief
+    assert vo.brief != stk.brief and vo.source == "built in"
+    assert presets.check(vo) is None and presets.check(stk) is None
+
+
+def test_no_invented_brand_colors_anywhere():
+    import re
+
+    from roughcut import presets
+    from roughcut.cli import build_parser
+
+    hex_code = re.compile(r"#[0-9A-Fa-f]{6}\b")
+    help_text = build_parser()._subparsers._group_actions[0].choices["build"].format_help()
+    for text in (presets.VENTURE_OC_LOOK, presets.SAVE_THE_KID_LOOK, presets.VENTURE_OC_BRIEF, help_text, README.read_text(encoding="utf-8")):
+        assert not hex_code.search(text), hex_code.search(text)
+
+
+def test_preset_fills_in_what_you_didnt_type(footage, config, capture):
+    from roughcut import presets
+
+    opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc", "-c", "OC Vibe launch night"])
+    assert opts.target_seconds == 90 and opts.style == "tight" and opts.format is None
+    assert opts.graphics is True and opts.graphics_style == presets.VENTURE_OC_LOOK
+    # The preset's brief and yours are combined, the preset's first.
+    assert opts.context.startswith(presets.VENTURE_OC_BRIEF) and opts.context.endswith("OC Vibe launch night")
+
+
+def test_flags_you_type_win_over_the_preset(footage, config, capture, tmp_path):
+    opts = _opts(
+        capture,
+        ["build", str(footage), "-t", "2m", "--preset=venture-oc", "--style", "medium", "--graphics-style", "plain", "--no-graphics", "--format", "vertical"],
+    )
+    assert opts.target_seconds == 120 and opts.style == "medium" and opts.graphics_style == "plain"
+    assert opts.graphics is False and opts.format == "vertical"
+    # Without a preset nothing changes.
+    opts = _opts(capture, ["build", str(footage)])
+    assert (opts.target_seconds, opts.style, opts.graphics, opts.graphics_style, opts.context) == (None, "medium", False, "", "")
+
+
+def test_preset_graphics_are_skipped_without_a_model(footage, config, capture, capsys):
+    opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc", "--provider", "none"])
+    assert opts.graphics is False and opts.style == "tight"
+    assert "graphics are skipped" in capsys.readouterr().err
+
+
+def test_render_takes_the_presets_pacing(config, capture, tmp_path):
+    from roughcut.cli import main
+
+    with pytest.raises(Captured):
+        main(["render", str(tmp_path), "--preset", "save-the-kid"])
+    assert capture["render"][1].style == "loose"
+
+
+def test_unknown_preset_stops_before_anything_runs(footage, config, capsys):
+    from roughcut.cli import main
+
+    assert main(["build", str(footage), "--preset", "vacation"]) == 1
+    err = capsys.readouterr().err
+    assert "no preset called 'vacation'" in err and "venture-oc" in err
+
+
+def test_save_your_version_of_a_built_in_preset(footage, config, capture, tmp_path, capsys):
+    from roughcut import presets
+    from roughcut.cli import main
+
+    logo = tmp_path / "logo.png"
+    ffmpeg("-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", str(logo))
+    assert main(["preset", "save", "venture-oc", "--graphics-style", "navy plates, orange accent, Gotham", "--logo", str(logo)]) == 0
+    saved = presets.load("venture-oc")
+    assert saved.source == "saved over built in" and saved.graphics_style == "navy plates, orange accent, Gotham"
+    assert saved.brief == presets.VENTURE_OC_BRIEF and saved.target == "90s", "fields not given keep their values"
+    assert saved.logo == str(logo)
+    # Only your changes are stored, so later improvements to the built-in brief still reach you.
+    stored = json.loads((config / "presets" / "venture-oc.json").read_text())
+    assert set(stored) == {"graphics_style", "logo"}
+
+    opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc"])
+    assert opts.graphics_style == "navy plates, orange accent, Gotham" and opts.graphics_logo == str(logo)
+
+    # A new one, started from the other built-in.
+    assert main(["preset", "save", "Trip-Vlog", "--from", "save-the-kid", "-t", "6m", "--no-graphics", "--description", "family trips"]) == 0
+    capsys.readouterr()
+    assert main(["preset", "list", "--json"]) == 0
+    listed = {p["name"]: p for p in json.loads(capsys.readouterr().out)}
+    assert set(listed) == {"venture-oc", "save-the-kid", "trip-vlog"}
+    assert listed["trip-vlog"]["target"] == "6m" and listed["trip-vlog"]["graphics"] is False and listed["trip-vlog"]["style"] == "loose"
+    assert listed["venture-oc"]["source"] == "saved over built in"
+
+    assert main(["preset", "show", "trip-vlog"]) == 0
+    assert "6m" in capsys.readouterr().out
+    assert main(["preset", "remove", "venture-oc"]) == 0
+    assert "built-in venture-oc preset is back" in capsys.readouterr().out
+    assert presets.load("venture-oc").graphics_style == presets.VENTURE_OC_LOOK
+    assert main(["preset", "remove", "save-the-kid"]) == 1  # built in, nothing saved
+
+
+def test_bad_preset_values_are_refused(config, tmp_path, capsys):
+    from roughcut.cli import main
+
+    assert main(["preset", "save", "x", "-t", "soon"]) == 1
+    assert main(["preset", "save", "x", "--format", "huge"]) == 1
+    assert main(["preset", "save", "x", "--logo", str(tmp_path / "missing.png")]) == 1
+    assert main(["preset", "save", "../evil"]) == 1
+    assert not (config / "presets").exists() or not list((config / "presets").iterdir())
+    err = capsys.readouterr().err
+    assert "isn't a length" in err and "doesn't exist" in err and "can't be a preset name" in err
+
+
+def test_missing_logo_stops_before_anything_runs(footage, config, tmp_path, capsys):
+    from roughcut.cli import main
+
+    assert main(["build", str(footage), "--graphics", "--graphics-logo", str(tmp_path / "nope.png")]) == 1
+    assert "nope.png doesn't exist" in capsys.readouterr().err
+    assert not (footage.parent / f"{footage.name}_roughcut").exists()
+
+
+def test_pipeline_hands_the_logo_to_graphics(footage, tmp_path, monkeypatch):
+    from conftest import CANNED_PLAN, FakeProvider
+
+    from roughcut import graphics, pipeline
+
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["graphics"] = [{"kind": "title_card", "segment": "V01.S003", "words": "heading up the mountain", "text": "Heading Out", "subtext": "", "seconds": 2, "direction": ""}]
+    fake = FakeProvider(plan)
+    seen = {}
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: fake)
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    monkeypatch.setattr(graphics, "make", lambda *a, **k: seen.update(k) or ([], [], []))
+    opts = pipeline.Options(inputs=[footage], out=tmp_path / "out", transcriber="none", cache_dir=tmp_path / "c", graphics=True, graphics_logo="/brand/logo.svg")
+    pipeline.build(opts)
+    assert seen["logo"] == "/brand/logo.svg"
+
+
+def test_logo_is_inlined_for_the_offline_renderer(tmp_path):
+    from roughcut import presets
+
+    svg = tmp_path / "logo.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>')
+    html = '<img src="brand:logo" alt="">'
+    inlined = presets.inline_logo(html, str(svg))
+    assert inlined.startswith('<img src="data:image/svg+xml;base64,') and "brand:logo" not in inlined
+    assert presets.inline_logo(html, None) == html
+    assert presets.with_logo("bold", None) == "bold"
+    assert presets.with_logo("bold", str(svg)).startswith("bold\n\nBrand logo:") and 'src="brand:logo"' in presets.with_logo("", str(svg))
+
+
+LOGO_HTML = """<!doctype html><html><head><style>
+html,body{margin:0;background:transparent;overflow:hidden}
+img{position:absolute;left:0;top:0;height:540px}
+</style></head><body><img src="brand:logo" alt=""></body></html>"""
+
+
+def _pixel(mov: Path, x: int, y: int, at: float) -> tuple[int, ...]:
+    import subprocess
+
+    out = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", str(at), "-i", str(mov), "-frames:v", "1", "-vf", f"crop=1:1:{x}:{y},format=rgba", "-f", "rawvideo", "-"],
+        capture_output=True,
+    ).stdout
+    return tuple(out[:4])
+
+
+def test_logo_renders_in_a_graphic(tmp_path):
+    from conftest import SPEECH, make_clip
+
+    from roughcut import graphics
+    from roughcut.analyze import Analysis
+    from roughcut.plan import GraphicSpec, normalize
+    from roughcut.timeline import STYLES, build_timeline
+
+    if graphics.renderer_problem() is not None:
+        pytest.skip("no Playwright browser to render with")
+    logo = tmp_path / "logo.png"
+    ffmpeg("-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", str(logo))
+
+    class Designer:
+        name, model = "fake", "fake"
+
+        def __init__(self):
+            self.requests = []
+
+        def complete_json(self, system, parts, schema, **kw):
+            self.requests.append(parts[-1].text)
+            return {"style": "logo test", "graphics": [{"id": "G01", "html": LOGO_HTML}]}
+
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH)])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S003"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", format_override="320x180")
+    spec = GraphicSpec(kind="title_card", segment="V01.S003", words="heading up the mountain", text="Heading Out", seconds=1.0)
+    designer = Designer()
+    clips, placed, warnings = graphics.make(designer, [spec], tl, a, tmp_path / "out", brief="", style="bold", workers=1, logo=str(logo))
+    assert not warnings and len(clips) == 1
+    assert 'src="brand:logo"' in designer.requests[0], "the designer is told about the logo"
+    saved = (tmp_path / "out" / "graphics" / f"{placed[0].slug}.html").read_text()
+    assert "data:image/png;base64," in saved and "brand:logo" not in saved, "re-renders don't need the logo file"
+    mov = tmp_path / "out" / "graphics" / f"{placed[0].slug}.mov"
+    r, g, b, alpha = _pixel(mov, 40, 40, 0.5)  # inside the logo (top-left, 90 px tall at this size)
+    assert r > 200 and g < 60 and b < 60 and alpha > 200
+    assert _pixel(mov, 300, 170, 0.5)[3] < 20  # elsewhere: transparent

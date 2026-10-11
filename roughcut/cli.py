@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("--context-file", help="read the brief from a text/markdown file")
     brief.add_argument("--script", help="script, outline or reference transcript to follow (text file)")
     brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
+    brief.add_argument("--preset", help="start from a preset's brief, length, pacing and graphics look (`roughcut preset list`); flags you type win")
+    brief.add_argument("--preset-brief", default="", help=argparse.SUPPRESS)  # filled in by --preset
     ai = b.add_argument_group("model")
     ai.add_argument("--provider", choices=PROVIDERS, default="anthropic", help="who plans the edit (default: anthropic = API key; claude-code = your Claude Pro/Max subscription through Claude Code; 'none' = silence cutting only)")
     ai.add_argument("--model", help="Claude: opus (default) or sonnet (faster, half the price); spellings like 'Sonnet 5.5' work. Leave it off in Terminal to pick from a menu. Other providers: the model's name")
@@ -59,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
     gfx = b.add_argument_group("motion graphics")
     gfx.add_argument("--graphics", action="store_true", help="have Claude design animated graphics (lower thirds, stats, kinetic captions...) from the transcript, rendered to ProRes 4444 above the footage")
-    gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'orange #F26B21, Gotham, bold and minimal'")
+    gfx.add_argument("--no-graphics", dest="graphics", action="store_false", help="no motion graphics, even if the preset has them")
+    gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'one bold accent color, geometric sans, minimal'")
+    gfx.add_argument("--graphics-logo", help="a PNG, SVG, JPEG or WebP logo the graphics may show")
     tr = b.add_argument_group("transcription")
     tr.add_argument("--transcriber", choices=["auto", "mlx", "faster-whisper", "none"], default="auto")
     tr.add_argument("--whisper-model", help="override the Whisper model")
@@ -72,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("render", help="rebuild the FCPXML from a previous run's plan (no model calls)")
     r.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`")
+    r.add_argument("--preset", help="use a preset's pacing and format; flags you type win")
     _add_render_args(r)
 
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
@@ -83,7 +88,35 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--openai", action="store_true", help="the OpenAI / compatible-server key instead of Claude's")
 
     sub.add_parser("update", help="get the latest roughcut (git pull in its folder; reinstalls when dependencies changed)")
+    from .presets import add_commands
+
+    add_commands(sub)
     return parser
+
+
+def _apply_preset(args, argv: list[str]):
+    """Re-parse with the preset's flags before the user's, so the user's win. Returns (args, error)."""
+    from .presets import PresetError, flags, load, logo_problem
+
+    if getattr(args, "preset", None):
+        try:
+            preset = load(args.preset)
+        except PresetError as e:
+            return args, str(e)
+        k = argv.index(args.command)
+        typed = args
+        args = build_parser().parse_args(argv[: k + 1] + flags(preset, args.command) + argv[k + 1 :])
+        skipped = ""
+        if args.command == "build" and args.provider == "none" and args.graphics and not typed.graphics:
+            args.graphics = False  # the preset's graphics need a model; silence-only runs skip them
+            skipped = " Its graphics are skipped: they need a model."
+        print(f"Using the {preset.name} preset ({preset.summary()}); flags you typed win.{skipped}", file=sys.stderr)
+    if args.command == "build" and args.graphics and args.graphics_logo:
+        problem = logo_problem(args.graphics_logo)
+        if problem:
+            return args, problem
+        args.graphics_logo = str(Path(args.graphics_logo).expanduser().resolve())
+    return args, None
 
 
 def _resolve_paths(args, argv: list[str]) -> str | None:
@@ -335,9 +368,14 @@ def main(argv: list[str] | None = None) -> int:
         from .update import update
 
         return update()
+    if args.command == "preset":
+        from .presets import command
+
+        return command(args)
     if args.command in ("build", "render"):
         # Before anything runs or any folder is created.
-        problem = _resolve_paths(args, argv)
+        args, problem = _apply_preset(args, argv)
+        problem = problem or _resolve_paths(args, argv)
         if problem:
             progress.enable(bool(args.progress_json))
             print(f"roughcut: {problem}", file=sys.stderr)
@@ -384,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.model, args.vision_model = choose_claude_models(vision=args.vision is not False)
                 args.model = resolve_model(args.model) if args.model else None
                 args.vision_model = resolve_model(args.vision_model) if args.vision_model else None
-            context = "\n\n".join(t for t in (args.context, _read(args.context_file)) if t.strip())
+            context = "\n\n".join(t for t in (args.preset_brief, args.context, _read(args.context_file)) if t.strip())
             opts = Options(
                 inputs=[Path(p) for p in args.inputs],
                 out=Path(args.out) if args.out else None,
@@ -407,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 graphics=args.graphics,
                 graphics_style=args.graphics_style,
+                graphics_logo=args.graphics_logo,
                 **common,
             )
             result = build(opts)

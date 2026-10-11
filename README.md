@@ -98,7 +98,27 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
 | `--broll-db`, `--music-db` | -20, -14 | Levels for B-roll nat sound and music |
 | `--no-fill` | | Don't auto-cover narration the plan left without picture |
-| `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below) |
+| `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below); `--no-graphics` turns a preset's off |
+| `--graphics-logo FILE` | | A PNG, SVG, JPEG or WebP logo the graphics may show |
+| `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look (see below) |
+
+### Presets
+
+A preset is the brief, target length, pacing, format and graphics look you use for one kind of video. Two are built in: `venture-oc` (Venture Orange County promos: energetic, 1:30, tight, graphics on) and `save-the-kid` (the personal channel: intimate and reflective, 10 minutes, loose, minimal graphics).
+
+```bash
+roughcut build ~/Movies/OCVIBE --preset venture-oc -c "OC Vibe launch night. Feature the chef's story."
+```
+
+Anything you type wins over the preset (`-t 2m`, `--style medium`, `--no-graphics`), and your `-c` brief is added to the preset's. `roughcut preset list` shows them all and `roughcut preset show venture-oc` shows everything one sets.
+
+The built-in looks name no colors. Save your own version once with the exact brand colors, font and logo, and every run with that preset uses them:
+
+```bash
+roughcut preset save venture-oc --graphics-style "BRAND COLORS, FONT, MOOD" --logo ~/Brand/logo.png
+```
+
+`roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics` set the rest). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
 
 ### Motion graphics
 
@@ -108,7 +128,7 @@ roughcut build ~/Movies/OCVIBE --graphics \
   --graphics-style "bold geometric sans, white type on dark plates, one accent color, premium and energetic"
 ```
 
-With `--graphics`, Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
+With `--graphics` (or a preset that has them on), Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). With `--graphics-logo` (or a preset's logo) the designs can place your logo; it's embedded in each saved design, so re-renders don't need the file. A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
 
 Each clip's design is saved next to it in `graphics/` as an `.html` file. Edit one (text, colors, timing) and run `roughcut render <output folder>` to re-render just that graphic. A re-cut with a different `--style` re-times the graphics and only re-renders the ones whose length changed.
 
