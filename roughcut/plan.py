@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .analyze import Analysis
+from .duplicates import line_words, same_line, take_group
 
 PLAN_SCHEMA: dict = {
     "type": "object",
@@ -269,6 +270,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     plan = Plan(title=str(raw.get("title") or "Rough Cut"), logline=str(raw.get("logline") or ""), source=source)
     used_segments: set[str] = set()
     raw_to_plan: dict[int, int] = {}  # model's section index -> kept section index
+    lines = _UsedLines(analysis)  # the same line from another read or export plays once
 
     for s_idx, s_raw in enumerate(raw.get("sections") or []):
         if not isinstance(s_raw, dict):
@@ -282,7 +284,12 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
                 if item.seg_id in used_segments:
                     warnings.append(f"{item.seg_id} used twice; kept the first use")
                     continue
+                kept = lines.repeat_of(item.seg_id)
+                if kept:
+                    warnings.append(f"{item.seg_id} says the same line as {kept} (another read or export); kept {kept} only")
+                    continue
                 used_segments.add(item.seg_id)
+                lines.add(item.seg_id)
             section.items.append(item)
 
         section_segs = {i.seg_id for i in section.items if i.seg_id}
@@ -295,6 +302,8 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
                 warnings.append(f"B-roll {clip_id!r} is not a video/still clip; skipped")
                 continue
             over = [str(o).strip() for o in b_raw.get("over") or []]
+            # Over a line dropped as a repeat: cover the use that was kept, when it's here.
+            over = list(dict.fromkeys(lines.replaced[o] if lines.replaced.get(o) in section_segs else o for o in over))
             valid = [o for o in over if o in section_segs]
             if len(valid) < len(over):
                 warnings.append(f"B-roll {clip_id}: ignored references not in section '{section.name}': {sorted(set(over) - set(valid))}")
@@ -324,10 +333,17 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         if isinstance(alt, dict) and analysis.segment(str(alt.get("chosen", ""))):
             others = [o for o in alt.get("others") or [] if analysis.segment(str(o))]
             plan.alternates.append({"chosen": alt["chosen"], "others": others, "note": str(alt.get("note") or "")})
+    for dropped, kept in lines.replaced.items():
+        alt = next((a for a in plan.alternates if a["chosen"] == kept), None)
+        if alt is None:
+            plan.alternates.append({"chosen": kept, "others": [dropped], "note": "the same line from another read or export"})
+        elif dropped not in alt["others"]:
+            alt["others"].append(dropped)
 
     for flag in raw.get("flags") or []:
         if isinstance(flag, dict) and flag.get("note"):
-            plan.flags.append({"ref": str(flag.get("ref") or ""), "note": str(flag["note"])})
+            ref = str(flag.get("ref") or "")
+            plan.flags.append({"ref": lines.replaced.get(ref, ref), "note": str(flag["note"])})
 
     for cue in raw.get("music") or []:
         if not isinstance(cue, dict):
@@ -351,9 +367,39 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         plan.music.append(MusicCue(clip.id, min(kept), max(kept), source_in))
 
     plan.cut_notes = str(raw.get("cut_notes") or "")
-    plan.graphics = parse_specs(raw.get("graphics") or [], analysis, used_segments, warnings)
+    graphics = [
+        dict(g, segment=lines.replaced.get(str(g.get("segment") or "").strip().upper(), g.get("segment"))) if isinstance(g, dict) else g
+        for g in raw.get("graphics") or []
+    ]
+    plan.graphics = parse_specs(graphics, analysis, used_segments, warnings)
     plan.warnings = warnings
     return plan
+
+
+class _UsedLines:
+    """Lines already in the cut, to catch the same line again from another read or export."""
+
+    def __init__(self, analysis: Analysis):
+        self.analysis = analysis
+        self.kept: list[tuple[str, list[str], str, str]] = []  # (segment, words, clip, take group)
+        self.replaced: dict[str, str] = {}  # dropped repeat -> the use that was kept
+
+    def _key(self, seg_id: str) -> tuple[list[str], str, str]:
+        seg = self.analysis.segment(seg_id)
+        clip = self.analysis.clip(seg.clip_id)
+        return line_words(seg.text), clip.id, take_group(clip)
+
+    def repeat_of(self, seg_id: str) -> str | None:
+        words, clip_id, group = self._key(seg_id)
+        for kept_id, kept_words, kept_clip, kept_group in self.kept:
+            # Retakes inside one recording are the planner's call (rule 2); this catches other files.
+            if kept_clip != clip_id and same_line(words, kept_words, same_takes=kept_group == group):
+                self.replaced[seg_id] = kept_id
+                return kept_id
+        return None
+
+    def add(self, seg_id: str) -> None:
+        self.kept.append((seg_id, *self._key(seg_id)))
 
 
 def _parse_item(ref: str, analysis: Analysis, still_seconds: float, warnings: list[str]) -> Item | None:

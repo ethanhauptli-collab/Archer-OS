@@ -61,7 +61,9 @@ is a fallback, not a substitute for your choices.
 the 0-based section range it should run under.
 8. Flags: when unsure (a cut line that might matter, a coin-flip between takes, a missing shot you \
 would want), add a flag. Flags become to-do markers in Final Cut.
-9. Use only IDs that appear in the inventory. Each segment can be used once.
+9. Use only IDs that appear in the inventory. Each segment can be used once, and so can each line: \
+the same words from another read or another export of a promo play only once (a later repeat is \
+dropped).
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.

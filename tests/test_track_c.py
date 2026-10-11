@@ -137,3 +137,54 @@ def test_fill_never_flashes_a_few_frames_or_repeats_a_still():
     _no_flashes_or_repeated_stills(tl, a)
     first = min(tl.connected, key=lambda c: c.start)
     assert first.clip_id == "I02" and first.start == 0
+
+
+# ------------------------------------------------------------ T9: one use per line
+
+
+def _reads():
+    from test_narration import VO
+
+    a01 = make_clip("A01", kind="audio", seconds=44, sentences=VO, role="voiceover")
+    # The second read says the long line a little differently, with an "um".
+    second = VO[:2] + [(12.5, 36.0, "Around Honda Center the plan adds homes, um, offices, two hotels, restaurants and twenty acres of parks.")] + VO[3:]
+    a02 = make_clip("A02", kind="audio", seconds=44, sentences=second, role="voiceover")
+    a02.take_of, a02.same_words = "A01", 0.97
+    return a01, a02
+
+
+def test_the_same_line_from_another_read_plays_once():
+    a01, a02 = _reads()
+    a = Analysis(clips=[a01, a02, make_clip("V01", seconds=60)])
+    raw = {
+        "sections": [
+            {"name": "Open", "items": ["A01.S003", "A01.S004"], "broll": []},
+            {"name": "Again", "items": ["A02.S003", "A02.S001"], "broll": [
+                {"clip": "V01", "over": ["A02.S003", "A02.S001"], "words": "", "source_in": -1, "reason": ""},
+            ]},
+        ],
+        "alternates": [{"chosen": "A01.S004", "others": ["A02.S004"], "note": "cleaner"}],
+        "flags": [{"ref": "A02.S003", "note": "check the read"}],
+    }
+    plan = normalize(raw, a)
+    refs = [i.ref for s in plan.sections for i in s.items]
+    assert refs == ["A01.S003", "A01.S004", "A02.S001"]
+    assert any("A02.S003 says the same line as A01.S003" in w for w in plan.warnings)
+    assert {"chosen": "A01.S003", "others": ["A02.S003"], "note": "the same line from another read or export"} in plan.alternates
+    assert plan.flags[0]["ref"] == "A01.S003"  # follows the line to the use that was kept
+    assert plan.sections[1].broll[0].over == ["A02.S001"]
+    # A short line in two reads of one script is the same line too.
+    assert [i.ref for i in normalize({"sections": [{"name": "x", "items": ["A01.S004", "A02.S004"]}]}, a).sections[0].items] == ["A01.S004"]
+
+
+def test_a_shared_line_across_unrelated_clips_is_dropped_only_when_long():
+    thanks = [(1.0, 2.0, "Thank you."), (3.0, 8.0, "It opens this summer in Anaheim near the arena.")]
+    v01 = make_clip("V01", seconds=10, sentences=thanks)
+    v02 = make_clip("V02", seconds=10, sentences=thanks)  # a different cutdown of the same promo
+    a = Analysis(clips=[v01, v02])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V02.S001", "V01.S002", "V02.S002"]}]}, a)
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S001", "V02.S001", "V01.S002"]
+    assert plan.alternates == [{"chosen": "V01.S002", "others": ["V02.S002"], "note": "the same line from another read or export"}]
+    # Retakes inside one recording stay the planner's call.
+    one = Analysis(clips=[make_clip("V01", seconds=20, sentences=thanks + [(10.0, 15.0, "It opens this summer in Anaheim near the arena.")])])
+    assert len(normalize({"sections": [{"name": "x", "items": ["V01.S002", "V01.S003"]}]}, one).sections[0].items) == 2

@@ -29,6 +29,34 @@ def _words(clip: Clip) -> list[str]:
     return re.findall(r"[a-z0-9']+", text)
 
 
+LINE_REPEAT_IN_TAKES = 0.8  # another read or export of the same script: any length
+LINE_REPEAT = 0.85  # anywhere else, for lines of six words or more
+LINE_REPEAT_MIN_WORDS = 6
+
+
+def line_words(text: str) -> list[str]:
+    """A line's words for comparing reads: lowercased, no punctuation, no um/uh."""
+    from .transcribe import FILLERS
+
+    return [w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in FILLERS]
+
+
+def take_group(clip: Clip) -> str:
+    """Clips with the same group are reads (take_of) or exports (duplicate_of) of one thing."""
+    return clip.take_of or clip.duplicate_of or clip.id
+
+
+def same_line(a: list[str], b: list[str], same_takes: bool) -> bool:
+    """Is line `a` the same line as `b`, said again? `same_takes`: from two reads/exports of one script."""
+    if not a or not b:
+        return False
+    if not same_takes and len(a) < LINE_REPEAT_MIN_WORDS:
+        return False  # "Thank you." twice in different interviews is fine
+    need = LINE_REPEAT_IN_TAKES if same_takes else LINE_REPEAT
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return sm.real_quick_ratio() >= need and sm.quick_ratio() >= need and sm.ratio() >= need
+
+
 def similarity(a: Clip, b: Clip) -> float:
     wa, wb = _words(a), _words(b)
     if not wa or not wb:
