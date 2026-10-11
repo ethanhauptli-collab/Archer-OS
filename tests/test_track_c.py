@@ -159,6 +159,21 @@ def test_fill_never_flashes_a_few_frames_or_repeats_a_still():
     assert first.clip_id == "I02" and first.start == 0
 
 
+def test_when_one_video_is_all_that_is_left_fill_cuts_between_distant_parts():
+    a = narration_project()
+    raw = {"sections": [{"name": "x", "items": ["A01.S001", "A01.S002", "A01.S003", "A01.S004"], "broll": [
+        {"clip": f"I0{i + 1}", "over": [f"A01.S00{i + 1}"], "words": "", "source_in": -1, "reason": ""} for i in range(4)
+    ]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    stills = [c.clip_id for c in tl.connected if a.clip(c.clip_id).media.kind == "image"]
+    assert len(stills) == len(set(stills))
+    fill = sorted((c for c in tl.connected if c.clip_id == "V01"), key=lambda c: c.start)
+    assert len(fill) >= 3  # the 17 s after the capped still keeps the fill pacing
+    for p, q in zip(fill, fill[1:]):
+        if p.end == q.start:
+            assert abs(float(q.src_in - (p.src_in + p.frames * tl.frame_duration))) >= 5  # another part, not a jump
+
+
 # ------------------------------------------------------------ T9: one use per line
 
 

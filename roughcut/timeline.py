@@ -953,6 +953,7 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
             candidates = [c for c in fresh if c.id not in beside] or fresh or [c for c in pool if c.id not in beside] or pool
             best = max(candidates, key=rank)
             m = best.media
+            on_screen = next((c for c in tl.connected if c.end == cursor and c.clip_id == best.id), None)
             if m.kind == "image":
                 src_in, frames = Fraction(0), want
             else:
@@ -962,6 +963,10 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
                     start_at = Fraction(at).limit_denominator(1000)
                 else:
                     start_at = video_cursor.get(best.id, m.duration * Fraction(1, 10))
+                    if on_screen is not None:
+                        # The only fit is the clip already on screen: cut to a part well away from it,
+                        # so it reads as another shot rather than a jump.
+                        start_at = on_screen.src_in + on_screen.frames * fd + max(Fraction(5), m.duration / 4)
                     if start_at + want * fd > m.duration:
                         start_at = m.duration * Fraction(1, 10)
                 src_in, frames = _video_window(m, want, fd, start_at)
