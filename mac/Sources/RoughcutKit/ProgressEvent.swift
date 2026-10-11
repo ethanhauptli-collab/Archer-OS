@@ -50,7 +50,7 @@ public struct ProgressEvent: Decodable, Equatable, Sendable {
 }
 
 /// Payload of the `done` event (`pipeline.result_summary`).
-public struct RunResult: Decodable, Equatable, Sendable {
+public struct RunResult: Codable, Equatable, Sendable {
     public var title: String
     public var outDir: String
     public var fcpxml: String

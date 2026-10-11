@@ -164,4 +164,29 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertNil(env["OPENAI_API_KEY"])  // empty values aren't passed
         XCTAssertEqual(env["PYTHONUNBUFFERED"], "1")
     }
+
+    func testOlderSavedPreferencesKeepWhatStillReads() throws {
+        // Written by an earlier app: no openInFinalCutWhenDone, and a style this version doesn't know.
+        let json = #"{"sources":[],"projectName":"","brief":"","targetLength":"","style":"extra-tight","format":"vertical","provider":"claude-code","model":"claude-sonnet-5-5","visionModel":"","baseURL":"","effort":"max","vision":false,"keepFillers":true,"stringout":false,"language":"en","graphics":true,"graphicsStyle":"navy and orange"}"#
+        let o = try JSONDecoder().decode(BuildOptions.self, from: Data(json.utf8))
+        XCTAssertEqual(o.style, .medium)  // unknown value falls back to the default
+        XCTAssertEqual(o.format, .vertical)
+        XCTAssertEqual(o.provider, .claudeCode)
+        XCTAssertEqual(o.model, "claude-sonnet-5-5")
+        XCTAssertEqual(o.effort, .max)
+        XCTAssertFalse(o.vision)
+        XCTAssertTrue(o.keepFillers)
+        XCTAssertTrue(o.graphics)
+        XCTAssertEqual(o.graphicsStyle, "navy and orange")
+        XCTAssertFalse(o.openInFinalCutWhenDone)
+    }
+
+    func testPreferencesRoundTrip() throws {
+        var o = options()
+        o.openInFinalCutWhenDone = true
+        o.style = .loose
+        let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
+        XCTAssertEqual(back, o)
+        XCTAssertFalse(o.arguments().contains { $0.contains("open") })  // app-side setting, not a CLI flag
+    }
 }

@@ -81,6 +81,14 @@ struct BuildForm: View {
                     SourcesDropZone(showImporter: $showImporter)
                 }
 
+                if !model.availableRecents.isEmpty {
+                    Section("Recent rough cuts") {
+                        ForEach(model.availableRecents.prefix(4)) { run in
+                            RecentRunRow(run: run)
+                        }
+                    }
+                }
+
                 Section("Brief") {
                     TextEditor(text: $model.options.brief)
                         .font(.body)
@@ -157,6 +165,7 @@ struct BuildForm: View {
                     TextField("Project name", text: $model.options.projectName, prompt: Text("Defaults to the folder name"))
                     Toggle("Also build a Stringout (all dialogue, dead air removed)", isOn: $model.options.stringout)
                     Toggle("Keep “um” and “uh”", isOn: $model.options.keepFillers)
+                    Toggle("Open in Final Cut Pro when it's done", isOn: $model.options.openInFinalCutWhenDone)
                 }
             }
             .formStyle(.grouped)
@@ -281,5 +290,31 @@ struct BuildBar: View {
             .disabled(!model.options.problems.isEmpty)
         }
         .padding(12)
+    }
+}
+
+struct RecentRunRow: View {
+    @Environment(AppModel.self) private var model
+    let run: RecentRun
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: run.result.fellBack ? "exclamationmark.triangle" : "film")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(run.result.title)
+                    .lineLimit(1)
+                Text("\(TimeText.clock(run.result.roughSeconds)) · \(run.finishedAt.formatted(.relative(presentation: .named)))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Open") { model.showRecent(run) }
+                .disabled(model.isRunning)
+        }
+        .contextMenu {
+            Button("Show in Finder") { model.revealInFinder(run.result) }
+            Button("Remove from Recent") { model.forgetRecent(run) }
+        }
     }
 }

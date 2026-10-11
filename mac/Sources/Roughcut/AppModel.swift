@@ -1,8 +1,17 @@
 import AppKit
 import Observation
 import RoughcutKit
+import UserNotifications
 
 private let preferencesKey = "buildPreferences.v1"
+private let recentsKey = "recentRuns.v1"
+
+/// A finished run, remembered so it can be reopened from the form.
+struct RecentRun: Codable, Identifiable, Equatable {
+    var result: RunResult
+    var finishedAt: Date
+    var id: String { result.fcpxml }
+}
 
 enum StageStatus: Equatable {
     case pending, active, done, skipped
@@ -32,6 +41,9 @@ final class AppModel {
     private(set) var progressTotal: Int?
     private(set) var log: [String] = []
 
+    // Finished runs, newest first
+    private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
+
     // Environment
     private(set) var cliURL: URL? = CLILocator.locate()
     private(set) var doctor: DoctorReport?
@@ -42,6 +54,8 @@ final class AppModel {
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var lastError: String?
     @ObservationIgnored private var lastResult: RunResult?
+    /// Keeps the Mac from idle-sleeping while a run is going.
+    @ObservationIgnored private var activity: NSObjectProtocol?
 
     var isRunning: Bool { phase == .running }
 
@@ -127,6 +141,11 @@ final class AppModel {
         lastError = nil
         lastResult = nil
         phase = .running
+        endActivity()
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: recut ? "Re-cutting a rough cut" : "Building a rough cut"
+        )
 
         let process = CLIProcess(
             executable: cli,
@@ -150,18 +169,61 @@ final class AppModel {
             appendLog(line)
         case .failedToLaunch(let message):
             process = nil
+            endActivity()
             phase = .failed("Couldn't start roughcut: \(message)")
         case .exited(let status, _):
             process = nil
-            guard phase == .running else { return }
-            if cancelRequested {
-                phase = .cancelled
-            } else if let result = lastResult {
-                phase = .finished(result)
-            } else {
-                let tail = log.suffix(6).joined(separator: "\n")
-                phase = .failed(lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)")
+            endActivity()
+            if phase == .running {
+                if cancelRequested {
+                    phase = .cancelled
+                } else if let result = lastResult {
+                    phase = .finished(result)
+                } else {
+                    let tail = log.suffix(6).joined(separator: "\n")
+                    phase = .failed(lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)")
+                }
             }
+            runEnded()
+        }
+    }
+
+    private func endActivity() {
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
+    }
+
+    /// Remember the result, open it if asked, and tell the user when they're in another app.
+    private func runEnded() {
+        switch phase {
+        case .finished(let result):
+            remember(result)
+            if options.openInFinalCutWhenDone {
+                openInFinalCut(result)
+            }
+            notify(title: isRecut ? "Re-cut ready" : "Rough cut ready", body: result.title)
+        case .failed(let message):
+            notify(title: "Roughcut stopped", body: String(message.prefix(240)))
+        default:
+            break
+        }
+    }
+
+    private func notify(title: String, body: String) {
+        guard !NSApp.isActive else { return }
+        NSApp.requestUserAttention(.informationalRequest)
+        // Notifications need a real app bundle; `swift run` has none.
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
     }
 
@@ -241,6 +303,42 @@ final class AppModel {
 
     func openReport(_ result: RunResult) {
         NSWorkspace.shared.open(result.reportURL)
+    }
+
+    // MARK: Recent runs
+
+    /// Recent runs whose Final Cut file is still on disk.
+    var availableRecents: [RecentRun] {
+        recentRuns.filter { FileManager.default.fileExists(atPath: $0.result.fcpxml) }
+    }
+
+    func showRecent(_ run: RecentRun) {
+        guard !isRunning else { return }
+        isRecut = false
+        phase = .finished(run.result)
+    }
+
+    func forgetRecent(_ run: RecentRun) {
+        recentRuns.removeAll { $0.id == run.id }
+        saveRecents()
+    }
+
+    private func remember(_ result: RunResult) {
+        recentRuns.removeAll { $0.result.fcpxml == result.fcpxml }
+        recentRuns.insert(RecentRun(result: result, finishedAt: Date()), at: 0)
+        recentRuns = Array(recentRuns.prefix(12))
+        saveRecents()
+    }
+
+    private func saveRecents() {
+        if let data = try? JSONEncoder().encode(recentRuns) {
+            UserDefaults.standard.set(data, forKey: recentsKey)
+        }
+    }
+
+    nonisolated private static func loadRecents() -> [RecentRun] {
+        guard let data = UserDefaults.standard.data(forKey: recentsKey) else { return [] }
+        return (try? JSONDecoder().decode([RecentRun].self, from: data)) ?? []
     }
 
     // MARK: Setup

@@ -132,8 +132,45 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var graphics: Bool = false
     /// Look for the graphics: brand colors, fonts, mood (`--graphics-style`).
     public var graphicsStyle: String = ""
+    /// The app opens the new project in Final Cut Pro as soon as a run finishes.
+    public var openInFinalCutWhenDone: Bool = false
 
     public init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case sources, outputFolder, projectName, brief, targetLength, style, format, provider, model, visionModel
+        case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
+    }
+
+    /// Saved preferences from an older version of the app are missing newer
+    /// fields (and may hold values this version dropped): keep everything that
+    /// still reads, default the rest, instead of losing all of them.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? c.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        let d = BuildOptions()
+        sources = value(.sources, d.sources)
+        outputFolder = value(.outputFolder, d.outputFolder)
+        projectName = value(.projectName, d.projectName)
+        brief = value(.brief, d.brief)
+        targetLength = value(.targetLength, d.targetLength)
+        style = value(.style, d.style)
+        format = value(.format, d.format)
+        provider = value(.provider, d.provider)
+        model = value(.model, d.model)
+        visionModel = value(.visionModel, d.visionModel)
+        baseURL = value(.baseURL, d.baseURL)
+        effort = value(.effort, d.effort)
+        vision = value(.vision, d.vision)
+        keepFillers = value(.keepFillers, d.keepFillers)
+        stringout = value(.stringout, d.stringout)
+        language = value(.language, d.language)
+        graphics = value(.graphics, d.graphics)
+        graphicsStyle = value(.graphicsStyle, d.graphicsStyle)
+        openInFinalCutWhenDone = value(.openInFinalCutWhenDone, d.openInFinalCutWhenDone)
+    }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
     public var problems: [String] {
