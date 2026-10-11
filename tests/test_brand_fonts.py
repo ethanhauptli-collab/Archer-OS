@@ -1,0 +1,59 @@
+"""Bundled and user brand fonts reach the offline graphics renderer."""
+
+import pytest
+
+from roughcut import brand_fonts, graphics
+
+
+def test_bundled_venture_fonts_are_found_by_their_real_family_names(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    names = brand_fonts.families()
+    assert {"Jost", "Inter", "Fraunces"} <= set(names)
+    jost = brand_fonts.available()["Jost"][0]
+    assert jost.weight == "100 900"  # variable font: every weight from one file
+    assert not jost.italic
+
+
+def test_only_named_families_are_embedded(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    html = "<html><head><style>h1{font-family:'Jost',sans-serif}</style></head><body><h1>Hi</h1></body></html>"
+    out = brand_fonts.embed(html)
+    assert out.count("@font-face") == 1 and 'font-family:"Jost"' in out
+    assert out.index("data-roughcut-fonts") < out.index("h1{font-family")
+    assert brand_fonts.embed("<p style='font-family:Helvetica'>x</p>") == "<p style='font-family:Helvetica'>x</p>"
+    # "Inter" inside another word isn't a mention
+    assert "@font-face" not in brand_fonts.embed("<p>International</p>")
+
+
+def test_user_fonts_folder_wins_over_the_bundled_copy(monkeypatch, tmp_path):
+    folder = tmp_path / "fonts"
+    folder.mkdir()
+    (folder / "Jost.ttf").write_bytes((brand_fonts.BUNDLED_DIR / "Jost.ttf").read_bytes())
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(folder))
+    brand_fonts._scan.cache_clear()
+    files = brand_fonts.available()["Jost"]
+    assert [f.path.parent for f in files] == [folder]
+    brand_fonts._scan.cache_clear()
+
+
+@pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
+def test_embedded_font_is_what_the_browser_draws(monkeypatch, tmp_path):
+    """Offline, with the network blocked, text set in Jost must not fall back."""
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    from playwright.sync_api import sync_playwright
+
+    page_html = "<html><head><style>span{font-size:80px}</style></head><body><span id=a style=\"font-family:'Jost',monospace\">Venture OC wiiiiimmmm</span><span id=b style='font-family:monospace'>Venture OC wiiiiimmmm</span></body></html>"
+    with sync_playwright() as p:
+        browser = graphics.launch_browser(p)
+        page = browser.new_page()
+        page.route("**/*", lambda route: route.abort())
+        page.set_content(brand_fonts.embed(page_html))
+        page.evaluate("document.fonts.ready")
+        loaded = page.evaluate("document.fonts.check('80px Jost')")
+        widths = page.evaluate("[a.getBoundingClientRect().width, b.getBoundingClientRect().width]")
+        browser.close()
+    assert loaded
+    assert abs(widths[0] - widths[1]) > 20, widths  # Jost is proportional, the fallback is monospace

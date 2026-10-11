@@ -30,3 +30,6 @@ include = ["roughcut*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+roughcut = ["assets/fonts/*"]
