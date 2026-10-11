@@ -174,16 +174,29 @@ def _clip_element(
     return el
 
 
-def _volume(el: ET.Element, clip: Clip, volume_db: float | None) -> None:
-    """The clip's <adjust-volume>, written the way Final Cut writes it.
+FADE_SHAPE = "easeIn"  # what Final Cut writes for its default (+3 dB) fade handles, in and out
+
+
+def _volume(el: ET.Element, clip: Clip, volume_db: float | None, fade_in: Fraction = Fraction(0), fade_out: Fraction = Fraction(0)) -> None:
+    """The clip's <adjust-volume>, written the way Final Cut writes it:
+    `amount` for the level, and fade handles as <fadeIn>/<fadeOut> inside
+    <param name="amount">.
 
     The DTD puts it after <note> and the video adjustments and before any
     anchored clip or marker, so call this before attaching children. Stills
     (<video>) and clips without audio get none.
     """
-    if el.tag != "asset-clip" or not clip.media.has_audio or volume_db is None:
+    if el.tag != "asset-clip" or not clip.media.has_audio:
         return
-    ET.SubElement(el, "adjust-volume", {"amount": f"{volume_db:g}dB"})
+    if volume_db is None and not fade_in and not fade_out:
+        return
+    adjust = ET.SubElement(el, "adjust-volume", {"amount": f"{volume_db:g}dB"} if volume_db is not None else {})
+    if fade_in or fade_out:
+        param = ET.SubElement(adjust, "param", {"name": "amount"})
+        if fade_in:
+            ET.SubElement(param, "fadeIn", {"type": FADE_SHAPE, "duration": tc.fcpx_time(fade_in, 48000)})
+        if fade_out:
+            ET.SubElement(param, "fadeOut", {"type": FADE_SHAPE, "duration": tc.fcpx_time(fade_out, 48000)})
 
 
 def _local(tl: Timeline, sc: SpineClip, clip: Clip, frame: int) -> Fraction:
@@ -236,7 +249,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             lane=None,
             timebase=tb,
         )
-        _volume(el, clip, sc.volume_db)
+        _volume(el, clip, sc.volume_db, sc.fade_in, sc.fade_out)
         # Child order follows the FCPXML DTD: volume, anchored clips, then markers.
         for cc in sorted(attached[i]["clips"], key=lambda c: (c.start, c.lane)):
             child_clip = analysis.clip(cc.clip_id)
@@ -252,7 +265,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 use=cc.kind,
                 note=cc.note,
             )
-            _volume(child, child_clip, cc.volume_db)
+            _volume(child, child_clip, cc.volume_db, cc.fade_in, cc.fade_out)
         for mk in attached[i]["markers"]:
             attrs = {"start": tc.fcpx_time(_local(tl, sc, clip, mk.frame), tb), "duration": tc.fcpx_time(fd, tb), "value": mk.value}
             if mk.kind == "chapter":

@@ -45,6 +45,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
         "--dialogue-level", type=_level, default=-16.0, metavar="LUFS",
         help="match every clip's speech to this loudness, e.g. -16 (default) or -14; 'off' keeps clip levels as recorded",
     )
+    g.add_argument("--fades", choices=["on", "off"], default="on", help="short audio fades at edits and on B-roll nat sound (default: on)")
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
     g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
     p.add_argument("--name", help="project/event name (default: folder name)")
@@ -356,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         broll_db=args.broll_db,
         music_db=args.music_db,
         dialogue_level=args.dialogue_level,
+        fades=args.fades == "on",
         stringout=not args.no_stringout,
         fill=not args.no_fill,
     )

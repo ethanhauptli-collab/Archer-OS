@@ -55,6 +55,12 @@ class SpineClip:
     section: int
     seg_ids: list[str] = field(default_factory=list)
     volume_db: float | None = None  # clip volume (level matching); None = as recorded
+    # First word start / last word end (clip-local seconds) when the edges are speech,
+    # so a de-click fade never reaches into a word. None: not known.
+    wa: float | None = None
+    wb: float | None = None
+    fade_in: Fraction = Fraction(0)  # seconds of audio fade at each end
+    fade_out: Fraction = Fraction(0)
 
     @property
     def end(self) -> int:
@@ -71,6 +77,8 @@ class ConnectedClip:
     kind: str  # "broll" | "music"
     volume_db: float | None = None
     note: str = ""
+    fade_in: Fraction = Fraction(0)
+    fade_out: Fraction = Fraction(0)
 
     @property
     def end(self) -> int:
@@ -349,6 +357,7 @@ def build_timeline(
     music_db: float = -14.0,
     fill: bool = True,
     dialogue_level: float | None = None,
+    fades: bool = True,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -403,9 +412,11 @@ def build_timeline(
         ):
             prev.frames += frames
             prev.seg_ids.extend(s for s in p.seg_ids if s not in prev.seg_ids)
+            prev.wb = p.wb if p.seg_ids else None
             sc = prev
         else:
             sc = SpineClip(clip_id=p.clip_id, src_in=src_in, frames=frames, offset=offset, section=p.section, seg_ids=list(p.seg_ids))
+            sc.wa, sc.wb = (p.wa, p.wb) if p.seg_ids else (None, None)
             tl.spine.append(sc)
         if p.section != last_section:
             tl.section_starts.append((offset, plan.sections[p.section].name))
@@ -432,6 +443,8 @@ def build_timeline(
     _place_music(tl, plan, analysis, music_db, warnings)
     _place_markers(tl, plan, analysis)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
+    if fades:
+        _fades(tl, analysis)
     tl.warnings = warnings
     return tl
 
@@ -819,6 +832,51 @@ def _mix(tl: Timeline, analysis: Analysis, *, dialogue_level: float | None, brol
         cc.volume_db = _round_db(got[0])
         row(clip, "music bed" if cc.kind == "music" else "cutaway nat sound", cc.volume_db, got[1])
     tl.levels = list(rows.values())
+
+
+DECLICK = Fraction(15, 1000)  # seconds: fade at a speech edit, too short to hear, long enough to stop a tick
+SPINE_BROLL_FADE = 6  # frames of fade on B-roll nat sound in the main storyline...
+CUTAWAY_FADE = Fraction(3, 10)  # ...and seconds on connected B-roll; both at most a quarter of the clip
+AUDIO_GRID = 48000  # fades are whole samples at 48 kHz
+
+
+def _samples(t: Fraction) -> Fraction:
+    return Fraction(math.floor(max(Fraction(0), t) * AUDIO_GRID), AUDIO_GRID)
+
+
+def _continuous(a: SpineClip | None, b: SpineClip | None, fd: Fraction) -> bool:
+    """True when b's audio carries straight on from a's (same clip, no gap in the source)."""
+    return a is not None and b is not None and a.clip_id == b.clip_id and a.src_in + a.frames * fd == b.src_in
+
+
+def _fades(tl: Timeline, analysis: Analysis) -> None:
+    """Short fades where the audio jumps, so the first pass plays without ticks.
+
+    Speech edits get a 15 ms de-click that ends before the first word and
+    starts after the last one (no fade where a cut sits right on a word).
+    B-roll nat sound eases in and out over a few frames. Fades are Final
+    Cut fade handles, so they stay draggable.
+    """
+    fd = tl.frame_duration
+    for i, sc in enumerate(tl.spine):
+        clip = analysis.clip(sc.clip_id)
+        if not clip.media.has_audio or clip.media.kind == "image":
+            continue
+        length = sc.frames * fd
+        head = not _continuous(tl.spine[i - 1] if i > 0 else None, sc, fd)
+        tail = not _continuous(sc, tl.spine[i + 1] if i + 1 < len(tl.spine) else None, fd)
+        if clip.role in ("aroll", "voiceover") or sc.seg_ids:
+            room_in = DECLICK if sc.wa is None else Fraction(sc.wa).limit_denominator(1000000) - sc.src_in
+            room_out = DECLICK if sc.wb is None else sc.src_in + length - Fraction(sc.wb).limit_denominator(1000000)
+            fade_in, fade_out = min(DECLICK, room_in), min(DECLICK, room_out)
+        else:  # nat sound under B-roll (or music) in the main storyline
+            fade_in = fade_out = min(SPINE_BROLL_FADE * fd, length / 4)
+        sc.fade_in = _samples(min(fade_in, length / 2)) if head else Fraction(0)
+        sc.fade_out = _samples(min(fade_out, length / 2)) if tail else Fraction(0)
+    for cc in tl.connected:
+        clip = analysis.clip(cc.clip_id)
+        if cc.kind == "broll" and clip is not None and clip.media.has_audio:
+            cc.fade_in = cc.fade_out = _samples(min(CUTAWAY_FADE, cc.frames * fd / 4))
 
 
 def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:

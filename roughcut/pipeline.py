@@ -47,6 +47,7 @@ class Options:
     broll_db: float | None = -20.0
     music_db: float = -14.0
     dialogue_level: float | None = -16.0  # LUFS speech is matched to; None = clip levels as recorded
+    fades: bool = True  # de-click fades at audio edits, soft fades on B-roll nat sound
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
@@ -150,7 +151,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
     style = style_for(opts)
     rough = build_timeline(
         plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
-        dialogue_level=opts.dialogue_level,
+        dialogue_level=opts.dialogue_level, fades=opts.fades,
     )
     stringout = None
     if opts.stringout:
@@ -165,6 +166,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
                 broll_db=opts.broll_db,
                 fill=opts.fill,
                 dialogue_level=opts.dialogue_level,
+                fades=opts.fades,
             )
     return rough, stringout
 

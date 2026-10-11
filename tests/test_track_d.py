@@ -316,7 +316,7 @@ def _spine_volumes(path) -> dict[str, set]:
     out: dict[str, set] = {}
     for el in rough.find("sequence/spine"):
         vol = el.find("adjust-volume")
-        out.setdefault(el.get("name"), set()).add(float(vol.get("amount").removesuffix("dB")) if vol is not None else 0.0)
+        out.setdefault(el.get("name"), set()).add(float(vol.get("amount", "0dB").removesuffix("dB")) if vol is not None else 0.0)
     return out
 
 
@@ -361,3 +361,79 @@ def test_dialogue_level_off_and_older_folders(talkers, tmp_path):
     again = pipeline.rerender(out, Options(inputs=[], cache_dir=tmp_path / "cache2"))
     vols = _spine_volumes(again.fcpxml)
     assert abs((vols["quiet"].pop() - vols["loud"].pop()) - 18.0) <= 1.0
+
+
+# ------------------------------------------------------------------ T3 fades
+
+
+def _fades(el) -> tuple[Fraction, Fraction]:
+    param = el.find("adjust-volume/param[@name='amount']")
+    if param is None:
+        return Fraction(0), Fraction(0)
+    fi, fo = param.find("fadeIn"), param.find("fadeOut")
+    return (T(fi.get("duration")) if fi is not None else Fraction(0)), (T(fo.get("duration")) if fo is not None else Fraction(0))
+
+
+def test_declick_fades_stay_off_the_words(built):
+    from conftest import SPEECH
+
+    validate_dtd(built.fcpxml)
+    root = ET.parse(built.fcpxml).getroot()
+    origin = T(next(a for a in root.iter("asset") if a.get("name") == "talk").get("start"))
+    words = [(w["start"], w["end"]) for s, e, text in SPEECH for w in spread_words(s, e, text)]
+    faded = 0
+    for project in root.iter("project"):
+        for el in project.find("sequence/spine"):
+            if el.get("name") != "talk":
+                continue
+            fade_in, fade_out = _fades(el)
+            a = T(el.get("start")) - origin
+            b = a + T(el.get("duration"))
+            assert fade_in <= Fraction(15, 1000) and fade_out <= Fraction(15, 1000)
+            assert (fade_in * 48000).denominator == 1 and (fade_out * 48000).denominator == 1  # whole samples
+            kept = [(ws, we) for ws, we in words if min(we, b) - max(ws, a) > 0.03]  # not a sliver at a frame edge
+            for ws, we in kept:  # no kept word sounds inside a fade (a cut that lands on a word gets none)
+                assert not fade_in or ws >= a + fade_in, f"fade-in at {float(a):.3f} touches a word"
+                assert not fade_out or we <= b - fade_out, f"fade-out at {float(b):.3f} touches a word"
+            faded += bool(fade_in) + bool(fade_out)
+    assert faded >= 6  # most edits got one
+    # Cutaway nat sound eases in and out; stills never carry audio settings.
+    rough = _rough(root)
+    cutaway = next(el for el in rough.iter("asset-clip") if el.get("name") == "broll" and el.get("lane"))
+    assert _fades(cutaway) == (Fraction(3, 10), Fraction(3, 10))
+    assert all(v.find("adjust-volume") is None for v in rough.iter("video"))
+
+
+def test_fades_follow_the_edits_and_can_be_turned_off(tmp_path):
+    from roughcut.timeline import _continuous
+
+    # Two sentences 0.3 s apart in different sections: their padding meets, so the audio is continuous.
+    talk = make_clip("V01", seconds=30, sentences=[(1.0, 4.0, "The first line ends here."), (4.3, 8.0, "And the next line follows on."), (15.0, 18.0, "Much later, one more.")])
+    nat = make_clip("V02", seconds=20)  # B-roll with sound, used as a range in the main storyline
+    a = Analysis(clips=[talk, nat])
+    raw = {"title": "t", "sections": [{"name": "A", "items": ["V01.S001"]}, {"name": "B", "items": ["V01.S002", "V01.S003", "V02@2-10"]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    fd = tl.frame_duration
+    s1, s2, s3, b = tl.spine
+    assert _continuous(s1, s2, fd) and s1.section != s2.section
+    assert s1.fade_out == 0 and s2.fade_in == 0  # no fade inside continuous sound
+    assert s1.fade_in == s2.fade_out == s3.fade_in == Fraction(15, 1000)
+    assert b.fade_in == b.fade_out and 0 <= 6 * fd - b.fade_in < Fraction(1, 48000)  # nat sound: 6 frames, in whole samples
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    check_invariants(path)
+
+    flat = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t", fades=False)
+    path = _write(tmp_path, [flat], a)
+    assert ET.parse(path).getroot().find(".//fadeIn") is None
+
+
+def test_cli_fades_off(footage, tmp_path):
+    from roughcut.cli import main
+
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--fades", "off"]) == 0
+    fcpxml = next(out.glob("*.fcpxml"))
+    validate_dtd(fcpxml)
+    root = ET.parse(fcpxml).getroot()
+    assert root.find(".//fadeIn") is None and root.find(".//adjust-volume") is not None  # levels still matched
