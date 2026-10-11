@@ -260,6 +260,50 @@ def probe(path: Path) -> MediaInfo:
     return info
 
 
+def _names(infos: list[MediaInfo], limit: int = 6) -> str:
+    names = sorted({i.name for i in infos})
+    return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def frame_rate_warnings(project_fd: Fraction, used: list[MediaInfo]) -> list[str]:
+    """Report lines about video in a cut that won't play frame for frame.
+
+    `used` is the media of every clip placed in the project. Clips at another
+    rate play at real speed (Final Cut repeats or skips frames to fit), and
+    variable-rate phone clips are treated as their nominal rate.
+    """
+    video = [m for m in used if m.kind == "video" and m.frame_duration]
+    by_rate: dict[Fraction, list[MediaInfo]] = {}
+    for m in video:
+        if m.frame_duration != project_fd:
+            by_rate.setdefault(m.frame_duration, []).append(m)
+    out = []
+    if by_rate:
+        count = len({m.name for ms in by_rate.values() for m in ms})
+        groups = "; ".join(
+            f"{tc.rate_label(fd)} fps: {_names(ms)}" for fd, ms in sorted(by_rate.items(), key=lambda kv: kv[0], reverse=True)
+        )
+        uneven = any((fd / project_fd).denominator != 1 and (project_fd / fd).denominator != 1 for fd in by_rate)
+        faster = any(fd < project_fd for fd in by_rate)
+        one = count == 1
+        out.append(
+            f"{count} clip{'' if one else 's'} in this cut {'runs' if one else 'run'} at a different frame rate from the "
+            f"{tc.rate_label(project_fd)} fps project ({groups}). Final Cut plays {'it' if one else 'them'} at real speed "
+            "by repeating or skipping frames"
+            + (", which can judder when the rates aren't whole multiples of each other" if uneven else "")
+            + "."
+            + (" To turn high-frame-rate shots into slow motion, select them in Final Cut and choose Modify > Retime > Automatic Speed." if faster else "")
+        )
+    vfr = [m for m in video if m.vfr]
+    if vfr:
+        out.append(
+            f"Variable frame rate (typical of phone and screen recordings) in this cut: {_names(vfr)}. Final Cut treats "
+            "each as its nominal rate; if a long take drifts out of lip sync, convert it to a constant frame rate "
+            "(for example with HandBrake) and cut from that."
+        )
+    return out
+
+
 def snap_rate(stream: dict) -> tuple[Fraction, str] | None:
     return tc.snap_frame_duration(stream.get("r_frame_rate")) or tc.snap_frame_duration(
         stream.get("avg_frame_rate")

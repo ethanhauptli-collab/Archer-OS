@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .analyze import ROLE_LABELS, Analysis
+from .media import frame_rate_warnings
 from .plan import Plan
 from .providers import UsageLog, estimate_cost
 from .timecode import seconds_to_clock
@@ -160,7 +161,9 @@ def build_report(
         L.append(f"| {c.id} | {c.media.name} | {ROLE_LABELS.get(c.role, c.role)} | {length} | {desc} |")
     L.append("")
 
-    warnings = collapse_warnings(list(analysis.warnings) + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or []))
+    used = {c.clip_id for c in tl.spine} | {c.clip_id for c in tl.connected if c.kind != "graphic"}
+    rates = frame_rate_warnings(tl.frame_duration, [c.media for c in analysis.clips if c.id in used])
+    warnings = collapse_warnings(list(analysis.warnings) + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or []) + rates)
     if warnings:
         L += ["## Warnings", ""] + [f"- {w}" for w in warnings] + [""]
     return "\n".join(L)
