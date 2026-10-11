@@ -100,8 +100,48 @@ def _timebase(m: MediaInfo) -> int | None:
     return None
 
 
+AUTO_FILL = "auto-fill"  # the note timeline._fill_picture gives the shots it chose
+
+
+def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None]:
+    """(video role, audio role) for one use of a clip, so Timeline Index > Roles
+    can mute the music bed, solo the planned B-roll or hide the auto-fill.
+
+    `use` is "spine", "broll" (connected cutaway), "music", "graphic" or
+    "browser". None leaves Final Cut's default.
+    """
+    m = clip.media
+    if use == "graphic" or clip.role == "graphic":
+        return "titles.Graphics", None
+    if use == "music":
+        return None, "music.Music Bed"
+    if use == "broll":
+        video = "B-Roll.Auto-fill" if note == AUTO_FILL else "B-Roll.Planned"
+        return video, "effects.Nat Sound" if m.has_audio else None
+    # Spine and browser: by what the clip is.
+    if clip.role in ("broll", "still"):
+        return "B-Roll", "effects.Nat Sound" if m.has_audio else None
+    if clip.role == "voiceover":
+        return None, "dialogue.Narration"
+    if clip.role == "aroll":
+        return None, "dialogue"
+    if clip.role == "music":
+        return None, "music"
+    return None, None
+
+
 def _clip_element(
-    parent: ET.Element, clip: Clip, res: "_Resources", *, offset: str | None, start: Fraction, duration: str, lane: int | None, timebase: int
+    parent: ET.Element,
+    clip: Clip,
+    res: "_Resources",
+    *,
+    offset: str | None,
+    start: Fraction,
+    duration: str,
+    lane: int | None,
+    timebase: int,
+    use: str = "spine",
+    note: str = "",
 ) -> ET.Element:
     """A story element referencing a clip's asset: <video> for stills, <asset-clip> otherwise."""
     m = clip.media
@@ -117,7 +157,20 @@ def _clip_element(
         attrs["format"] = res.still_format()
     if m.kind == "video":
         attrs["tcFormat"] = "DF" if m.timecode and ";" in m.timecode else "NDF"
-    return ET.SubElement(parent, tag, attrs)
+    video_role, audio_role = _roles(clip, use, note)
+    if tag == "video":
+        if video_role:
+            attrs["role"] = video_role  # <video> has one role attribute
+    else:
+        if audio_role and m.has_audio:
+            attrs["audioRole"] = audio_role
+        if video_role and m.has_video:
+            attrs["videoRole"] = video_role
+    el = ET.SubElement(parent, tag, attrs)
+    if note and note != AUTO_FILL:
+        # The DTD puts <note> first in an asset-clip, and before everything but params in a <video>.
+        ET.SubElement(el, "note").text = note
+    return el
 
 
 def _local(tl: Timeline, sc: SpineClip, clip: Clip, frame: int) -> Fraction:
@@ -182,6 +235,8 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 duration=tc.fcpx_time(cc.frames * fd, tb),
                 lane=cc.lane,
                 timebase=tb,
+                use=cc.kind,
+                note=cc.note,
             )
             if cc.volume_db is not None and child_clip.media.has_audio:
                 ET.SubElement(child, "adjust-volume", {"amount": f"{cc.volume_db:g}dB"})
@@ -219,11 +274,15 @@ def _browser_clip(event: ET.Element, clip: Clip, res: _Resources) -> None:
         # Events can't hold a bare <video>; FCP wraps browser stills in a <clip>.
         start, duration = STILL_ORIGIN, Fraction(5)
         el = ET.SubElement(event, "clip", {"name": m.stem, "start": tc.fcpx_time(start), "duration": tc.fcpx_time(duration)})
-        ET.SubElement(el, "video", {"ref": res.asset(clip), "duration": "0s"})
+        video = {"ref": res.asset(clip), "duration": "0s"}
+        role = _roles(clip, "browser")[0]
+        if role:
+            video["role"] = role  # <clip> itself has no role attribute
+        ET.SubElement(el, "video", video)
         ET.SubElement(el, "keyword", {"start": tc.fcpx_time(start), "duration": tc.fcpx_time(duration), "value": keywords})
         return
     tb = _timebase(m) or 1
-    el = _clip_element(event, clip, res, offset=None, start=m.start, duration=tc.fcpx_time(m.duration, tb), lane=None, timebase=tb)
+    el = _clip_element(event, clip, res, offset=None, start=m.start, duration=tc.fcpx_time(m.duration, tb), lane=None, timebase=tb, use="browser")
     ET.SubElement(el, "keyword", {"start": tc.fcpx_time(m.start, tb), "duration": tc.fcpx_time(m.duration, tb), "value": keywords})
 
 
@@ -236,6 +295,8 @@ def _scrub(root: ET.Element) -> None:
         for key, value in el.attrib.items():
             if _XML_ILLEGAL.search(value):
                 el.set(key, _XML_ILLEGAL.sub(" ", value))
+        if el.text and _XML_ILLEGAL.search(el.text):
+            el.text = _XML_ILLEGAL.sub(" ", el.text)
 
 
 def build_fcpxml(timelines: list[Timeline], analysis: Analysis, *, event_name: str, browser_clips: bool = True) -> str:
