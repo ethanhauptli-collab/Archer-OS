@@ -502,8 +502,10 @@ def _print(preset: Preset) -> None:
         print(f"    {line}")
     if preset.source == "built in" and preset.graphics:
         print(
-            f"\nTo set exact brand colors, fonts or a logo, save your version:\n"
-            f'  roughcut preset save {preset.name} --graphics-style "COLORS, FONT, MOOD" --logo LOGO_FILE'
+            f"\nTo add your logo (the look stays as it is):\n"
+            f"  roughcut preset save {preset.name} --logo LOGO_FILE\n"
+            f"To match graphics you approved in an earlier run:\n"
+            f"  roughcut preset save {preset.name} --look-from OUTPUT_FOLDER"
         )
 
 

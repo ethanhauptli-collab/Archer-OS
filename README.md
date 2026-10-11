@@ -2,127 +2,127 @@
 
 Dump a folder of footage in and get a Final Cut Pro rough cut out.
 
-`roughcut` transcribes every clip on your Mac, removes dead air and "um"s, asks an AI model to build the story (hook, sections, best takes, B-roll, music), and writes an FCPXML file. Import that into Final Cut and you get a real, fully editable project that references your original media, so every cut keeps its handles. It also adds a **Stringout** project (all dialogue in recording order, dead air removed) and organizes the event browser with keywords (A-Roll, B-Roll, Stills, Music, plus visual tags).
+`roughcut` transcribes every clip on your Mac, removes dead air and "um"s, asks Claude to build the story (hook, sections, best takes, B-roll on the words it illustrates, music), levels the audio, can design animated graphics, and writes an FCPXML file. Import it into Final Cut and you get a real, fully editable project that references your original media, so every cut keeps its handles. It also adds a **Stringout** project (all dialogue in recording order, dead air removed) and organizes the event browser with keywords (A-Roll, B-Roll, Stills, Music, alternate takes, visual tags).
 
-There's a command-line tool (below) and a Mac app in [`mac/`](mac/README.md) that wraps it: drop footage in, write a brief, watch the progress, then open the result in Final Cut Pro.
+There's a Mac app ([`mac/`](mac/README.md)) and a command-line tool. They do the same thing; the app runs the command-line tool for you.
 
 ## Setup (Mac, Apple Silicon)
 
 ```bash
 brew install ffmpeg python@3.12
-git clone https://github.com/ethanhauptli-collab/Archer-OS.git && cd Archer-OS
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e '.[mac,graphics,dev]'
+git clone https://github.com/ethanhauptli-collab/Archer-OS.git ~/Archer-OS
+cd ~/Archer-OS
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[mac,graphics,dev]'
 ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut
-roughcut key set
+mac/scripts/build-app.sh --install
 ```
 
-The `mac` extra installs mlx-whisper for fast on-device transcription, and `graphics` the renderer for motion graphics (the built-in presets turn them on). The `ln` line puts `roughcut` in every Terminal window, so you don't have to `source .venv/bin/activate` in each new one. `roughcut key set` asks for your Claude API key and saves it in the macOS Keychain.
+That installs `roughcut` for every Terminal window (no `source .venv/bin/activate` needed) and puts **Roughcut.app** in Applications. The `mac` extra is mlx-whisper (fast on-device transcription; the first run downloads its model, about 1.6 GB, once) and `graphics` is the renderer for motion graphics. Graphics render with Google Chrome if it's installed; if not, run this once:
 
-To update later, run `roughcut update` from any folder. It pulls the latest code into your clone, reinstalls only when the dependencies changed, lists what's new and runs `roughcut doctor`.
+```bash
+~/Archer-OS/.venv/bin/python -m playwright install chromium
+```
 
-If your copy is older than `roughcut update` (it says "invalid choice: 'update'"), update the old way once:
+Then choose how the AI steps are paid for:
+
+- **Your Claude Pro/Max plan** (no API key): install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude` once and type `/login`. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
+- **An API key** from [console.anthropic.com](https://console.anthropic.com) → API Keys: `roughcut key set` (or the app's Settings → API Keys) saves it in the macOS Keychain.
+
+`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key.
+
+**Updating:** `roughcut update` from any folder, or **Roughcut → Update Roughcut…** in the app. It pulls the latest code, reinstalls only when the dependencies changed, and lists what's new. If the Mac app changed, it prints the one command that rebuilds it. A copy too old to have `roughcut update` (it says "invalid choice: 'update'") updates once with:
 
 ```bash
 cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics,dev]'
 ```
 
-The first transcription downloads the Whisper model (`whisper-large-v3-turbo`, about 1.6 GB) once.
+## Using the app
 
-## Use
+1. Drop your footage folder (or clips) on the window.
+2. Pick a **Preset** (Venture OC or Save the Kid fill in the brief, length, pacing and graphics look), then add to the brief what's special about this video: who's in it, the must-keep moments, the angle.
+3. Optional: a **Music bed** song, a different **Dialogue level**, **Motion graphics** and a logo.
+4. **Build Rough Cut**. The checklist shows each step; you can switch to another app, and the Mac stays awake and tells you when it's done.
+5. **Open in Final Cut Pro**, choose a library, and open the project the result screen names (for example "OC Food Fest - Rough Cut v1 (tight, Opus)").
 
-Everything in the folder, Claude plans the cut:
+After a cut you can:
+- **Re-cut** it at another pacing or format, with no AI call.
+- **Revise with notes**: type what to change ("tighter hook, drop the second interview line, more drone over the intro") and Claude re-plans it as a new version.
+- Open the **Paper Edit**.
+
+**Recent rough cuts** on the main screen reopen earlier results.
+
+## Using Terminal
+
+A Venture OC promo, using the preset and adding this video's specifics:
 
 ```bash
-roughcut build ~/Movies/Trip
+roughcut build ~/Movies/OCFoodFest --preset venture-oc -c "OC Food Fest at Huntington Beach. Feature Maria, the festival director. End on the ticket price."
 ```
 
-With a brief and a target length:
+A Save the Kid episode with a song from your Downloads under it:
 
 ```bash
-roughcut build ~/Movies/Trip -t 8m \
-  -c "Vlog: family day trip to Big Bear. Candid, warm. Open on the kids at the lake. Keep the part where they find the giant pinecone."
+roughcut build ~/Movies/SurfDay --preset save-the-kid --music ~/Downloads/song.m4a -c "Phoenix's first surf lesson. Keep the wipeout and the high five."
 ```
 
-The brief from a file, plus a script or outline to follow:
+Then revise it from your notes, as version 2 (no re-transcription):
 
 ```bash
-roughcut build ~/Movies/Trip --context-file brief.md --script outline.txt
+roughcut revise ~/Movies/SurfDay_roughcut "open on the wipeout, cut the parking lot part, end on the high five"
 ```
 
-No AI, just cut the silence (like Recut / TimeBolt):
+Re-cut the latest version tighter, or vertical for Reels and Shorts, with no AI call:
+
+```bash
+roughcut render ~/Movies/SurfDay_roughcut --style tight --format vertical
+```
+
+No AI at all, just cut the silence (like Recut or TimeBolt):
 
 ```bash
 roughcut build ~/Movies/Talk --provider none
 ```
 
-Re-cut an earlier run tighter, or for vertical, without calling the model again:
+Paths with spaces need quotes, or drag the folder from Finder into the Terminal window and it's typed for you. If you forget the quotes, roughcut works out which folder you meant when it can and shows the quoted form for next time; otherwise it stops before doing anything and prints the command with the quotes in place. Add `--open` to any build, render or revise to open the new cut in Final Cut Pro when it's done.
 
-```bash
-roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
-```
+## What you get
 
-A path with spaces needs quotes, or drag the folder from Finder into the Terminal window and it's typed for you. If you forget the quotes, roughcut works out which folder you meant when it can and shows the quoted form for next time; otherwise it stops before doing anything and prints the command with the quotes in place.
-
-`roughcut doctor` checks that ffmpeg and transcription are installed, and tests your API key against Anthropic.
-
-**About the key:** it has to be an API key from [console.anthropic.com](https://console.anthropic.com) → API Keys (starts with `sk-ant-`: `sk-ant-usr-` for new keys, `sk-ant-api03-` for older ones). A Claude Pro/Max subscription or Claude Code sign-in doesn't give API access. If the key is missing or rejected, `roughcut build` stops right away and says why.
-
-`roughcut key set` checks the key with Anthropic and stores it in your login Keychain, shared with the Mac app (Settings → API Keys writes the same entry). `roughcut key status` shows where the key comes from, and `roughcut key remove` deletes it. An `ANTHROPIC_API_KEY` exported in your shell still works and takes priority. The first time Terminal reads a key the app saved (or the other way round), macOS asks for permission; click **Always Allow**.
-
-Then in Final Cut Pro choose **File → Import → XML…** and pick the `.fcpxml` in the output folder (by default `<footage folder>_roughcut/`, next to your footage).
-
-### What you get
+Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherever `-o` says).
 
 | File | What it is |
 |---|---|
-| `<name>.fcpxml` | Event with keyworded clips, **Rough Cut** project, **Stringout** project |
-| `edit_report.md` | Paper edit: sections, every line used, B-roll choices, alternate takes, YouTube chapters, what was cut and why, warnings |
-| `plan.json` | The model's plan (edit it by hand and run `roughcut render` to rebuild) |
-| `analysis.json`, `prompt.md` | Transcripts and clip data, and the exact prompt the model saw |
-| `roughcut.log` | Every step of every run with times, ending in FINISHED or STOPPED (and why). If the other files are older than your run, this says what happened |
+| `<name> vN.fcpxml` | The newest cut: an event with keyworded clips, the **Rough Cut vN** project and the **Stringout vN** project. Import it with File → Import → XML… |
+| `edit_report.html` | The paper edit as a page to read or print: sections, every line used, B-roll and why, alternate takes, YouTube chapters (with a Copy button), what was cut and why, levels, a cut check against your target length, and warnings. `edit_report.md` is the same in Markdown |
+| `history/` | The last five earlier versions, each with its own FCPXML, plan and paper edit. Earlier projects you imported keep working |
+| `graphics/` | Each graphic as an editable `.html` design and a rendered `.mov`, plus `preview.html` showing every graphic over the shot it sits on |
+| `plan.json`, `analysis.json`, `prompt.md` | The plan with the run's settings, the transcripts and clip data, and the exact prompt Claude saw |
+| `result.json`, `versions.json` | The run summary and the list of versions (the app reads these) |
+| `roughcut.log` | Every step of every run with times, ending in FINISHED or STOPPED and why |
 
-In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag decisions to double-check, and **standard markers** name the alternate takes of a line.
+When a run ends, Terminal and the app say what made it in and what was left out (graphics, clips described, unreadable files) and roughly what the AI steps cost, per step.
 
-### Useful options
+### In Final Cut Pro
 
-| Option | Default | |
-|---|---|---|
-| `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look (see Presets) |
-| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
-| `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
-| `--script FILE` | | A script, outline or transcript to follow |
-| `--style` | `medium` | `tight`, `medium`, `loose`: how much pause is kept |
-| `--keep-fillers` | off | Don't cut um/uh |
-| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
-| `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
-| `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it. Other providers: the model's name |
-| `--effort` | `high` | Claude reasoning effort: `low` … `max` |
-| `--no-vision` | | Skip visual descriptions of clips (cheaper, worse B-roll picks) |
-| `--vision-model` | same as `--model` | A different model for describing clips, e.g. `sonnet` while Opus plans (most tokens on a big shoot go to descriptions) |
-| `--transcriber` | `auto` | `mlx` (Mac), `faster-whisper`, or `none` (silence only) |
-| `--language` | detect | e.g. `en` |
-| `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
-| `--broll-db`, `--music-db` | -20, -14 | Levels for B-roll nat sound and music |
-| `--no-fill` | | Don't auto-cover narration the plan left without picture |
-| `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below); `--no-graphics` turns a preset's off |
-| `--graphics-logo FILE` | | A PNG, SVG, JPEG or WebP logo the graphics may show |
-| `--graphics-look FILE` | | A graphic you approved (an `.html` from an earlier run's `graphics/`) for new designs to match; repeatable |
+- **Markers**: chapter markers for each section; to-do markers for decisions to check (an uncovered jump cut, a music jump inside a finished promo, a line you asked to keep that didn't fit); standard markers name the alternate takes of a line.
+- **Roles**: dialogue (narration as its own subrole), B-Roll (planned shots and auto-fill separately), nat sound as effects, the music bed as music, graphics as titles. In the Timeline Index you can mute the music or hide the auto-fill in one click.
+- **Notes**: each planned B-roll shot carries Claude's reason for it in the inspector.
+- **Keywords**: the other reads of each line you used are marked "Alt take" in the browser, so swapping a read is select, then Shift-R. Duplicate exports are marked too.
+- **Levels**: every clip's speech is matched to the dialogue level, B-roll sound sits under it, and the music ducks under speech and comes up between lines. Volume and fades are ordinary FCP volume settings and fade handles you can drag.
 
-### Presets
+## Presets
 
-A preset is the brief, target length, pacing, format and graphics look you use for one kind of video. Two are built in: `venture-oc` (Venture Orange County promos: energetic, 1:30, tight, graphics on) and `save-the-kid` (the personal channel: intimate and reflective, 10 minutes, loose, minimal graphics).
+A preset is the brief, target length, pacing, format and graphics look you use for one kind of video. Two are built in:
 
-```bash
-roughcut build ~/Movies/OCVIBE --preset venture-oc -c "OC Vibe launch night. Feature the chef's story."
-```
+- `venture-oc`: Venture Orange County promos. Energetic, 1:30, tight, graphics on, in the ventureoc.com look: navy, orange and gold, Jost, Inter and Fraunces.
+- `save-the-kid`: the personal channel. Intimate and reflective, 10 minutes, loose pacing, minimal graphics.
 
 Anything you type wins over the preset (`-t 2m`, `--style medium`, `--no-graphics`), and your `-c` brief is added to the preset's. `roughcut preset list` shows them all and `roughcut preset show venture-oc` shows everything one sets.
 
-The built-in `venture-oc` look asks for navy plates with an orange accent, not exact shades. Save your own version once with the exact brand colors, font and logo, and every run with that preset uses them:
+Give a preset your logo once, and every run with it can put the logo on title cards and lower thirds:
 
 ```bash
-roughcut preset save venture-oc --graphics-style "BRAND COLORS, FONT, MOOD" --logo ~/Brand/logo.png
+roughcut preset save venture-oc --logo ~/Brand/venture-logo.png
 ```
 
 Once a run's graphics look right (edit their HTML in `graphics/` and re-render until they do), make them the preset's approved look:
@@ -133,37 +133,75 @@ roughcut preset save venture-oc --look-from ~/Movies/OCVIBE_roughcut G01 G03
 
 Every later run with that preset shows those designs to the designer, which matches their type, colors, plates and motion. Name up to three graphics by the number in their file name, or leave the numbers off to take the first two of different kinds. The preset keeps its own copies, so the run folder can go; `--no-look` drops them.
 
-`roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics` set the rest). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
+`roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics`, `--graphics-style` set the rest). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
 
-### Motion graphics
+## Revise, re-cut and finish
+
+- **`roughcut revise FOLDER "notes"`** re-plans the latest cut from your notes as the next version. Claude sees the footage, the current cut and every earlier note, and changes only what you asked. `--keep V01.S003,V02.S010` and `--avoid V04` (or `V04@12-30` for seconds 12 to 30 of a clip) pin lines and shots; `-t 60s` sets a new length. Graphics that didn't change are reused as they are, hand edits included. The paper edit opens with what changed.
+- **`roughcut render FOLDER`** rebuilds the latest plan with no AI call. It keeps the run's own pacing, format, levels and fades unless you give new ones (`--style tight`, `--format vertical`, `--format auto` for the footage's own, `--no-keep-fillers`, `--dialogue-level -14`).
+- **If a run stops** after Claude planned the cut (a crash, a closed laptop, a graphic that wouldn't render), nothing paid for is lost: the plan was saved first, and roughcut prints the `roughcut render FOLDER` command that finishes the cut without AI. The app shows a **Finish without AI** button.
+- **If your Claude plan's usage limit or your API credit runs out**, the run stops and says so; it never delivers a silence-only cut that looks finished. Transcripts and clip descriptions are cached, so the same command after the reset carries on from there.
+
+## Audio
+
+| Option | Default | |
+|---|---|---|
+| `--dialogue-level LUFS` | -16 | Every clip's speech is matched to this loudness (-14 is louder, for phones). `off` keeps clips as recorded |
+| `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue |
+| `--music FILE` | | A song to lay under the cut (repeatable). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame |
+| `--fades on/off` | on | Short de-click fades at audio edits and soft fades on B-roll sound (never over a word) |
+
+A boost stops before the peaks clip, and the paper edit's Levels table says when a clip couldn't reach the dialogue level or brings a noisy background up with it (Voice Isolation or a limiter in Final Cut finishes the job).
+
+## Motion graphics
 
 ```bash
-roughcut build ~/Movies/OCVIBE --graphics \
-  -c "Promo for OC Vibe. Lower third for each speaker, call out the big numbers, kinetic caption on the hook." \
-  --graphics-style "bold geometric sans, white type on dark plates, one accent color, premium and energetic"
+roughcut build ~/Movies/OCVIBE --preset venture-oc
 ```
 
-With `--graphics` (or a preset that has them on), Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). With `--graphics-logo` (or a preset's logo) the designs can place your logo; it's embedded in each saved design, so re-renders don't need the file. A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
+With graphics on (`--graphics`, or a preset that has them on), Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript, never two on screen at once. A second request designs every graphic as an HTML animation in one look (the preset's, your `--graphics-style`, or a clean default), seeing a frame of the shot each one sits over, and on vertical cuts keeping clear of the Reels/TikTok buttons. A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll.
 
-Each clip's design is saved next to it in `graphics/` as an `.html` file. Edit one (text, colors, timing) and run `roughcut render OUTPUT_FOLDER` to re-render just that graphic. A re-cut with a different `--style` re-times the graphics and only re-renders the ones whose length changed.
+- **Fonts**: graphics render offline, so a design can only use fonts roughcut can embed. Jost, Inter and Fraunces ship with roughcut; drop any other `.ttf`, `.otf` or `.woff2` into `~/Library/Application Support/roughcut/fonts/` and designs can use it by name.
+- **Checking them**: open `graphics/preview.html` to watch every graphic over its real shot before importing. The paper edit lists anything a graphic did wrong: a script error, a missing font, blank, still on screen at the end, outside the safe area.
+- **Editing them**: each design is `graphics/G01-lower-third.html`. Edit the text, colors or timing and run `roughcut render FOLDER` to re-render just that graphic. A re-cut only re-renders graphics whose length changed. Rendered clips are never deleted while any version uses them, because Final Cut reads them in place.
+- **A design that hangs** is stopped after a time limit and left out with a note naming the file to fix; the rest of the cut is delivered.
 
-Setup: `pip install -e '.[graphics]'`. Rendering uses Google Chrome if it's installed; otherwise run `playwright install chromium` once. `roughcut doctor` shows whether graphics are ready. Expect about a minute of design time per eight graphics, and roughly 25 MB per 4-second 1080p graphic.
+Rendering took about 6 seconds per 4-second 1080p graphic on the 4-core test machine (an M-series Mac is usually quicker), and designing takes a minute or two for a promo's worth of graphics.
+
+## Useful options
+
+| Option | Default | |
+|---|---|---|
+| `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look |
+| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
+| `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
+| `--script FILE` | | A script, outline or transcript to follow |
+| `--style` | `medium` | `tight`, `medium`, `loose`: how much pause is kept |
+| `--keep-fillers` | off | Don't cut um/uh (narration still loses the short ones) |
+| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
+| `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
+| `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it |
+| `--effort` | `high` | Claude reasoning effort: `low` … `max` |
+| `--no-vision` | | Skip visual descriptions of clips (cheaper, worse B-roll picks) |
+| `--vision-model` | same as `--model` | A different model for describing clips, e.g. `sonnet` while Opus plans |
+| `--graphics` / `--no-graphics`, `--graphics-style`, `--graphics-logo`, `--graphics-look` | off | Motion graphics, their look, a logo, and approved designs to match |
+| `--transcriber` | `auto` | `mlx` (Mac), `faster-whisper`, or `none` (silence only) |
+| `--language` | detect | e.g. `en` |
+| `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
+| `--no-stringout`, `--no-fill` | | Leave out the Stringout project; leave narration uncovered where the plan has no B-roll |
+| `--open` | | Open the new cut in Final Cut Pro when it's done |
 
 ### Use your Claude subscription instead of an API key
 
-```bash
-roughcut build ~/Movies/Trip --provider claude-code
-```
+`--provider claude-code` sends the AI steps through [Claude Code](https://claude.com/claude-code) signed in with your own Pro or Max plan, so runs count against your plan's usage limits instead of API credit. Anthropic's terms allow running the Claude Code program with your own subscription from your own scripts, but not calling the API directly with subscription credentials, so roughcut never touches your sign-in; it just runs `claude -p`. Claude Code would bill an API key instead of your plan whenever one is set, so roughcut hides `ANTHROPIC_API_KEY` from it. Big shoots use a lot of your allowance on clip descriptions; `--vision-model sonnet` or `--no-vision` stretches it.
 
-This sends the AI steps through [Claude Code](https://claude.com/claude-code) signed in with your own Pro or Max plan, so runs count against your plan's usage limits instead of API credit. Anthropic's terms allow running the Claude Code program with your own subscription from your own scripts, but not calling the API directly with subscription credentials, so roughcut never touches your sign-in. It just runs `claude -p`.
-
-Setup: install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude`, and type `/login`. `roughcut doctor` shows whether it's ready. Claude Code would bill an API key instead of your plan whenever one is set, so roughcut hides `ANTHROPIC_API_KEY` from it. Big shoots use a lot of your plan's allowance on clip descriptions; `--vision-model sonnet` or `--no-vision` stretches it. The model menu and `--model` work the same as with an API key.
+**About API keys:** a key from console.anthropic.com starts with `sk-ant-` (`sk-ant-usr-` for new keys, `sk-ant-api03-` for older ones). If the key is missing or rejected, `roughcut build` stops right away and says why. `roughcut key status` shows where the key comes from, and `roughcut key remove` deletes it. An `ANTHROPIC_API_KEY` exported in your shell still works and takes priority. The first time Terminal reads a key the app saved (or the other way round), macOS asks for permission; click **Always Allow**.
 
 ### Other models
 
 In these, replace `MODEL_NAME` with the model's name.
 
-OpenAI (first `pip install -e '.[openai]'`, and `roughcut key set --openai` or export `OPENAI_API_KEY`):
+OpenAI (first `.venv/bin/python -m pip install -e '.[openai]'`, and `roughcut key set --openai` or export `OPENAI_API_KEY`):
 
 ```bash
 roughcut build ~/Movies/Trip --provider openai --model MODEL_NAME
@@ -185,23 +223,21 @@ Claude requests opt into Anthropic's server-side refusal fallbacks (`fallbacks: 
 
 ### Transcripts you already have
 
-A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.vtt`, or Whisper-style `.json` beside `IMG_1234.MOV` (or in a `--transcripts` folder). SRT and VTT only have line-level timing, so word timing inside a line is estimated. Cuts are less precise than with a fresh transcript.
+A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.vtt`, or Whisper-style `.json` beside `IMG_1234.MOV` (or in a `--transcripts` folder). SRT and VTT only have line-level timing, so word timing inside a line is estimated and cuts are less precise than with a fresh transcript.
 
 ## How it works
 
-1. **Analyze** (cached, so re-runs are fast): `ffprobe` reads rate, size, rotation and timecode; `ffmpeg` measures each clip's background noise and maps the pauses above it (so a loud room or a very quiet recording still gets its dead air found); Whisper transcribes with word timestamps. Words over silence are dropped as hallucinations. Words are grouped into sentence segments with IDs like `V03.S012`, and clips are classified as A-roll, B-roll, voiceover, music or stills.
-2. **Look** (optional): three frames per B-roll clip go to a vision model, which writes a description and keywords.
-3. **Plan**: the model gets the transcripts, clip descriptions and your brief. It returns a structured plan that picks segments by ID; it never writes timestamps. The transcript block is prompt-cached, so re-planning with a new brief is cheaper.
-4. **Cut**: deterministic code turns the plan into frame-accurate edits: it trims pauses (using the silence map too, since Whisper often stretches a word across the pause after it), cuts fillers, pads each cut, snaps to the source frame grid, places B-roll and music on lanes, and adds markers. Invalid IDs from the model are dropped with a warning, never passed through. Narration never plays over black: anything the plan left uncovered is filled with the stills and B-roll whose names and descriptions best match what's being said.
-
-Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip saved twice) is detected and used once. Several reads of the same narration script are offered to the planner as takes of each line.
+1. **Analyze** (cached, so re-runs are fast): `ffprobe` reads rate, size, rotation and timecode; `ffmpeg` measures each clip's background noise and loudness and maps the pauses above the noise (so a loud room or a very quiet recording still gets its dead air found); Whisper transcribes with word timestamps. A clip that can't be decoded is cut on its pauses with a warning instead of stopping the run. Words over silence are dropped as hallucinations. Words are grouped into sentence segments with IDs like `V03.S012`, and clips are classified as A-roll, B-roll, voiceover, music or stills. Footage exported more than once (the same promo in 16:9, 9:16 and 4:3) is used once, several reads of a narration script become takes of each line, and finished promos over a music bed are recognized so their pauses aren't chopped.
+2. **Look** (optional): frames of each clip go to a vision model, which writes a description and keywords, and logs the good moments inside long B-roll so cutaways start on them.
+3. **Plan**: Claude gets the transcripts (with how long each line runs at your pacing), clip descriptions and your brief, and returns a structured plan that picks segments by ID and names the words each B-roll shot and graphic belongs on. It never writes timestamps. The footage block is prompt-cached, so revising or re-planning is cheaper.
+4. **Cut**: deterministic code turns the plan into frame-accurate edits: it trims pauses (a pause split by a breath counts as one), cuts fillers, pads each cut, snaps to the source frame grid, starts B-roll on its words, covers narration that has no picture, places music, matches levels, adds fades and markers, and checks the result against your target length. Invalid IDs from the model are dropped with a warning, never passed through, and no line plays twice.
 5. **Write**: FCPXML 1.10 (Final Cut Pro 10.6 and later), checked in tests against Apple's DTD.
 
 ## Development
 
 ```bash
-pip install -e '.[dev]'
-pytest
+.venv/bin/python -m pip install -e '.[dev,graphics]'
+.venv/bin/python -m pytest
 ```
 
-The tests generate synthetic footage with ffmpeg and need no API key.
+The tests generate synthetic footage with ffmpeg and need no API key. CI (`.github/workflows/ci.yml`) runs them on Linux and on an Apple Silicon Mac, builds, tests and launches the Mac app, and cuts real spoken audio with mlx-whisper.
