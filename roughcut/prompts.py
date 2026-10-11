@@ -185,11 +185,14 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     return ", ".join(bits)
 
 
-def render_media(analysis: Analysis, style: "Style | None" = None) -> str:
-    """The media inventory the planner reads. Deterministic for a given analysis and style."""
-    from .timeline import STYLES, kept_length
+def render_media(analysis: Analysis, style: "Style") -> str:
+    """The media inventory the planner reads. Deterministic for a given analysis and style.
 
-    style = style or STYLES["medium"]
+    `style` is the run's (pipeline.style_for): each line's kept length depends on
+    its padding and pause limits, so there's deliberately no default.
+    """
+    from .timeline import kept_length
+
     clips = [c for c in analysis.clips if not c.hidden]
     total = sum(float(c.media.duration) for c in clips)
     speech = sum(c.speech_seconds for c in clips if c.has_transcript)

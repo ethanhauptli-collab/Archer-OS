@@ -415,13 +415,13 @@ def test_a_promo_over_music_keeps_its_breaths_and_noise_does_not(promos, tmp_pat
     clip = music.clips[0]
     assert clip.silence_db > -35 and clip.bed == "music" and clip.cuts_per_min >= 4  # two picture cuts in 11 s
     assert any("speech over a music bed in a finished edit" in n for n in music.notes)
-    assert "a finished edit, speech over a music bed: take consecutive lines together" in render_media(music)
+    assert "a finished edit, speech over a music bed: take consecutive lines together" in render_media(music, STYLES["medium"])
     tl = build_timeline(heuristic_plan(music), music, style=STYLES["medium"], name="t")
     assert any(a < 3.0 and b > 3.8 for a, b in _spans(tl)), _spans(tl)  # the 0.8 s breath plays
 
     noise = _analyse(promos / "noise", tmp_path / "cache")
     assert noise.clips[0].silence_db > -35 and noise.clips[0].bed == "noise"
-    assert "music bed" not in render_media(noise)
+    assert "music bed" not in render_media(noise, STYLES["medium"])
     tl = build_timeline(heuristic_plan(noise), noise, style=STYLES["medium"], name="t")
     assert not any(a < 3.2 and b > 3.6 for a, b in _spans(tl)), _spans(tl)  # dead air over room noise goes
 
@@ -534,7 +534,7 @@ def test_moments_are_logged_once_with_labelled_frames_and_stills_stay_cached(tmp
     assert [m["at"] for m in moments] == sampled  # snapped to the frames it was shown
     assert [m["usable"] for m in moments] == [True, False, True]
     assert a.clip("V01").visual["description"]  # the description is kept alongside
-    assert f"Moments: {sampled[0]:g}s frame at" in render_media(a) and "(not usable)" in render_media(a)
+    assert f"Moments: {sampled[0]:g}s frame at" in render_media(a, STYLES["medium"]) and "(not usable)" in render_media(a, STYLES["medium"])
 
     again, provider = project(), Logger()
     describe_clips(again, provider, cache, workers=1)
@@ -675,3 +675,10 @@ def test_render_of_a_stringout_plays_every_line_again(tmp_path):
     assert not [m for m in again.markers if m.value.startswith("ALT")]
     # A planned cut still plays the shared line once.
     assert len([i for s in normalize(plan.to_json(), a, source="fake").sections for i in s.items]) == len(refs) - 1
+
+
+def test_render_media_needs_the_run_style():
+    from roughcut.prompts import render_media
+
+    with pytest.raises(TypeError):
+        render_media(narration_project())  # a silent medium default would misstate tight/loose lengths
