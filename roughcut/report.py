@@ -140,6 +140,8 @@ def build_report(
     if graphics:
         rendered = {c.id: c for c in analysis.clips if c.role == "graphic"}
         L += ["## Motion graphics", "", "Rendered clips and their HTML designs are in `graphics/`. Edit a design and run `roughcut render` to re-render just that one.", ""]
+        if rendered:
+            L += ["Open `graphics/preview.html` to watch each one over the shot it sits on.", ""]
         L += ["| Time | ID | Kind | On screen | File |", "|---|---|---|---|---|"]
         for g in graphics:
             text = g.spec.text + (f" / {g.spec.subtext}" if g.spec.subtext else "")

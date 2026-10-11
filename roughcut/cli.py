@@ -414,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ! {w}")
     print(f"FCPXML:    {result.fcpxml}")
     print(f"Report:    {result.report}")
+    preview = result.out_dir / "graphics" / "preview.html"
+    if any(c.kind == "graphic" for c in tl.connected) and preview.is_file():
+        print(f"Graphics:  {preview}")
     print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
     print(f"Then open the project \"{tl.name}\" in the new event. The clip itself in the browser stays your untouched original.")
     return 3 if result.fell_back else 0

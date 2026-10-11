@@ -1062,6 +1062,12 @@ def make(
     clips = attach(tl, placed, files, warnings)
     write_manifest(out_dir, placed, files, html, tl, style, notes=notes)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
+    try:
+        from .graphics_preview import write_previews
+
+        write_previews(placed, files, tl, analysis, out_dir, workers=workers, notes=notes, warnings=warnings, keep_out=keep_out)
+    except Exception as e:  # noqa: BLE001 - a preview is a convenience; never lose the cut over it
+        warnings.append(f"graphics preview page wasn't written: {_first_line(e)}")
     return clips, placed, warnings
 
 

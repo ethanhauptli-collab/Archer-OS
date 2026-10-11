@@ -525,3 +525,107 @@ def test_designers_are_told_what_each_graphic_sits_over(footage, tmp_path):
     provider.supports_vision = False  # a model that can't see gets the words only
     graphics.design(provider, placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=[])
     assert len(provider.calls[-1]["parts"]) == 1
+
+
+# ------------------------------------------------------------------ T22: preview every graphic over its real footage
+
+
+def _thumb(path, at=None) -> bytes:
+    """A tiny RGB thumbnail (32x18) of an image or of a video frame, for comparing pictures."""
+    seek = ["-ss", f"{at:.3f}"] if at else []
+    cmd = ["ffmpeg", "-v", "error", *seek, "-i", str(path), "-frames:v", "1", "-vf", "scale=32:18:flags=area", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    return subprocess.run(cmd, capture_output=True, check=True).stdout
+
+
+def _differ(a: bytes, b: bytes) -> float:
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
+def _transparent_mov(path, frames, size="640x360"):
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=black@0.0:s={size}:r=30000/1001,format=rgba", "-frames:v", str(frames),
+         *graphics.ENCODER, str(path)],
+        check=True,
+    )
+    return path
+
+
+def test_each_graphic_is_previewed_over_the_shot_it_sits_on(footage, tmp_path):
+    from roughcut.analyze import Clip
+    from roughcut.graphics_preview import write_previews
+    from roughcut.media import probe
+
+    talk = make_clip("V01", seconds=20, sentences=SPEECH)
+    talk.media.path = str(footage / "talk.mov")  # the real pattern clip behind the made-up transcript
+    broll = Clip(id="V02", media=probe(footage / "broll.mp4"), role="broll")
+    a = Analysis(clips=[talk, broll])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S003", "V01.S004", "V01.S005"], "broll": [{"clip": "V02", "over": ["V01.S004"], "source_in": 1, "reason": "cover"}]}],
+        "graphics": [spec("lower_third", "V01.S003", "Today", "On camera", 1.5), spec("stat", "V01.S004", "It's going", "Over B-roll", 1.5),
+                     spec("quote", "V01.S005", "asking", "Never rendered", 2)],
+    }
+    plan = normalize(raw, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="Trip - Rough Cut", format_override="640x360")
+    placed = graphics.place(plan.graphics, tl, a, [])
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    files = {g.id: _transparent_mov(out / "graphics" / f"{g.slug}.mov", g.frames) for g in placed[:2]}  # G03 "didn't render"
+
+    page = write_previews(placed, files, tl, a, out, notes={"G02": ["came out blank: nothing is visible in any frame"]})
+    assert page == out / "graphics" / "preview.html"
+    previews = out / "graphics" / "previews"
+    assert sorted(f.name for f in previews.glob("*.mp4")) == ["G01.mp4", "G02.mp4"] and (previews / "G01.jpg").is_file()
+    stream = _probe(previews / "G02.mp4")
+    assert stream["codec_name"] == "h264" and (stream["width"], stream["height"]) == (960, 540)
+
+    # The background is the picture under each graphic: the B-roll for G02, the talking clip for G01.
+    poster = {g.id: _thumb(previews / f"{g.id}.jpg") for g in placed[:2]}
+    under = {}
+    for g in placed[:2]:
+        clip, at = graphics.picture_under(tl, a, g.start + g.frames // 2)
+        under[g.id] = _thumb(clip.media.path, at)
+    assert graphics.picture_under(tl, a, placed[1].start + placed[1].frames // 2)[0] is broll
+    assert _differ(poster["G02"], under["G02"]) < 12 and _differ(poster["G01"], under["G01"]) < 12
+    assert _differ(poster["G02"], under["G01"]) > 30  # and the two shots really are different
+
+    text = page.read_text()
+    assert 'src="previews/G01.mp4"' in text and 'poster="previews/G02.jpg"' in text
+    assert "Over V02 broll.mp4 (B-Roll)" in text and "Over V01 V01.mov (A-Roll)" in text
+    assert "Never rendered" in text and "Not rendered" in text and "came out blank" in text
+    assert 'class="zone"' not in text  # no platform strips on a landscape cut
+
+    # Unchanged graphics keep their previews; a graphic that's gone loses its files.
+    stamp = (previews / "G01.mp4").stat().st_mtime_ns
+    write_previews(placed[:1], {"G01": files["G01"]}, tl, a, out)
+    assert (previews / "G01.mp4").stat().st_mtime_ns == stamp and not (previews / "G02.mp4").exists()
+    # Nothing rendered: no page left behind pointing at old clips.
+    assert write_previews(placed, {}, tl, a, out) is None and not page.exists()
+
+
+def test_vertical_previews_can_show_the_platform_button_strips(tmp_path):
+    from roughcut.graphics_preview import write_previews
+
+    a, plan, tl = small_cut(fmt="1080x1920")
+    placed = graphics.place(plan.graphics, tl, a, [])[:1]
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    files = {placed[0].id: _transparent_mov(out / "graphics" / "G01.mov", placed[0].frames, "1080x1920")}
+    text = write_previews(placed, files, tl, a, out).read_text()
+    assert _probe(out / "graphics" / "previews" / "G01.mp4")["height"] == 960
+    assert 'id="zones" checked' in text and "bottom:0;height:20.00%" in text and "right:0;width:12.00%" in text
+
+
+@needs_renderer
+def test_build_points_to_the_preview_page(footage, tmp_path, monkeypatch, capsys):
+    from roughcut import pipeline
+    from roughcut.cli import main
+
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["graphics"] = [spec("title_card", "V01.S003", "heading up the mountain", "Heading Out", 1.5)]
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(plan))
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics", "--format", "640x360", "--no-menu"]) == 0
+    printed = capsys.readouterr().out
+    assert f"Graphics:  {out / 'graphics' / 'preview.html'}" in printed
+    assert "`graphics/preview.html`" in (out / "edit_report.md").read_text()
+    assert (out / "graphics" / "previews" / "G01.mp4").is_file()
