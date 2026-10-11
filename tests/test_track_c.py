@@ -654,6 +654,36 @@ def test_pauses_over_a_music_bed_stay_up_to_a_second(bed, pieces):
 # ------------------------------------------------------------ review fixes
 
 
+def _adjacent_replays(tl):
+    """Back-to-back shots of one clip whose source ranges overlap: the same footage again."""
+    fd = tl.frame_duration
+    shots = sorted(tl.connected, key=lambda c: c.start)
+    return [
+        (p.clip_id, q.start)
+        for p, q in zip(shots, shots[1:])
+        if p.clip_id == q.clip_id and p.end == q.start and q.src_in < p.src_in + p.frames * fd and p.src_in < q.src_in + q.frames * fd
+    ]
+
+
+def test_fill_from_one_logged_clip_never_replays_the_shot_on_screen():
+    from roughcut.plan import heuristic_plan
+
+    lines = [(0.5 + i * 10, 10.0 + i * 10, f"Line {i} walks along the river past the old city wall.") for i in range(4)]
+    for moments in (
+        [{"at": 6.0, "note": "wide", "usable": True}, {"at": 30.0, "note": "close", "usable": True}],
+        [{"at": 6.0, "note": "wide", "usable": True}, {"at": 18.0, "note": "shaky", "usable": False}, {"at": 30.0, "note": "close", "usable": True}],
+    ):
+        walk = make_clip("V01", seconds=40)
+        walk.visual = {"description": "river walk", "tags": [], "moments": moments}
+        a = Analysis(clips=[make_clip("A01", kind="audio", seconds=42, sentences=lines, role="voiceover"), walk])
+        tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+        assert len(tl.connected) >= 8 and not _adjacent_replays(tl), [(c.start, float(c.src_in)) for c in tl.connected]
+        starts = [round(float(c.src_in)) for c in sorted(tl.connected, key=lambda c: c.start)]
+        assert starts[:2] == [6, 30]  # the good moments first
+        fd = tl.frame_duration
+        assert not [c.start for c in tl.connected if float(c.src_in) <= 18.0 < float(c.src_in + c.frames * fd)]  # never the shaky part
+
+
 def test_a_cutaway_named_on_later_words_still_covers_the_jump_cut_before_them():
     from conftest import SPEECH
 
@@ -719,6 +749,20 @@ def test_render_of_a_stringout_plays_every_line_again(tmp_path):
     assert not [m for m in again.markers if m.value.startswith("ALT")]
     # A planned cut still plays the shared line once.
     assert len([i for s in normalize(plan.to_json(), a, source="fake").sections for i in s.items]) == len(refs) - 1
+
+
+@pytest.mark.parametrize("style", ["tight", "medium", "loose"])
+def test_fill_never_leaves_a_few_frames_after_a_short_clip(style):
+    from test_narration import VO
+
+    from roughcut.timeline import _gaps_without_picture
+
+    vo = make_clip("A01", kind="audio", seconds=44, sentences=VO, role="voiceover")
+    a = Analysis(clips=[vo, make_clip("V01", seconds=120), make_clip("V06", seconds=3)])
+    tl = build_timeline(normalize({"sections": [{"name": "x", "items": ["A01.S003"]}]}, a), a, style=STYLES[style], name="t")
+    tiny = round(Fraction(1, 2) / tl.frame_duration)
+    assert all(c.frames >= tiny for c in tl.connected), [(c.clip_id, c.start, c.frames) for c in tl.connected]
+    assert _gaps_without_picture(tl, a) == [] and not _adjacent_replays(tl)
 
 
 def test_render_media_needs_the_run_style():

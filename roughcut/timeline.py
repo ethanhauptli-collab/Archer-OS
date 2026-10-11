@@ -687,8 +687,15 @@ def _place_broll(
                         hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
                         if hint is None:  # "let the software choose": the logged moment that fits the line
                             said = " ".join(seg.text for seg in (analysis.segment(o) for o in b.over) if seg)
-                            at = _pick_moment(tl, clip, _tokens(said), _tokens(b.words))
+                            on_screen = next((o for o in tl.connected if o.end == cursor and o.clip_id == clip.id), None)
+                            at = _pick_moment(tl, clip, _tokens(said), _tokens(b.words), on_screen=on_screen, length=float(want * fd))
                             hint = Fraction(at).limit_denominator(1000) if at is not None else None
+                            if hint is None and on_screen is not None:
+                                # The same clip again, straight after itself: carry on from where it got to
+                                # (or a part well away), never the same footage twice.
+                                hint = on_screen.src_in + on_screen.frames * fd
+                                if hint + want * fd > m.duration:
+                                    hint = _away_from(tl, clip, on_screen, want)
                         src_in, frames = _video_window(m, want, fd, hint)
                     if frames < min(min_frames, want):
                         warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
@@ -933,21 +940,84 @@ def _usable_moments(clip: Clip) -> list[dict]:
     return [mo for mo in ((clip.visual or {}).get("moments") or []) if isinstance(mo, dict) and mo.get("usable", True)]
 
 
-def _pick_moment(tl: Timeline, clip: Clip, said: set[str], words: set[str] = frozenset()) -> float | None:
+def _pick_moment(
+    tl: Timeline,
+    clip: Clip,
+    said: set[str],
+    words: set[str] = frozenset(),
+    *,
+    on_screen: "ConnectedClip | None" = None,
+    length: float = 0.0,
+    fresh_only: bool = False,
+) -> float | None:
     """Where to start inside a long clip: the usable logged moment that fits what's being said
-    (the cutaway's own words count double), one not shown yet first. None when nothing was logged."""
-    moments = _usable_moments(clip)
-    if not moments:
-        return None
+    (the cutaway's own words count double), one not shown yet first.
+
+    Never one whose `length` seconds would replay the part of this clip on
+    screen just before (`on_screen`); with `fresh_only`, never one shown
+    already. None when nothing logged qualifies.
+    """
     fd = tl.frame_duration
     shown = [(float(c.src_in), float(c.src_in + c.frames * fd)) for c in tl.connected if c.clip_id == clip.id]
 
+    def seen(at: float) -> bool:
+        return any(a - 0.5 <= at < b for a, b in shown)
+
+    def replays(at: float) -> bool:
+        if on_screen is None:
+            return False
+        a = float(on_screen.src_in)
+        return at < a + float(on_screen.frames * fd) and at + length > a - 0.5
+
+    moments = [mo for mo in _usable_moments(clip) if not replays(mo["at"]) and not (fresh_only and seen(mo["at"]))]
+    if not moments:
+        return None
+
     def rank(mo: dict) -> tuple:
         toks = _tokens(mo.get("note", ""))
-        seen = any(a - 0.5 <= mo["at"] < b for a, b in shown)
-        return (not seen, 2 * len(toks & words) + len(toks & said), -mo["at"])
+        return (not seen(mo["at"]), 2 * len(toks & words) + len(toks & said), -mo["at"])
 
     return float(max(moments, key=rank)["at"])
+
+
+def _shows_unusable(clip: Clip, src_in: Fraction, frames: int, fd: Fraction) -> bool:
+    """Would this part of the clip show a moment the visual log called unusable (shaky, blurred...)?"""
+    a, b = float(src_in), float(src_in + frames * fd)
+    moments = (clip.visual or {}).get("moments") or []
+    return any(isinstance(mo, dict) and not mo.get("usable", True) and a <= mo.get("at", -1) < b for mo in moments)
+
+
+def _away_from(tl: Timeline, clip: Clip, on_screen: ConnectedClip, want: int) -> Fraction:
+    """In-point for a new shot from the clip already on screen.
+
+    Well away from what's showing (5 s, or a quarter of the clip) so it reads
+    as another shot rather than a jump: the first such part after it that
+    hasn't been shown yet, wrapping round to the head, and never a part the
+    visual log calls unusable. Failing that, such a part shown before; for a
+    clip too short for that, anywhere that doesn't replay a frame on screen.
+    """
+    m, fd = clip.media, tl.frame_duration
+    need = want * fd
+    a, b = on_screen.src_in, on_screen.src_in + on_screen.frames * fd
+    away = max(Fraction(5), m.duration / 4)
+    starts: list[Fraction] = []
+    s = b + away
+    while s + need <= m.duration:  # after the shot on screen...
+        starts.append(s)
+        s += need
+    s = Fraction(0)
+    while s + need <= a - away:  # ...then from the head
+        starts.append(s)
+        s += need
+    good = [s for s in starts if not _shows_unusable(clip, s, want, fd)]
+    shown = [(c.src_in, c.src_in + c.frames * fd) for c in tl.connected if c.clip_id == clip.id]
+    new = [s for s in good if not any(s < y and s + need > x for x, y in shown)]
+    if new or good:
+        return (new or good)[0]
+    for s in (Fraction(0), b):
+        if s + need <= m.duration and (s >= b or s + need <= a):
+            return s
+    return m.duration * Fraction(1, 10)
 
 
 def _gaps_without_picture(tl: Timeline, analysis: Analysis) -> list[tuple[int, int]]:
@@ -1030,6 +1100,33 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
         said = _tokens(joined) | {re.sub(r"[^a-z]", "", m.group(0).lower()) for m in _NAME.finditer(joined)}
         return said, names
 
+    def take(c: Clip, cursor: int, want: int, said: set[str]) -> tuple[Fraction, int]:
+        """The part of a clip a fill shot at `cursor` shows: (source in-point, frames)."""
+        m = c.media
+        if m.kind == "image":
+            return Fraction(0), want
+        on_screen = next((o for o in tl.connected if o.end == cursor and o.clip_id == c.id), None)
+        length = float(want * fd)
+        # A good moment from the visual log that fits the line and hasn't been shown yet.
+        at = _pick_moment(tl, c, said, on_screen=on_screen, length=length, fresh_only=True)
+        if at is not None:
+            return _video_window(m, want, fd, Fraction(at).limit_denominator(1000))
+        if on_screen is not None:
+            # The only fit is the clip already on screen: cut to a part well away from it.
+            start_at = _away_from(tl, c, on_screen, want)
+        else:
+            start_at = video_cursor.get(c.id, m.duration * Fraction(1, 10))
+            if start_at + want * fd > m.duration:
+                start_at = m.duration * Fraction(1, 10)
+        src_in, frames = _video_window(m, want, fd, start_at)
+        if _shows_unusable(c, src_in, frames, fd):
+            # Every good logged moment has been shown: one again (never the one on screen)
+            # beats a part the log calls unusable.
+            at = _pick_moment(tl, c, said, on_screen=on_screen, length=length)
+            if at is not None:
+                return _video_window(m, want, fd, Fraction(at).limit_denominator(1000))
+        return src_in, frames
+
     for g0, g1 in gaps:
         if not pool:
             break
@@ -1056,30 +1153,35 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
             # a still twice: another part of a video that's next door reads better than that.
             beside = {c.clip_id for c in tl.connected if c.end == cursor or (want == remaining and c.start == g1)}
             fresh = [c for c in pool if not (c.media.kind == "image" and uses.get(c.id, 0))]
-            candidates = [c for c in fresh if c.id not in beside] or fresh or [c for c in pool if c.id not in beside] or pool
-            best = max(candidates, key=rank)
-            m = best.media
-            on_screen = next((c for c in tl.connected if c.end == cursor and c.clip_id == best.id), None)
-            if m.kind == "image":
-                src_in, frames = Fraction(0), want
-            else:
-                grid = m.frame_duration or fd
-                at = _pick_moment(tl, best, said)
-                if at is not None:
-                    start_at = Fraction(at).limit_denominator(1000)
-                else:
-                    start_at = video_cursor.get(best.id, m.duration * Fraction(1, 10))
-                    if on_screen is not None:
-                        # The only fit is the clip already on screen: cut to a part well away from it,
-                        # so it reads as another shot rather than a jump.
-                        start_at = on_screen.src_in + on_screen.frames * fd + max(Fraction(5), m.duration / 4)
-                    if start_at + want * fd > m.duration:
-                        start_at = m.duration * Fraction(1, 10)
-                src_in, frames = _video_window(m, want, fd, start_at)
-                video_cursor[best.id] = src_in + frames * fd + 1
+            tiers = [[c for c in fresh if c.id not in beside], fresh, [c for c in pool if c.id not in beside], pool]
+            best = max(next(t for t in tiers if t), key=rank)
+            src_in, frames = take(best, cursor, want, said)
             if frames < 1:
                 pool = [c for c in pool if c is not best]
                 continue
+            short = remaining - frames
+            if 0 < short < tiny:
+                # The pick is a little shorter than the rest of the gap, which would leave a few
+                # frames for a flash. Hold the shot before it longer (or start the next one
+                # earlier); failing that, use a clip that covers the whole rest.
+                if _extend_shot_before(tl, analysis, cursor, cursor + short, max_still):
+                    cursor += short
+                    placed_frames += short
+                    lanes.sync(tl)
+                elif _extend_shot_after(tl, analysis, g1 - short, g1, max_still):
+                    g1 -= short
+                    placed_frames += short
+                    lanes.sync(tl)
+                else:
+                    for tier in tiers:
+                        whole = [c for c in tier if c is not best and take(c, cursor, want, said)[1] == remaining]
+                        if whole:
+                            best = max(whole, key=rank)
+                            src_in, frames = take(best, cursor, want, said)
+                            break
+            m = best.media
+            if m.kind == "video":
+                video_cursor[best.id] = src_in + frames * fd + 1
             tl.connected.append(
                 ConnectedClip(
                     clip_id=best.id,
