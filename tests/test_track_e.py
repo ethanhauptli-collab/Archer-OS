@@ -96,3 +96,69 @@ def test_transcription_errors_are_never_swallowed(four_talks, tmp_path):
     stub = StubTranscriber(fail={"c.mov"}, error=TranscriptionError("mlx-whisper is not installed"))
     with pytest.raises(TranscriptionError, match="not installed"):
         _analyze(four_talks, stub, tmp_path)
+
+
+# ------------------------------------------------------------ T18: cheaper visual log
+
+
+def _dims(path) -> tuple[int, int]:
+    import subprocess
+
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)], capture_output=True, text=True).stdout
+    w, h = out.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+def test_portrait_frames_are_scaled_by_the_long_edge(tmp_path):
+    from roughcut import ffmpeg_ops
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    portrait, landscape = tmp_path / "portrait.mp4", tmp_path / "landscape.png"
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=1080x1920:rate=30:duration=1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(portrait))
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=1600x900:duration=1", "-frames:v", "1", str(landscape))
+    assert _dims(ffmpeg_ops.extract_frame(portrait, 0.5, tmp_path / "p.jpg")) == (288, 512)
+    assert _dims(ffmpeg_ops.extract_frame(landscape, 0, tmp_path / "l.jpg")) == (512, 288)  # unchanged
+
+
+def test_hidden_duplicate_exports_are_not_described_again(footage, tmp_path, monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    from conftest import FakeProvider
+    from test_end_to_end import check_invariants, validate_dtd
+
+    from roughcut import pipeline
+    from roughcut.analyze import Analysis
+    from roughcut.pipeline import Options
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    for name in ("talk.mov", "talk.json", "broll.mp4", "broll.json"):
+        shutil.copy2(footage / name, folder / name)
+    shutil.copy2(footage / "broll.mp4", folder / "broll_copy.mp4")  # the same clip exported twice
+    shutil.copy2(footage / "broll.json", folder / "broll_copy.json")
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=900x1600:duration=1", "-frames:v", "1", str(folder / "portrait.png"))
+
+    fake = FakeProvider()
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: fake)
+    opts = Options(inputs=[folder], out=tmp_path / "out", name="shoot", transcriber="none", cache_dir=tmp_path / "cache")
+    result = pipeline.build(opts)
+
+    analysis = Analysis.load(result.out_dir / "analysis.json")
+    hidden = [c for c in analysis.clips if c.hidden]
+    assert len(hidden) == 1, [c.media.name for c in analysis.clips]
+    copy = hidden[0]
+    kept = analysis.clip(copy.duplicate_of)
+    sent = [p.text.split()[1] for call in fake.calls if call["schema_name"] == "clip_log" for p in call["parts"] if getattr(p, "text", "").startswith("Clip ")]
+    assert kept.id in sent and copy.id not in sent, sent
+    assert copy.visual == kept.visual and copy.visual["tags"] == ["test", "pattern"]
+
+    # The hidden copy still arrives in Final Cut keyworded like the clip it duplicates.
+    validate_dtd(result.fcpxml)
+    check_invariants(result.fcpxml)
+    root = ET.parse(result.fcpxml).getroot()
+    browser = {el.get("name"): el for el in root.find(".//event") if el.tag == "asset-clip"}
+    assert "test" in browser[copy.media.stem].find("keyword").get("value")
+
+    still = next(c for c in analysis.clips if c.media.name == "portrait.png")
+    assert still.frames and _dims(still.frames[0]) == (288, 512)
