@@ -120,6 +120,94 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(r.arguments(), ["render", "/tmp/Trip_roughcut", "--progress-json", "--style", "loose", "--format", "4k", "--keep-fillers"])
     }
 
+    func testRecutKeepsTheCutsOwnSettingsUnlessGiven() {
+        // A vertical promo re-cut "tighter" came back 16:9: "Match footage" was the picker's default and sent nothing.
+        let folder = URL(fileURLWithPath: "/tmp/Promo_roughcut")
+        let base = ["render", "/tmp/Promo_roughcut", "--progress-json"]
+        // Pacing changed, Format "Same as this cut": no format, fillers or stringout flags, so the CLI keeps the cut's.
+        XCTAssertEqual(RecutOptions(outputFolder: folder, style: .tight).arguments(), base + ["--style", "tight"])
+        // "Match footage" is a choice of its own now.
+        XCTAssertEqual(RecutOptions(outputFolder: folder, style: .tight, format: .auto).arguments(), base + ["--style", "tight", "--format", "auto"])
+        // Finish without AI: just the folder, like `roughcut render <folder>` in Terminal.
+        XCTAssertEqual(RecutOptions(outputFolder: folder).arguments(), base)
+        // Toggles, when given, go both ways.
+        XCTAssertEqual(RecutOptions(outputFolder: folder, keepFillers: false, stringout: true).arguments(), base + ["--no-keep-fillers", "--stringout"])
+        XCTAssertEqual(RecutOptions(outputFolder: folder, keepFillers: true, stringout: false).arguments(), base + ["--keep-fillers", "--no-stringout"])
+        XCTAssertEqual(RecutOptions(outputFolder: folder, format: .custom("1080x1920@29.97")).arguments(), base + ["--format=1080x1920@29.97"])
+    }
+
+    func testRecutPickerStartsFromTheCut() {
+        let vertical = CutSettings(style: "tight", format: "vertical", keepFillers: true, stringout: false)
+        XCTAssertEqual(RecutOptions.sameFormatTitle(vertical), "Same as this cut (Vertical 9:16)")
+        XCTAssertEqual(RecutOptions.sameFormatTitle(CutSettings(style: "medium")), "Same as this cut (Match footage)")
+        XCTAssertEqual(RecutOptions.sameFormatTitle(nil), "Same as this cut")  // an older run: still keeps its format
+        // The pace offered first is the other one from the cut's own, not the build form's.
+        XCTAssertEqual(RecutOptions.suggestedStyle(for: vertical, otherwise: .loose), .medium)
+        XCTAssertEqual(RecutOptions.suggestedStyle(for: CutSettings(style: "loose"), otherwise: .tight), .tight)
+        XCTAssertEqual(RecutOptions.suggestedStyle(for: nil, otherwise: .tight), .medium)
+        // A custom format stays selectable in the picker.
+        let custom = SequenceFormat(cliText: "1080x1920@29.97")
+        XCTAssertEqual(SequenceFormat.choices(including: custom), SequenceFormat.standard + [custom])
+        XCTAssertEqual(SequenceFormat.choices(including: .vertical), SequenceFormat.standard)
+        XCTAssertEqual(SequenceFormat.choices(including: nil), SequenceFormat.standard)
+    }
+
+    func testSequenceFormatReadsWhatTheCLIWrites() throws {
+        XCTAssertEqual(SequenceFormat(cliText: "4K"), .uhd)
+        XCTAssertEqual(SequenceFormat(cliText: "uhd"), .uhd)
+        XCTAssertEqual(SequenceFormat(cliText: " Vertical "), .vertical)
+        XCTAssertEqual(SequenceFormat(cliText: "1080P"), .hd)
+        XCTAssertEqual(SequenceFormat(cliText: "square"), .square)
+        XCTAssertEqual(SequenceFormat(cliText: nil), .auto)
+        XCTAssertEqual(SequenceFormat(cliText: ""), .auto)
+        XCTAssertEqual(SequenceFormat(cliText: "auto"), .auto)
+        XCTAssertEqual(SequenceFormat(cliText: "720p"), .custom("720p"))
+        XCTAssertEqual(SequenceFormat(cliText: "3840x2160@23.98"), .custom("3840x2160@23.98"))
+        XCTAssertEqual(SequenceFormat.custom("720p").title, "720p")
+        XCTAssertNil(SequenceFormat.auto.cliValue)
+        XCTAssertEqual(SequenceFormat.custom("720p").cliValue, "720p")
+
+        // Preferences saved by the earlier app (raw values) still read, and a custom format survives a save.
+        let earlier: [(String, SequenceFormat)] = [("auto", .auto), ("1080p", .hd), ("4k", .uhd), ("vertical", .vertical), ("square", .square)]
+        for (saved, format) in earlier {
+            let decoded = try JSONDecoder().decode([SequenceFormat].self, from: Data("[\"\(saved)\"]".utf8))
+            XCTAssertEqual(decoded, [format])
+            let encoded = try JSONEncoder().encode([format])
+            XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "[\"\(saved)\"]")
+        }
+        var o = options()
+        o.format = .custom("1080x1920@29.97")
+        let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
+        XCTAssertEqual(back.format, .custom("1080x1920@29.97"))
+        XCTAssertTrue(back.arguments().contains("--format=1080x1920@29.97"))
+    }
+
+    func testGraphicsFilesThatAreGoneStopTheBuildBeforeItStarts() throws {
+        var o = options()
+        o.graphics = true
+        o.graphicsLogo = "/nowhere/logo.png"
+        o.graphicsLook = ["/nowhere/venture-oc.look/1-G01-lower-third.html"]
+        XCTAssertEqual(o.problems, [
+            "The logo logo.png isn't there any more: clear it or choose it again.",
+            "The approved graphic 1-G01-lower-third.html from an earlier video isn't there any more: click Don't match.",
+        ])
+        // Files that exist are fine.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-look-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logo = dir.appendingPathComponent("logo.png")
+        let look = dir.appendingPathComponent("G01.html")
+        try Data("x".utf8).write(to: logo)
+        try Data("<html></html>".utf8).write(to: look)
+        o.graphicsLogo = logo.path
+        o.graphicsLook = [look.path]
+        XCTAssertEqual(o.problems, [])
+        // Without graphics (or without a model) they aren't sent, so they don't matter.
+        o.graphicsLook = ["/nowhere/G01.html"]
+        o.graphics = false
+        XCTAssertEqual(o.problems, [])
+    }
+
     func testPreferencesDropProjectFields() {
         var o = options()
         o.brief = "brief"
@@ -141,10 +229,24 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(TimeText.seconds(from: "480"), 480)
         XCTAssertEqual(TimeText.seconds(from: "2.5m"), 150)
         XCTAssertEqual(TimeText.seconds(from: "8 min"), 480)
+        // Spellings parse_duration takes, e.g. from `roughcut preset save --target "90 sec"`.
+        XCTAssertEqual(TimeText.seconds(from: "90 sec"), 90)
+        XCTAssertEqual(TimeText.seconds(from: "90sec"), 90)
+        XCTAssertEqual(TimeText.seconds(from: "10 mins"), 600)
+        XCTAssertEqual(TimeText.seconds(from: "1hr"), 3600)
+        XCTAssertEqual(TimeText.seconds(from: "2 hours"), 7200)
+        XCTAssertEqual(TimeText.seconds(from: "1h 30m"), 5400)
+        XCTAssertEqual(TimeText.seconds(from: "8m30"), 510)
+        XCTAssertEqual(TimeText.seconds(from: "1 hour 5 minutes"), 3900)
+        XCTAssertEqual(TimeText.seconds(from: "1: 30"), 90)
         XCTAssertNil(TimeText.seconds(from: ""))
         XCTAssertNil(TimeText.seconds(from: "0"))
         XCTAssertNil(TimeText.seconds(from: "eight"))
         XCTAssertNil(TimeText.seconds(from: "8x"))
+        XCTAssertNil(TimeText.seconds(from: "8 mx"))
+        XCTAssertNil(TimeText.seconds(from: "about a minute"))
+        XCTAssertNil(TimeText.seconds(from: "m"))
+        XCTAssertNil(TimeText.seconds(from: "8m!"))
     }
 
     func testClock() {

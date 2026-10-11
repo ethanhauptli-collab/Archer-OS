@@ -81,6 +81,10 @@ class Result:
     project: str = ""  # the Rough Cut project's name in Final Cut
     event: str = ""  # the event it's imported into
     summary: dict = field(default_factory=dict)  # what made it in, what was left out, what it cost (run_summary)
+    settings: dict = field(default_factory=dict)  # the run settings saved with this version (plan.json): what `render` starts from
+
+
+CUT_SETTINGS = ("style", "format", "keep_fillers", "stringout")  # result_summary's "cut"
 
 
 def result_summary(result: Result) -> dict:
@@ -110,6 +114,8 @@ def result_summary(result: Result) -> dict:
         "skipped": result.summary.get("skipped") or {"files": [], "plan_refs": 0},
         "usage": result.summary.get("usage"),
         "report_html": str(result.report.with_suffix(".html")),
+        # What a re-cut keeps unless told otherwise; the app's Re-cut shows it. None for a Result without saved settings.
+        "cut": {f: result.settings.get(f) for f in CUT_SETTINGS} if result.settings else None,
     }
 
 
@@ -575,7 +581,7 @@ def _finish_build(
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
             save_result(Result(
                 out_dir, *interim, plan, rough, stringout, fell_back, analysis.warnings + plan.warnings + rough.warnings + extra_warnings + pending,
-                dead_air(analysis.clips, stringout), version=version, project=rough.name, event=event_name(name),
+                dead_air(analysis.clips, stringout), version=version, project=rough.name, event=event_name(name), settings=record.get("settings") or {},
                 summary=run_summary(
                     plan, graphics_on=True, placed=[], with_graphics=analysis, usage=usage, graphics_note="still being made when this cut was written",
                     skipped_files=(summary_base or {}).get("skipped_files"), visual_log=(summary_base or {}).get("visual_log"),
@@ -625,7 +631,7 @@ def _finish_build(
     )
     return save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
-        version=version, project=rough.name, event=event_name(name), summary=summary,
+        version=version, project=rough.name, event=event_name(name), summary=summary, settings=record.get("settings") or {},
     ))
 
 
@@ -686,7 +692,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     )
     return save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
-        version=version, project=rough.name, event=event_name(name), summary=summary,
+        version=version, project=rough.name, event=event_name(name), summary=summary, settings=record["settings"],
     ))
 
 

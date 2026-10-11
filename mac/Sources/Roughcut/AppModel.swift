@@ -17,11 +17,6 @@ enum StageStatus: Equatable {
     case pending, active, done, skipped
 }
 
-/// What the current run is doing.
-enum RunKind: Equatable {
-    case build, recut, revise
-}
-
 @MainActor
 @Observable
 final class AppModel {
@@ -44,12 +39,21 @@ final class AppModel {
     private(set) var resumeFolder: URL?
     /// After a failed run: "usage_limit" when a Claude plan or API credit ran out.
     private(set) var failureKind: String?
+    /// Why the last re-cut or revision of the cut on screen stopped (shown above it).
+    private(set) var runProblem: String?
     private(set) var stageStatus: [Stage: StageStatus] = [:]
     private(set) var activeStage: Stage?
     private(set) var stageDetail = ""
     private(set) var progressCurrent: Int?
     private(set) var progressTotal: Int?
     private(set) var log: [String] = []
+
+    // The Revise box, kept here rather than in the view, so a revision that stops or is cancelled
+    // comes back to the cut with the notes still in it.
+    var reviseNotes = ""
+    var reviseTarget = ""
+    /// Who re-plans a cut made without AI (it has no planner of its own to reuse).
+    var reviseProvider: ModelProvider = .anthropic
 
     // Finished runs, newest first
     private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
@@ -73,6 +77,14 @@ final class AppModel {
     @ObservationIgnored private var lastResult: RunResult?
     @ObservationIgnored private var lastResume: String?
     @ObservationIgnored private var lastKind: String?
+    /// The cut a re-cut or revision started from: where it goes back to if it stops.
+    @ObservationIgnored private var runSource: RunResult?
+    /// The revision's notes, written for `--notes-file`; deleted when the run ends.
+    @ObservationIgnored private var notesFile: URL?
+    /// The output folder the Revise box's notes are for.
+    @ObservationIgnored private var draftFolder: String?
+    /// The remembered preset is filled in again the first time the list is read.
+    @ObservationIgnored private var presetsLoaded = false
     /// Keeps the Mac from idle-sleeping while a run is going.
     @ObservationIgnored private var activity: NSObjectProtocol?
 
@@ -118,45 +130,42 @@ final class AppModel {
         run(cli: cli, arguments: options.arguments(), kind: .build)
     }
 
-    func recut(_ result: RunResult, style: CutStyle, format: SequenceFormat) {
+    /// Re-cut at `style`; `format` nil keeps the cut's own. Fillers and the stringout stay as the cut has them
+    /// (the build form's toggles belong to the next build, not to this cut).
+    func recut(_ result: RunResult, style: CutStyle, format: SequenceFormat?) {
         guard let cli = resolveCLI() else { return }
-        let recut = RecutOptions(
-            outputFolder: result.outDirURL,
-            style: style,
-            format: format,
-            keepFillers: options.keepFillers,
-            stringout: options.stringout
-        )
-        run(cli: cli, arguments: recut.arguments(), kind: .recut)
+        let recut = RecutOptions(outputFolder: result.outDirURL, style: style, format: format)
+        run(cli: cli, arguments: recut.arguments(), kind: .recut, from: result)
     }
 
-    /// Finish a stopped run from its saved plan, with no model call (`roughcut render`).
+    /// Finish a stopped run from its saved plan with the run's own settings and no model call
+    /// (`roughcut render <folder>`, as the CLI suggests).
     func finishWithoutAI() {
         guard let folder = resumeFolder, let cli = resolveCLI() else { return }
-        let recut = RecutOptions(
-            outputFolder: folder,
-            style: options.style,
-            format: options.format,
-            keepFillers: options.keepFillers,
-            stringout: options.stringout
-        )
-        run(cli: cli, arguments: recut.arguments(), kind: .recut)
+        var shown: RunResult?
+        if case .finished(let result) = phase {
+            shown = result  // a stopped re-cut or revision: come back to this cut if finishing stops too
+        }
+        run(cli: cli, arguments: RecutOptions(outputFolder: folder).arguments(), kind: .recut, from: shown)
     }
 
-    /// Re-plan the cut from editor notes as a new version (`roughcut revise`).
-    func revise(_ result: RunResult, notes: String, targetLength: String) {
+    /// Re-plan the cut from the Revise box's notes as a new version (`roughcut revise`).
+    func revise(_ result: RunResult) {
         guard let cli = resolveCLI() else { return }
-        let text = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let text = reviseNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, ReviseOptions.lengthProblem(reviseTarget) == nil else { return }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-notes-\(UUID().uuidString).txt")
         do {
             try text.write(to: file, atomically: true, encoding: .utf8)
         } catch {
-            phase = .failed("Couldn't save the notes for the revision: \(error.localizedDescription)")
+            clearProblem()
+            runProblem = "Couldn't save the notes for the revision: \(error.localizedDescription)"
             return
         }
-        let revise = ReviseOptions(outputFolder: result.outDirURL, notesFile: file, targetLength: targetLength)
-        run(cli: cli, arguments: revise.arguments(), kind: .revise)
+        notesFile = file
+        let provider = ReviseOptions.planner(reviseProvider, form: options, doctor: doctor)
+        let revise = ReviseOptions.revising(result, notesFile: file, targetLength: reviseTarget, provider: provider, form: options)
+        run(cli: cli, arguments: revise.arguments(), kind: .revise, from: result)
     }
 
     func cancel() {
@@ -167,7 +176,14 @@ final class AppModel {
     /// Back to the form, keeping the footage and brief for another pass.
     func startOver() {
         guard !isRunning else { return }
+        clearProblem()
         phase = .idle
+    }
+
+    private func clearProblem() {
+        runProblem = nil
+        resumeFolder = nil
+        failureKind = nil
     }
 
     private func resolveCLI() -> URL? {
@@ -181,10 +197,11 @@ final class AppModel {
         return cli
     }
 
-    private func run(cli: URL, arguments: [String], kind: RunKind) {
+    /// `source`: the cut a re-cut or revision starts from (it comes back to it if the run stops).
+    private func run(cli: URL, arguments: [String], kind: RunKind, from source: RunResult? = nil) {
         runKind = kind
-        resumeFolder = nil
-        failureKind = nil
+        runSource = source
+        clearProblem()
         lastResume = nil
         lastKind = nil
         let recut = kind != .build
@@ -227,23 +244,59 @@ final class AppModel {
         case .failedToLaunch(let message):
             process = nil
             endActivity()
-            phase = .failed("Couldn't start roughcut: \(message)")
+            discardNotesFile()
+            end(RunEnding.after(runKind, from: runSource, result: nil, cancelled: false, error: "Couldn't start roughcut: \(message)"))
         case .exited(let status, _):
             process = nil
             endActivity()
+            discardNotesFile()
             if phase == .running {
-                if cancelRequested {
-                    phase = .cancelled
-                } else if let result = lastResult {
-                    phase = .finished(result)
-                } else {
-                    let tail = log.suffix(6).joined(separator: "\n")
+                if !cancelRequested && lastResult == nil {
                     resumeFolder = ResumeCommand.outputFolder(from: lastResume)
                     failureKind = lastKind
-                    phase = .failed(lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)")
                 }
+                let tail = log.suffix(6).joined(separator: "\n")
+                let error = lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)"
+                end(RunEnding.after(runKind, from: runSource, result: lastResult, cancelled: cancelRequested, error: error))
             }
             runEnded()
+        }
+    }
+
+    /// A failed or cancelled re-cut or revision goes back to its cut (notes kept); a build to the form.
+    private func end(_ ending: RunEnding) {
+        switch ending {
+        case .finished(let result):
+            if runKind == .revise {
+                reviseNotes = ""  // they're in this version now (and in its paper edit)
+                reviseTarget = ""
+            }
+            show(result)
+        case .returned(let source, let problem):
+            runProblem = problem
+            show(source)
+        case .failed(let message):
+            phase = .failed(message)
+        case .cancelled:
+            phase = .cancelled
+        }
+    }
+
+    /// Shows a cut. The Revise box keeps its text while it's the same project's cut.
+    private func show(_ result: RunResult) {
+        if result.outDir != draftFolder {
+            reviseNotes = ""
+            reviseTarget = ""
+            reviseProvider = ReviseOptions.defaultProvider(form: options, doctor: doctor)
+            draftFolder = result.outDir
+        }
+        phase = .finished(result)
+    }
+
+    private func discardNotesFile() {
+        if let notesFile {
+            try? FileManager.default.removeItem(at: notesFile)  // the CLI read it at the start
+            self.notesFile = nil
         }
     }
 
@@ -256,18 +309,19 @@ final class AppModel {
 
     /// Remember the result, open it if asked, and tell the user when they're in another app.
     private func runEnded() {
-        switch phase {
-        case .finished(let result):
+        if let result = lastResult {
             remember(result)
             if options.openInFinalCutWhenDone {
                 openInFinalCut(result)
             }
-            let title = runKind == .revise ? "Revision ready" : runKind == .recut ? "Re-cut ready" : "Rough cut ready"
-            notify(title: title, body: result.version.map { "\(result.title), version \($0)" } ?? result.title)
-        case .failed(let message):
+            notify(title: runKind.readyTitle, body: result.version.map { "\(result.title), version \($0)" } ?? result.title)
+            return
+        }
+        guard !cancelRequested else { return }
+        if case .failed(let message) = phase {
             notify(title: "Roughcut stopped", body: String(message.prefix(240)))
-        default:
-            break
+        } else if let problem = runProblem {
+            notify(title: "Roughcut stopped", body: String(problem.prefix(240)))
         }
     }
 
@@ -312,7 +366,7 @@ final class AppModel {
                 stageStatus[stage] = .done
             }
             lastResult = result
-            phase = .finished(result)
+            end(.finished(result))
         case "error":
             lastError = event.message
             lastResume = event.resume ?? lastResume
@@ -377,7 +431,8 @@ final class AppModel {
     func showRecent(_ run: RecentRun) {
         guard !isRunning else { return }
         runKind = .build
-        phase = .finished(run.result)
+        clearProblem()
+        show(run.result)
     }
 
     func forgetRecent(_ run: RecentRun) {
@@ -465,8 +520,17 @@ final class AppModel {
     func refreshPresets() async {
         guard let cli = cliURL else { return }
         let output = await collectStdout(cli: cli, arguments: ["preset", "list", "--json"])
-        if let list = JSONLines.presets(from: output) {
-            presets = list
+        guard let list = JSONLines.presets(from: output) else { return }
+        presets = list
+        if !presetsLoaded {
+            // After a relaunch the picker still names the preset, but the brief and length weren't
+            // remembered and its look may have changed: fill them in from the preset as it is now.
+            // Only once, so a later refresh (Check again, Update) never overwrites the form mid-project.
+            presetsLoaded = true
+            if !options.presetName.isEmpty {
+                options.reapplyPreset(from: list)
+                graphicsNeedAModel()
+            }
         }
     }
 
@@ -477,6 +541,10 @@ final class AppModel {
             return
         }
         preset.apply(to: &options, replacing: presets.compactMap(\.brief))
+        graphicsNeedAModel()
+    }
+
+    private func graphicsNeedAModel() {
         if options.provider == .none {
             options.graphics = false  // graphics are designed by the AI
         }

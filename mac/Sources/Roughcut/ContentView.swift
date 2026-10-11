@@ -71,8 +71,8 @@ struct BuildForm: View {
                         } icon: {
                             Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(Color.red)
                         }
-                        if model.failureKind == "usage_limit" {
-                            Text("Nothing is lost: transcripts and clip notes are saved. Build again after your plan resets and it picks up from there.")
+                        if model.failureKind == "usage_limit", let advice = model.runKind.limitAdvice {
+                            Text(advice)
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
@@ -83,13 +83,13 @@ struct BuildForm: View {
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Finish without AI") { model.finishWithoutAI() }
-                                    .help("Cuts from the saved plan with no model call (roughcut render)")
+                                    .help("Cuts from the saved plan with its own settings and no model call (roughcut render)")
                             }
                         }
                     }
                 } else if model.phase == .cancelled {
                     Section {
-                        Label("Build cancelled.", systemImage: "stop.circle")
+                        Label("\(model.runKind.noun) cancelled.", systemImage: "stop.circle")
                     }
                 }
 
@@ -191,7 +191,8 @@ struct BuildForm: View {
 
                 Section("Output") {
                     Picker("Format", selection: $model.options.format) {
-                        ForEach(SequenceFormat.allCases) { format in
+                        // A preset's own format (720p, 1080x1920@29.97...) shows as its own row.
+                        ForEach(SequenceFormat.choices(including: model.options.format)) { format in
                             Text(format.title).tag(format)
                         }
                     }

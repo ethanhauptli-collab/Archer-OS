@@ -559,10 +559,11 @@ def signal_done(text: str, run=subprocess.run) -> None:
         pass
 
 
+# `render --format auto`: the footage's own format again. The Mac app's Re-cut (RecutOptions.arguments())
+# follows the Terminal rule with --progress-json too: a setting it sends wins ("Match footage" is
+# --format auto; fillers and stringout are explicit on/off flags) and one it leaves out keeps the saved
+# run's, so a vertical cut re-cut "tighter" stays vertical and "Finish without AI" uses the run's settings.
 FORMAT_FROM_FOOTAGE = ("auto", "footage", "from footage")
-# Cut settings the Mac app's Re-cut always conveys (RecutOptions.arguments()): with
-# --progress-json, `render` takes these from the command line, never from the saved run.
-APP_RECUT_FIELDS = ("style", "format", "keep_fillers", "stringout")
 
 
 def _run(args, json_mode: bool) -> int:
@@ -588,12 +589,6 @@ def _run(args, json_mode: bool) -> int:
         given["format"] = None  # given, and it means "the footage's own format", e.g. after a vertical build
     if args.dialogue_level == LEVEL_OFF:
         given["dialogue_level"] = None  # given: keep clip levels as recorded
-    if json_mode and args.command == "render":
-        # The app's Re-cut sends its whole form: a toggle it leaves off means off and
-        # its "From footage" format sends no flag, so neither falls back to the saved run.
-        default = Options(inputs=[])
-        for f in APP_RECUT_FIELDS:
-            given.setdefault(f, getattr(default, f))
     common = dict(name=args.name, **given)
     try:
         if args.command == "render":

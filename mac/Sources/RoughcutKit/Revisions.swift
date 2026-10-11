@@ -36,11 +36,32 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
         }
         options.targetLength = target ?? ""
         options.style = style.flatMap(CutStyle.init(rawValue:)) ?? .medium
-        options.format = format.flatMap(SequenceFormat.init(rawValue:)) ?? .auto
+        // As saved by `roughcut preset save --format`: 4K, uhd, 720p, 1080x1920@29.97...
+        options.format = SequenceFormat(cliText: format)
         options.graphics = graphics ?? false
         options.graphicsStyle = graphicsStyle ?? ""
         options.graphicsLogo = logo ?? ""
         options.graphicsLook = look ?? []
+    }
+}
+
+extension BuildOptions {
+    /// Preferences remember which preset was picked but not its brief and length (`preferencesOnly`),
+    /// and the preset may have changed since (`roughcut preset save`, `roughcut update`): fill the form
+    /// from the preset as it is now, once the app has read the list. A brief or length typed in the
+    /// meantime stays. A preset that's gone is cleared, with the approved graphics it brought.
+    public mutating func reapplyPreset(from presets: [Preset]) {
+        guard !presetName.isEmpty else { return }
+        guard let preset = presets.first(where: { $0.name == presetName }) else {
+            presetName = ""
+            graphicsLook = []
+            return
+        }
+        let typedLength = targetLength
+        preset.apply(to: &self, replacing: presets.compactMap(\.brief))
+        if !typedLength.trimmed.isEmpty {
+            targetLength = typedLength
+        }
     }
 }
 
@@ -59,17 +80,85 @@ public struct ReviseOptions: Equatable, Sendable {
     public var notesFile: URL
     /// New target length; empty keeps the build's.
     public var targetLength: String
+    /// Who re-plans; nil is the model that planned this cut (the CLI's default).
+    public var provider: ModelProvider?
+    /// With `provider`: its model ("" for its default) and, for Claude, the effort.
+    public var model: String
+    public var effort: Effort?
 
-    public init(outputFolder: URL, notesFile: URL, targetLength: String = "") {
+    public init(outputFolder: URL, notesFile: URL, targetLength: String = "", provider: ModelProvider? = nil, model: String = "", effort: Effort? = nil) {
         self.outputFolder = outputFolder
         self.notesFile = notesFile
         self.targetLength = targetLength
+        self.provider = provider
+        self.model = model
+        self.effort = effort
+    }
+
+    /// A revision of `result`. A cut a model planned is re-planned by that model. One made without AI
+    /// has none to reuse (the CLI would fall back to the API key), so `provider` re-plans it, with
+    /// the build form's model and effort where they fit that provider.
+    public static func revising(_ result: RunResult, notesFile: URL, targetLength: String, provider: ModelProvider, form: BuildOptions) -> ReviseOptions {
+        var options = ReviseOptions(outputFolder: result.outDirURL, notesFile: notesFile, targetLength: targetLength)
+        guard result.madeWithoutAI, provider != .none else { return options }
+        options.provider = provider
+        let sameModels = provider == form.provider || (provider.usesClaudeModels && form.provider.usesClaudeModels)
+        options.model = sameModels ? form.model : ""
+        options.effort = provider.usesClaudeModels ? form.effort : nil
+        return options
+    }
+
+    /// Who can re-plan a cut made without AI from the app: Claude either way, or the form's OpenAI or
+    /// Ollama model (`revise` takes no server address, so an OpenAI-compatible server can't).
+    public static func providers(form: BuildOptions) -> [ModelProvider] {
+        var list: [ModelProvider] = [.claudeCode, .anthropic]
+        if (form.provider == .openai || form.provider == .ollama) && !form.model.trimmed.isEmpty {
+            list.append(form.provider)
+        }
+        return list
+    }
+
+    /// The first choice for that: the form's provider when it can, else Claude through whichever sign-in works here.
+    public static func defaultProvider(form: BuildOptions, doctor: DoctorReport?) -> ModelProvider {
+        if providers(form: form).contains(form.provider) {
+            return form.provider
+        }
+        if let doctor {
+            if doctor.claudeCode != nil && doctor.claudeCodeUsesSubscription {
+                return .claudeCode
+            }
+            if doctor.anthropicKey && doctor.anthropicKeyWorks {
+                return .anthropic
+            }
+        }
+        return .anthropic
+    }
+
+    /// `chosen` while it can still re-plan from here (the form may have changed since), else the first choice.
+    public static func planner(_ chosen: ModelProvider, form: BuildOptions, doctor: DoctorReport?) -> ModelProvider {
+        providers(form: form).contains(chosen) ? chosen : defaultProvider(form: form, doctor: doctor)
+    }
+
+    /// Why Revise can't start with this "New length" (nil: empty keeps the build's, or it reads fine).
+    public static func lengthProblem(_ text: String) -> String? {
+        let length = text.trimmed
+        guard !length.isEmpty, TimeText.seconds(from: length) == nil else { return nil }
+        return "New length should look like 8m, 90s or 8:30."
     }
 
     public func arguments() -> [String] {
         var args = ["revise", outputFolder.path, "--progress-json", "--notes-file=\(notesFile.path)"]
         if let seconds = TimeText.seconds(from: targetLength) {
             args.append("--target=\(Int(seconds.rounded()))")
+        }
+        if let provider, provider != .none {
+            args += ["--provider", provider.rawValue]
+            if !model.trimmed.isEmpty {
+                args.append("--model=\(model.trimmed)")
+            }
+            if provider.usesClaudeModels, let effort {
+                args += ["--effort", effort.rawValue]
+            }
         }
         return args
     }

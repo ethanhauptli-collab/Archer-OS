@@ -5,10 +5,13 @@ struct ResultView: View {
     @Environment(AppModel.self) private var model
     let result: RunResult
     @State private var recutStyle: CutStyle = .tight
-    @State private var recutFormat: SequenceFormat = .auto
+    /// Nil keeps this cut's own format (a vertical cut stays vertical).
+    @State private var recutFormat: SequenceFormat? = nil
     @State private var showWarnings = false
-    @State private var notes = ""
-    @State private var reviseTarget = ""
+
+    private var notesAreEmpty: Bool {
+        model.reviseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private var subtitle: String {
         if result.fellBack {
@@ -26,8 +29,13 @@ struct ResultView: View {
     }
 
     var body: some View {
+        @Bindable var model = model
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let problem = model.runProblem {
+                    RunProblemBanner(problem: problem)
+                }
+
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: result.fellBack ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
                         .font(.largeTitle)
@@ -119,11 +127,12 @@ struct ResultView: View {
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 240)
                         Picker("Format", selection: $recutFormat) {
-                            ForEach(SequenceFormat.allCases) { format in
-                                Text(format.title).tag(format)
+                            Text(RecutOptions.sameFormatTitle(result.cut)).tag(Optional<SequenceFormat>.none)
+                            ForEach(SequenceFormat.choices(including: result.cut?.sequenceFormat)) { format in
+                                Text(format.title).tag(Optional(format))
                             }
                         }
-                        .frame(maxWidth: 220)
+                        .frame(maxWidth: 260)
                         Spacer()
                         Button("Re-cut") {
                             model.recut(result, style: recutStyle, format: recutFormat)
@@ -137,11 +146,11 @@ struct ResultView: View {
                 if !result.fellBack {
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            TextEditor(text: $notes)
+                            TextEditor(text: $model.reviseNotes)
                                 .font(.body)
                                 .frame(minHeight: 54, maxHeight: 90)
                                 .overlay(alignment: .topLeading) {
-                                    if notes.isEmpty {
+                                    if model.reviseNotes.isEmpty {
                                         Text("e.g. tighter hook, drop the second interview line, more drone over the intro")
                                             .foregroundStyle(.tertiary)
                                             .padding(.top, 1)
@@ -149,14 +158,28 @@ struct ResultView: View {
                                             .allowsHitTesting(false)
                                     }
                                 }
+                            if result.madeWithoutAI {
+                                // No model planned this cut, so there's none to reuse: say which one re-plans it.
+                                Picker("Re-plan with", selection: $model.reviseProvider) {
+                                    ForEach(ReviseOptions.providers(form: model.options)) { provider in
+                                        Text(provider.title).tag(provider)
+                                    }
+                                }
+                                .frame(maxWidth: 420)
+                            }
                             HStack {
-                                TextField("New length", text: $reviseTarget, prompt: Text("Same length"))
+                                TextField("New length", text: $model.reviseTarget, prompt: Text("Same length"))
                                     .frame(maxWidth: 140)
+                                if let problem = ReviseOptions.lengthProblem(model.reviseTarget) {
+                                    Label(problem, systemImage: "exclamationmark.triangle")
+                                        .font(.callout)
+                                        .foregroundStyle(Color.orange)
+                                }
                                 Spacer()
                                 Button("Revise") {
-                                    model.revise(result, notes: notes, targetLength: reviseTarget)
+                                    model.revise(result)
                                 }
-                                .disabled(notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .disabled(notesAreEmpty || ReviseOptions.lengthProblem(model.reviseTarget) != nil)
                             }
                         }
                         .padding(4)
@@ -191,11 +214,47 @@ struct ResultView: View {
             .padding(24)
         }
         .onAppear {
-            recutStyle = model.options.style == .tight ? .medium : .tight
+            recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
+            recutFormat = nil
+            model.reviseProvider = ReviseOptions.planner(model.reviseProvider, form: model.options, doctor: model.doctor)
         }
         .onChange(of: result) {
-            notes = ""
-            reviseTarget = ""
+            recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
+            recutFormat = nil
         }
+    }
+}
+
+/// Why the last re-cut or revision of this cut stopped, and what to do about it.
+struct RunProblemBanner: View {
+    @Environment(AppModel.self) private var model
+    let problem: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text(problem).textSelection(.enabled)
+            } icon: {
+                Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(Color.red)
+            }
+            if model.failureKind == "usage_limit", let advice = model.runKind.limitAdvice {
+                Text(advice)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            if model.resumeFolder != nil {
+                HStack {
+                    Text("The new plan was saved before it stopped.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Finish without AI") { model.finishWithoutAI() }
+                        .help("Cuts from the saved plan with its own settings and no model call (roughcut render)")
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
