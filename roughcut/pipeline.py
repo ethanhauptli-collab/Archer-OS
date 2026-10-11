@@ -170,7 +170,7 @@ def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, a
     progress.stage("write", "Writing the Final Cut file")
     out_dir.mkdir(parents=True, exist_ok=True)
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
-    xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
+    xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})", alternates=plan.alternates)
     fcpxml_path = out_dir / f"{slug(name)}.fcpxml"
     fcpxml_path.write_text(xml, encoding="utf-8")
     (out_dir / "plan.json").write_text(json.dumps({"name": name, "plan": plan.to_json(), "raw": raw_plan}, indent=1))

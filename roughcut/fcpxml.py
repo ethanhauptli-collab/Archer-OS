@@ -12,6 +12,7 @@ Coordinate rules (the part that's easy to get wrong):
 
 from __future__ import annotations
 
+import difflib
 import re
 import xml.etree.ElementTree as ET
 from fractions import Fraction
@@ -266,10 +267,84 @@ def _keywords(clip: Clip) -> list[str]:
     return out
 
 
-def _browser_clip(event: ET.Element, clip: Clip, res: _Resources) -> None:
-    """An event (browser) clip carrying keywords, so footage arrives pre-sorted."""
+ALT_TAKE = "Alt take"  # keyword on each other read of a line in the cut
+ALT_READ = "Alt narration read"  # whole-clip keyword on a narration take the stringout doesn't use
+DUPLICATE = "Duplicate export"  # whole-clip keyword on the same footage exported again
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def alternate_reads(tl: Timeline | None, analysis: Analysis, plan_alternates: list[dict] | None = None) -> dict[str, str]:
+    """Segment ID of another read of a line -> the segment the cut uses for that line.
+
+    From the planner's alternates, plus, without a model, the closest
+    sentence in every other take of a narration script the cut reads from.
+    """
+    from .duplicates import TAKE_SIMILARITY
+
+    used = set(tl.seg_ranges) if tl is not None else set()
+    out: dict[str, str] = {}
+    for alt in plan_alternates or []:
+        chosen = str(alt.get("chosen", ""))
+        for other in alt.get("others") or []:
+            if other != chosen and other not in used and analysis.segment(other) is not None:
+                out.setdefault(other, chosen)
+
+    def takes(clip: Clip) -> list[Clip]:
+        root = clip.take_of or clip.id
+        return [c for c in analysis.clips if c.id != clip.id and not c.hidden and (c.id == root or c.take_of == root)]
+
+    for seg_id in sorted(used):
+        seg = analysis.segment(seg_id)
+        clip = analysis.clip(seg.clip_id) if seg is not None else None
+        if clip is None or not seg.text:
+            continue
+        words = _words(seg.text)
+        for other in takes(clip):
+            best, best_ratio = None, TAKE_SIMILARITY
+            for cand in other.segments:
+                if cand.id in used or cand.id in out:
+                    continue
+                matcher = difflib.SequenceMatcher(None, words, _words(cand.text), autojunk=False)
+                if matcher.quick_ratio() >= best_ratio and (r := matcher.ratio()) >= best_ratio:
+                    best, best_ratio = cand, r
+            if best is not None:
+                out[best.id] = seg_id
+    return out
+
+
+def _range_on_clip(m: MediaInfo, a: float, b: float) -> tuple[Fraction, Fraction] | None:
+    """(start, duration) of clip-local seconds a..b in the clip's own time, on its own grid."""
+    grid = m.frame_duration if m.kind == "video" and m.frame_duration else Fraction(1, m.audio_rate or 48000)
+    lo = tc.floor_frames(Fraction(a).limit_denominator(1000000), grid) * grid
+    hi = min(m.duration, tc.ceil_frames(Fraction(b).limit_denominator(1000000), grid) * grid)
+    lo = max(Fraction(0), lo)
+    if hi <= lo:
+        return None
+    return m.start + lo, hi - lo
+
+
+def _browser_clip(event: ET.Element, clip: Clip, res: _Resources, alternates: dict[str, str] | None = None, cut_tl: Timeline | None = None) -> None:
+    """An event (browser) clip carrying keywords, so footage arrives pre-sorted.
+
+    Other reads of lines in the cut get an "Alt take" keyword range naming the
+    line they could replace, so swapping a read is select-and-replace.
+    """
     m = clip.media
-    keywords = ", ".join(_keywords(clip))
+    words = _keywords(clip)
+    notes = []
+    analysis = res.analysis
+    if clip.duplicate_of and analysis.clip(clip.duplicate_of):
+        keep = analysis.clip(clip.duplicate_of)
+        words.append(DUPLICATE)
+        notes.append(f"Same footage as {keep.media.name} ({keep.id}); roughcut cuts from that one")
+    if clip.take_of and analysis.clip(clip.take_of):
+        keep = analysis.clip(clip.take_of)
+        words.append(ALT_READ)
+        notes.append(f"Another read of the narration in {keep.media.name} ({keep.id}), {clip.same_words:.0%} the same words")
+    keywords = ", ".join(words)
     if m.kind == "image":
         # Events can't hold a bare <video>; FCP wraps browser stills in a <clip>.
         start, duration = STILL_ORIGIN, Fraction(5)
@@ -280,10 +355,29 @@ def _browser_clip(event: ET.Element, clip: Clip, res: _Resources) -> None:
             video["role"] = role  # <clip> itself has no role attribute
         ET.SubElement(el, "video", video)
         ET.SubElement(el, "keyword", {"start": tc.fcpx_time(start), "duration": tc.fcpx_time(duration), "value": keywords})
-        return
+        return  # stills have no lines, takes or duplicate exports
     tb = _timebase(m) or 1
     el = _clip_element(event, clip, res, offset=None, start=m.start, duration=tc.fcpx_time(m.duration, tb), lane=None, timebase=tb, use="browser")
-    ET.SubElement(el, "keyword", {"start": tc.fcpx_time(m.start, tb), "duration": tc.fcpx_time(m.duration, tb), "value": keywords})
+    whole = {"start": tc.fcpx_time(m.start, tb), "duration": tc.fcpx_time(m.duration, tb), "value": keywords}
+    if notes:
+        whole["note"] = "; ".join(notes)
+    ET.SubElement(el, "keyword", whole)
+    ranges = []
+    for seg in clip.segments:
+        chosen = (alternates or {}).get(seg.id)
+        if chosen is None:
+            continue
+        span = _range_on_clip(m, seg.start, seg.end)
+        line = analysis.segment(chosen)
+        if span is None or line is None:
+            continue
+        where = ""
+        if cut_tl is not None and chosen in cut_tl.seg_ranges:
+            where = f" at {tc.seconds_to_clock(float(cut_tl.seg_ranges[chosen][0] * cut_tl.frame_duration))} in the cut"
+        text = line.text if len(line.text) <= 80 else line.text[:77].rstrip() + "..."
+        ranges.append((span, f'{seg.id}: another read of {chosen}{where}: "{text}"'))
+    for (start, duration), note in sorted(ranges):
+        ET.SubElement(el, "keyword", {"start": tc.fcpx_time(start, tb), "duration": tc.fcpx_time(duration, tb), "value": ALT_TAKE, "note": note})
 
 
 _XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
@@ -299,7 +393,10 @@ def _scrub(root: ET.Element) -> None:
             el.text = _XML_ILLEGAL.sub(" ", el.text)
 
 
-def build_fcpxml(timelines: list[Timeline], analysis: Analysis, *, event_name: str, browser_clips: bool = True) -> str:
+def build_fcpxml(
+    timelines: list[Timeline], analysis: Analysis, *, event_name: str, browser_clips: bool = True, alternates: list[dict] | None = None
+) -> str:
+    """`timelines[0]` is the cut; `alternates` are the plan's (chosen line, other reads)."""
     res = _Resources(analysis)
     root = ET.Element("fcpxml", {"version": FCPXML_VERSION})
     root.append(res.el)
@@ -308,8 +405,10 @@ def build_fcpxml(timelines: list[Timeline], analysis: Analysis, *, event_name: s
 
     projects = [_sequence(tl, analysis, res) for tl in timelines if tl.spine]
     if browser_clips:
+        cut_tl = timelines[0] if timelines else None
+        alts = alternate_reads(cut_tl, analysis, alternates)
         for clip in analysis.clips:
-            _browser_clip(event, clip, res)
+            _browser_clip(event, clip, res, alts, cut_tl)
     for p in projects:
         event.append(p)
 

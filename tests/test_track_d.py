@@ -145,3 +145,76 @@ def test_graphics_are_titles_and_their_text_is_the_note(tmp_path):
     el = next(e for e in ET.parse(path).getroot().iter("asset-clip") if e.get("name") == "G01")
     assert el.get("videoRole") == "titles.Graphics" and el.get("audioRole") is None
     assert el.find("note").text == "Jane Doe , host"  # illegal XML characters scrubbed
+
+
+# ------------------------------------------------- T8 alternate-read keywords
+
+SCRIPT = [
+    (0.5, 4.0, "Orange County has no single downtown."),
+    (4.5, 9.0, "In Anaheim, Katella Commons is trying to build one."),
+    (9.5, 13.0, "Most of it isn't built yet."),
+]
+SCRIPT_B = [  # the second read: same lines, slightly different words and timing
+    (1.2, 4.9, "Orange County has no single downtown, really."),
+    (5.6, 10.4, "In Anaheim, Katella Commons is trying to build one."),
+    (11.0, 14.6, "Most of it is not built yet."),
+]
+
+
+def _keywords_of(root, name):
+    clip = next(e for e in root.find("library/event") if e.get("name") == name)
+    return clip, clip.findall("keyword")
+
+
+def test_other_reads_of_used_lines_get_alt_take_ranges(tmp_path):
+    a01 = make_clip("A01", kind="audio", seconds=15, sentences=SCRIPT, role="voiceover")
+    a02 = make_clip("A02", kind="audio", seconds=16, sentences=SCRIPT_B, role="voiceover")
+    a02.take_of, a02.same_words = "A01", 0.85
+    v01 = make_clip("V01", seconds=10)
+    v02 = make_clip("V02", seconds=10)
+    v02.duplicate_of = "V01"
+    a = Analysis(clips=[a01, a02, v01, v02])
+    # The planner took line 1 from the first read and line 2 from the second.
+    plan = normalize({"title": "t", "sections": [{"name": "A", "items": ["A01.S001", "A02.S002"]}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t - Rough Cut", fill=False)
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    root = ET.parse(path).getroot()
+
+    clip, kws = _keywords_of(root, "A02")
+    c0, cd = T(clip.get("start")), T(clip.get("duration"))
+    whole, ranges = kws[0], kws[1:]
+    assert "Alt narration read" in whole.get("value") and "A01.wav" in whole.get("note")
+    assert [k.get("value") for k in ranges] == ["Alt take"]
+    k = ranges[0]
+    s, d = T(k.get("start")), T(k.get("duration"))
+    assert c0 <= s and s + d <= c0 + cd
+    assert abs(float(s - c0) - 1.2) < 0.01 and abs(float(s + d - c0) - SCRIPT_B[0][1]) < 0.05
+    assert "A02.S001: another read of A01.S001 at 0:00 in the cut" in k.get("note")
+    assert "Orange County has no single downtown." in k.get("note")
+
+    # The first read's version of line 2 is the alternate for the second read's line.
+    _, kws1 = _keywords_of(root, "A01")
+    alts = [k for k in kws1 if k.get("value") == "Alt take"]
+    assert len(alts) == 1 and "another read of A02.S002" in alts[0].get("note")
+    # Line 3 isn't in the cut, so neither read of it is marked.
+    assert all("S003" not in k.get("note", "") for k in kws + kws1)
+
+    _, dup = _keywords_of(root, "V02")
+    assert "Duplicate export" in dup[0].get("value") and "V01.mov" in dup[0].get("note")
+    _, orig = _keywords_of(root, "V01")
+    assert "Duplicate export" not in orig[0].get("value")
+
+
+def test_planner_alternates_mark_the_other_take_in_the_browser(built):
+    validate_dtd(built.fcpxml)
+    root = ET.parse(built.fcpxml).getroot()
+    clip, kws = _keywords_of(root, "talk")
+    alts = [k for k in kws if k.get("value") == "Alt take"]
+    # CANNED_PLAN: V01.S003 chosen over V01.S001 ("So today we're heading up the mountain.").
+    assert len(alts) == 1 and alts[0].get("note").startswith("V01.S001: another read of V01.S003 at ")
+    s, d = T(alts[0].get("start")), T(alts[0].get("duration"))
+    c0, cd = T(clip.get("start")), T(clip.get("duration"))
+    assert c0 <= s and s + d <= c0 + cd
+    assert ((s - c0) / NTSC).denominator == 1 and (d / NTSC).denominator == 1  # on the clip's frame grid
+    assert abs(float(s - c0) - 1.0) < 0.05
