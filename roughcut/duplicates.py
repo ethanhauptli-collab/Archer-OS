@@ -16,6 +16,7 @@ from __future__ import annotations
 import difflib
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 from .analyze import Cache, Clip
@@ -57,6 +58,34 @@ def same_line(a: list[str], b: list[str], same_takes: bool) -> bool:
         return False  # real_quick_ratio, without building a matcher for every pair of lines
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
     return sm.quick_ratio() >= need and sm.ratio() >= need
+
+
+LINE_CONTAINED = 0.85  # of the shorter line's words found in order inside the longer one...
+LINE_SPREAD = 1.3  # ...within this many times its length (not common words scattered through a long line)
+LINE_CONTAINED_MIN_WORDS = 4  # the shorter line, in two reads/exports of one script (LINE_REPEAT_MIN_WORDS elsewhere)
+
+
+def contains_line(long: list[str], short: list[str], same_takes: bool) -> bool:
+    """Is line `short` said again inside line `long`?
+
+    Whisper's punctuation, so where sentences split, differs between reads
+    of one script and between a clean voiceover and the same one over
+    music: one read's sentence is often half of the other's.
+    """
+    if len(short) < (LINE_CONTAINED_MIN_WORDS if same_takes else LINE_REPEAT_MIN_WORDS) or len(long) < len(short):
+        return False
+    if sum((Counter(short) & Counter(long)).values()) < LINE_CONTAINED * len(short):
+        return False  # cheap check first, without building a matcher for every pair of lines
+    blocks = [m for m in difflib.SequenceMatcher(None, short, long, autojunk=False).get_matching_blocks() if m.size]
+    if sum(m.size for m in blocks) < LINE_CONTAINED * len(short):
+        return False
+    return blocks[-1].b + blocks[-1].size - blocks[0].b <= LINE_SPREAD * len(short)
+
+
+def found_in(long: list[str], short: list[str]) -> set[int]:
+    """Positions of `long` that `short` matches, in order."""
+    blocks = difflib.SequenceMatcher(None, short, long, autojunk=False).get_matching_blocks()
+    return {m.b + i for m in blocks for i in range(m.size)}
 
 
 def similarity(a: Clip, b: Clip) -> float:

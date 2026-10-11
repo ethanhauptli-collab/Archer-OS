@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .analyze import Analysis
-from .duplicates import line_words, same_line, take_group
+from .duplicates import LINE_CONTAINED, contains_line, found_in, line_words, same_line, take_group
 
 PLAN_SCHEMA: dict = {
     "type": "object",
@@ -274,6 +274,15 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     # The same line from another read or export plays once. Not in the stringout (`render` of a
     # --provider none run): it plays everything by design, and re-rendering must give the same cut.
     lines = _UsedLines(analysis, enabled=source != "heuristic")
+    # Every line the plan uses, in order: a sentence that holds a used line and more is a repeat
+    # only when the rest is in the cut too, maybe further on.
+    planned = [
+        f"{m.group(1).upper()}.{m.group(2).upper()}"
+        for s_raw in raw.get("sections") or [] if isinstance(s_raw, dict)
+        for m in (_SEG.match(str(ref)) for ref in s_raw.get("items") or [])
+        if m and analysis.segment(f"{m.group(1).upper()}.{m.group(2).upper()}")
+    ]
+    seen_lines = 0
 
     for s_idx, s_raw in enumerate(raw.get("sections") or []):
         if not isinstance(s_raw, dict):
@@ -284,10 +293,11 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
             if item is None:
                 continue
             if item.seg_id:
+                seen_lines += 1
                 if item.seg_id in used_segments:
                     warnings.append(f"{item.seg_id} used twice; kept the first use")
                     continue
-                kept = lines.repeat_of(item.seg_id)
+                kept = lines.repeat_of(item.seg_id, later=planned[seen_lines:])
                 if kept:
                     warnings.append(f"{item.seg_id} says the same line as {kept} (another read or export); kept {kept} only")
                     continue
@@ -347,6 +357,10 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         if isinstance(flag, dict) and flag.get("note"):
             ref = str(flag.get("ref") or "")
             plan.flags.append({"ref": lines.replaced.get(ref, ref), "note": str(flag["note"])})
+    for seg_id, earlier in lines.overlaps:
+        said = analysis.segment(earlier).text
+        warnings.append(f"{seg_id} says the line {earlier} says (another read or export) and more; kept both, so those words play twice")
+        plan.flags.append({"ref": seg_id, "note": f'Repeats {earlier} ("{said[:60]}") from another read or export: trim it from one of them.'})
 
     for cue in raw.get("music") or []:
         if not isinstance(cue, dict):
@@ -380,29 +394,55 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
 
 
 class _UsedLines:
-    """Lines already in the cut, to catch the same line again from another read or export."""
+    """Lines already in the cut, to catch the same line again from another read or export.
+
+    Reads of one script split into sentences differently (Whisper's
+    punctuation), so a line said again can be half of another read's
+    sentence, or a sentence can hold a line already used and more.
+    """
 
     def __init__(self, analysis: Analysis, enabled: bool = True):
         self.analysis = analysis
         self.enabled = enabled
         self.kept: list[tuple[str, list[str], str, str]] = []  # (segment, words, clip, take group)
         self.replaced: dict[str, str] = {}  # dropped repeat -> the use that was kept
+        self.overlaps: list[tuple[str, str]] = []  # (kept line, the line before it whose words it says again)
 
     def _key(self, seg_id: str) -> tuple[list[str], str, str]:
         seg = self.analysis.segment(seg_id)
         clip = self.analysis.clip(seg.clip_id)
         return line_words(seg.text), clip.id, take_group(clip)
 
-    def repeat_of(self, seg_id: str) -> str | None:
+    def repeat_of(self, seg_id: str, later: list[str] = ()) -> str | None:
+        """The kept line `seg_id` says again, when it adds nothing the cut doesn't say (or the plan's
+        `later` lines won't): then it's dropped. None keeps it."""
         if not self.enabled:
             return None
         words, clip_id, group = self._key(seg_id)
-        for kept_id, kept_words, kept_clip, kept_group in self.kept:
-            # Retakes inside one recording are the planner's call (rule 2); this catches other files.
-            if kept_clip != clip_id and same_line(words, kept_words, same_takes=kept_group == group):
+        # Retakes inside one recording are the planner's call (rule 2); this catches other files.
+        others = [k for k in self.kept if k[2] != clip_id]
+        for kept_id, kept_words, _, kept_group in others:
+            same = kept_group == group
+            if same_line(words, kept_words, same_takes=same) or contains_line(kept_words, words, same):
                 self.replaced[seg_id] = kept_id
                 return kept_id
+        for kept_id, kept_words, _, kept_group in others:
+            if contains_line(words, kept_words, kept_group == group):
+                # A kept line and more: a repeat only when the rest is said elsewhere in the cut too.
+                if self._said_elsewhere(words, group, [s for s in later if s != seg_id]):
+                    self.replaced[seg_id] = kept_id
+                    return kept_id
+                self.overlaps.append((seg_id, kept_id))
+                return None
         return None
+
+    def _said_elsewhere(self, words: list[str], group: str, later: list[str]) -> bool:
+        heard: set[int] = set()
+        lines = [(w, g) for _, w, _, g in self.kept] + [(w, g) for w, _, g in map(self._key, later)]
+        for line, line_group in lines:
+            if contains_line(words, line, line_group == group):
+                heard |= found_in(words, line)
+        return len(heard) >= LINE_CONTAINED * len(words)
 
     def add(self, seg_id: str) -> None:
         if self.enabled:

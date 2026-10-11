@@ -212,6 +212,59 @@ def test_the_same_line_from_another_read_plays_once():
     assert [i.ref for i in normalize({"sections": [{"name": "x", "items": ["A01.S004", "A02.S004"]}]}, a).sections[0].items] == ["A01.S004"]
 
 
+def _split_reads():
+    """Two reads of one script; Whisper ended the first sentence with a period in one and a comma in the other."""
+    a01 = make_clip("A01", kind="audio", seconds=12, role="voiceover", sentences=[
+        (0.5, 4.0, "Over forty chefs are cooking along the pier."), (4.5, 9.0, "Tickets start at twenty dollars and kids get in free.")])
+    a02 = make_clip("A02", kind="audio", seconds=12, role="voiceover", sentences=[
+        (0.5, 9.0, "Over forty chefs are cooking along the pier, tickets start at twenty dollars and kids get in free.")])
+    a02.take_of, a02.same_words = "A01", 0.95
+    return Analysis(clips=[a01, a02])
+
+
+def _kept(a, *items):
+    plan = normalize({"sections": [{"name": "x", "items": list(items)}]}, a)
+    return [i.ref for i in plan.sections[0].items], plan
+
+
+def test_a_line_said_again_inside_another_reads_sentence_plays_once():
+    a = _split_reads()
+    # Half of a sentence already in the cut: dropped, like any repeat.
+    refs, plan = _kept(a, "A02.S001", "A01.S001", "A01.S002")
+    assert refs == ["A02.S001"]
+    assert {"chosen": "A02.S001", "others": ["A01.S001", "A01.S002"], "note": "the same line from another read or export"} in plan.alternates
+    # A sentence holding a line in the cut, whose rest is in the cut too (before it, or later on): dropped.
+    for items in (["A01.S001", "A01.S002", "A02.S001"], ["A01.S001", "A02.S001", "A01.S002"]):
+        refs, plan = _kept(a, *items)
+        assert refs == ["A01.S001", "A01.S002"], items
+        assert any(w.startswith("A02.S001 says the same line as A01.S001") for w in plan.warnings)
+    # Its rest isn't anywhere else: dropping it would lose "tickets start at twenty dollars", so it stays, flagged.
+    refs, plan = _kept(a, "A01.S001", "A02.S001")
+    assert refs == ["A01.S001", "A02.S001"]
+    assert any(w.startswith("A02.S001 says the line A01.S001 says") for w in plan.warnings)
+    assert [f["ref"] for f in plan.flags] == ["A02.S001"] and "Repeats A01.S001" in plan.flags[0]["note"]
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", fill=False)
+    assert any(m.kind == "todo" and m.frame == tl.seg_ranges["A02.S001"][0] and "Repeats A01.S001" in m.value for m in tl.markers)
+
+
+def test_a_reworded_read_holding_the_line_counts_and_scattered_words_do_not():
+    from roughcut.duplicates import contains_line, line_words
+
+    short = line_words("The OC Food Festival takes over Huntington Beach on Saturday.")
+    long = line_words("So, the OC Food Festival takes over Huntington Beach this Saturday, June 14th.")
+    assert contains_line(long, short, same_takes=True) and contains_line(long, short, same_takes=False)
+    # Its words, in order, but spread through a long line about something else.
+    spread = line_words("We went to the market and then down to the park with the kids today because the weather was nice.")
+    assert not contains_line(spread, line_words("We went to the park today."), same_takes=False)
+    assert not contains_line(spread, line_words("We went to the park today."), same_takes=True)
+    # Short lines across unrelated clips stay the planner's call, as with whole lines.
+    assert not contains_line(long, line_words("The OC Food Festival."), same_takes=False)
+    v01 = make_clip("V01", seconds=10, sentences=[(1.0, 8.0, "So, the OC Food Festival takes over Huntington Beach this Saturday, June 14th.")])
+    v02 = make_clip("V02", seconds=10, sentences=[(1.0, 6.0, "The OC Food Festival takes over Huntington Beach on Saturday.")])
+    a = Analysis(clips=[v01, v02])
+    assert _kept(a, "V01.S001", "V02.S001")[0] == ["V01.S001"]
+
+
 def test_a_shared_line_across_unrelated_clips_is_dropped_only_when_long():
     thanks = [(1.0, 2.0, "Thank you."), (3.0, 8.0, "It opens this summer in Anaheim near the arena.")]
     v01 = make_clip("V01", seconds=10, sentences=thanks)
