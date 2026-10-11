@@ -53,10 +53,11 @@ another and share that time, so a 20-second line can get four 5-second shots. Ho
 3-6 seconds (stills 3-5). Choose clips by their visual descriptions and file names, matching \
 what the line is about: when the narration names a place, project or person, show that. Prefer \
 variety; don't repeat a shot. source_in is where to start inside the B-roll clip in seconds, or \
--1 to let the software pick a good spot. "words": when a shot belongs on a name, place or list \
-item, copy those exact words from the line, and the shot comes in as they are spoken (the first \
-shot over a line always starts with the line); otherwise "". On long lines, add enough shots to \
-cover the whole line.
+-1 to let the software pick a good spot. Long clips list timed Moments: set source_in to the \
+time of the usable moment that fits the line. "words": when a shot belongs on a name, place or \
+list item, copy those exact words from the line, and the shot comes in as they are spoken (the \
+first shot over a line always starts with the line); otherwise "". On long lines, add enough \
+shots to cover the whole line.
 6b. Narration (Voiceover clips) has no picture of its own. When the piece is carried by \
 narration, use one read of it as the backbone, bring in interview soundbites where they back up \
 what was just said, and cover every narrated segment with B-roll or stills from start to end. \
@@ -99,6 +100,48 @@ VISION_SCHEMA: dict = {
                     "quality": {"type": "string"},
                 },
                 "required": ["id", "description", "tags", "shot", "quality"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["clips"],
+    "additionalProperties": False,
+}
+
+
+MOMENTS_SYSTEM = """\
+You are logging long B-roll clips for a video editor, so a cutaway can start on the good part \
+instead of a fixed spot. Each clip comes with frames sampled through it, each labelled with its \
+time in the clip. For every frame, write a short note of what it shows (subject, shot size, \
+camera movement, anything distinctive an editor would search for) and say whether it is usable \
+as a cutaway: false when it is shaky, blurred, blocked, badly exposed, or shows nothing. "at" is \
+the frame's time in seconds, as labelled.
+"""
+
+MOMENTS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "moments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": {"type": "number", "description": "The frame's time in the clip, in seconds."},
+                                "note": {"type": "string"},
+                                "usable": {"type": "boolean"},
+                            },
+                            "required": ["at", "note", "usable"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["id", "moments"],
                 "additionalProperties": False,
             },
         }
@@ -160,13 +203,21 @@ def render_media(analysis: Analysis, style: "Style | None" = None) -> str:
     ]
     for clip in clips:
         lines.append("## " + _clip_header(clip, analysis))
-        if clip.visual:
+        if clip.visual and clip.visual.get("description"):
             v = clip.visual
             tags = ", ".join(v.get("tags", []))
             q = v.get("quality", "")
             q_note = f" Quality: {q}." if q and q.lower() != "good" else ""
             desc = v.get("description", "").strip().rstrip(".")
             lines.append(f"Visual: {desc}. Shot: {v.get('shot', '')}. Tags: {tags}.{q_note}")
+        if clip.visual and clip.visual.get("moments"):
+            lines.append(
+                "Moments: "
+                + "; ".join(
+                    f"{mo['at']:g}s {mo['note']}" + ("" if mo.get("usable", True) else " (not usable)")
+                    for mo in clip.visual["moments"]
+                )
+            )
         if clip.has_transcript:
             for s in clip.segments:
                 kept, cuts = kept_length(s, clip, analysis, style)

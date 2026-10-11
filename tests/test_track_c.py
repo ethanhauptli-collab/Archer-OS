@@ -410,7 +410,102 @@ def test_jumps_in_a_music_bed_get_markers_and_a_clashing_cue_a_warning():
     assert any("music A01 plays over V01" in w for w in tl.warnings)
 
 
-# ------------------------------------------------------------ T23: a pause split by a breath
+# ------------------------------------------------------------ T21: moments in long B-roll
+
+MOMENTS = [
+    {"at": 6.0, "note": "wide shot of the boardwalk, people walking", "usable": True},
+    {"at": 30.0, "note": "close-up of a coffee cup on a cafe table", "usable": True},
+    {"at": 45.0, "note": "shaky pan, lens flare", "usable": False},
+    {"at": 54.0, "note": "kids riding bikes past the pier", "usable": True},
+]
+
+
+def _walk_project():
+    sentences = [(0.5, 5.0, "We started the morning down by the pier."), (5.5, 10.0, "Then we stopped for coffee at a little cafe.")]
+    walk = make_clip("V02", seconds=60)
+    walk.visual = {"description": "Walking tour of the beach town", "tags": ["walk", "beach"], "shot": "pov", "quality": "good", "moments": [dict(m) for m in MOMENTS]}
+    return Analysis(clips=[make_clip("A01", kind="audio", seconds=11, sentences=sentences, role="voiceover"), walk])
+
+
+def test_a_cutaway_left_to_the_software_starts_on_the_moment_that_fits():
+    a = _walk_project()
+    raw = {"sections": [{"name": "x", "items": ["A01.S001", "A01.S002"], "broll": [
+        {"clip": "V02", "over": ["A01.S002"], "words": "", "source_in": -1, "reason": ""},
+    ]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t", fill=False)
+    shot = next(c for c in tl.connected if c.clip_id == "V02")
+    assert float(shot.src_in) == pytest.approx(30.0, abs=0.05)  # "coffee ... cafe", not 15% in
+    raw["sections"][0]["broll"][0]["source_in"] = 12
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t", fill=False)
+    assert float(next(c for c in tl.connected if c.clip_id == "V02").src_in) == pytest.approx(12, abs=0.05)  # the planner's pick stands
+
+
+def test_fill_starts_long_clips_on_their_moments_and_never_on_an_unusable_one():
+    from roughcut.plan import heuristic_plan
+
+    a = _walk_project()
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    starts = sorted(round(float(c.src_in)) for c in tl.connected if c.clip_id == "V02")
+    assert starts and set(starts) <= {6, 30, 54}, starts
+    assert 30 in starts  # the coffee line gets the cafe
+
+
+def test_moments_are_logged_once_with_labelled_frames_and_stills_stay_cached(tmp_path):
+    import shutil
+    import subprocess
+
+    from conftest import FakeProvider
+
+    from roughcut.analyze import Cache, Clip
+    from roughcut.media import probe
+    from roughcut.prompts import render_media
+    from roughcut.vision import describe_clips, moment_times
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+
+    class Logger(FakeProvider):
+        def complete_json(self, system, parts, schema, *, schema_name, purpose, effort=None, max_tokens=64000):
+            if schema_name != "clip_moments":
+                return super().complete_json(system, parts, schema, schema_name=schema_name, purpose=purpose)
+            self.calls.append({"schema_name": schema_name, "parts": parts})
+            labels = [p.text for p in parts if hasattr(p, "text") and " @" in p.text]
+            clip_id = labels[0].split()[0]
+            times = [float(lbl.rsplit("(", 1)[1].rstrip("s)")) for lbl in labels]
+            return {"clips": [{"id": clip_id, "moments": [{"at": t + 0.4, "note": f"frame at {t:g}", "usable": i != 1} for i, t in enumerate(times)]}]}
+
+    def ffmpeg(*args):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], check=True)
+
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=24", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(tmp_path / "walk.mp4"))
+    ffmpeg("-f", "lavfi", "-i", "smptebars=size=160x90:rate=25:duration=6", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(tmp_path / "short.mp4"))
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:duration=1", "-frames:v", "1", str(tmp_path / "photo.png"))
+
+    def project():
+        clips = [Clip(id="V01", media=probe(tmp_path / "walk.mp4"), role="broll"), Clip(id="V02", media=probe(tmp_path / "short.mp4"), role="broll"),
+                 Clip(id="I01", media=probe(tmp_path / "photo.png"), role="still")]
+        return Analysis(clips=clips)
+
+    cache = Cache(tmp_path / "cache")
+    a, provider = project(), Logger()
+    assert describe_clips(a, provider, cache, workers=1) == []
+    assert [c["schema_name"] for c in provider.calls] == ["clip_log", "clip_moments"]
+    sampled = moment_times(a.clip("V01"))
+    assert len(sampled) == 3 and not moment_times(a.clip("V02")) and not moment_times(a.clip("I01"))
+    parts = provider.calls[1]["parts"]
+    kinds = ["label" if getattr(p, "text", "").startswith("V01 @") else "image" if hasattr(p, "data") else "text" for p in parts]
+    assert kinds == ["text"] + ["label", "image"] * 3 + ["text"]  # each frame says when it is
+    moments = a.clip("V01").visual["moments"]
+    assert [m["at"] for m in moments] == sampled  # snapped to the frames it was shown
+    assert [m["usable"] for m in moments] == [True, False, True]
+    assert a.clip("V01").visual["description"]  # the description is kept alongside
+    assert f"Moments: {sampled[0]:g}s frame at" in render_media(a) and "(not usable)" in render_media(a)
+
+    again, provider = project(), Logger()
+    describe_clips(again, provider, cache, workers=1)
+    assert provider.calls == []  # stills, descriptions and moments all come from the cache
+    assert again.clip("V01").visual["moments"] == moments and again.clip("I01").visual["description"]
+
 
 HOME = [(1.0, 4.0, "We drove all the way back home from the coast."), (5.2, 7.5, "And then we unpacked the car and the bikes."), (8.65, 10.5, "It was late by then for everyone.")]
 HOME_SILENCES = [(0.0, 1.0), (4.0, 4.45), (4.75, 5.2), (7.5, 7.95), (8.2, 8.65), (10.5, 12.0)]

@@ -590,6 +590,10 @@ def _place_broll(
                         src_in, frames = Fraction(0), min(want, max_still)
                     else:
                         hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
+                        if hint is None:  # "let the software choose": the logged moment that fits the line
+                            said = " ".join(seg.text for seg in (analysis.segment(o) for o in b.over) if seg)
+                            at = _pick_moment(tl, clip, _tokens(said), _tokens(b.words))
+                            hint = Fraction(at).limit_denominator(1000) if at is not None else None
                         src_in, frames = _video_window(m, want, fd, hint)
                     if frames < min(min_frames, want):
                         warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
@@ -790,7 +794,29 @@ def _clip_tokens(clip: Clip) -> set[str]:
     text = clip.media.stem
     if clip.visual:
         text += " " + clip.visual.get("description", "") + " " + " ".join(clip.visual.get("tags", []))
+        text += " " + " ".join(mo.get("note", "") for mo in _usable_moments(clip))
     return _tokens(text)
+
+
+def _usable_moments(clip: Clip) -> list[dict]:
+    return [mo for mo in ((clip.visual or {}).get("moments") or []) if isinstance(mo, dict) and mo.get("usable", True)]
+
+
+def _pick_moment(tl: Timeline, clip: Clip, said: set[str], words: set[str] = frozenset()) -> float | None:
+    """Where to start inside a long clip: the usable logged moment that fits what's being said
+    (the cutaway's own words count double), one not shown yet first. None when nothing was logged."""
+    moments = _usable_moments(clip)
+    if not moments:
+        return None
+    fd = tl.frame_duration
+    shown = [(float(c.src_in), float(c.src_in + c.frames * fd)) for c in tl.connected if c.clip_id == clip.id]
+
+    def rank(mo: dict) -> tuple:
+        toks = _tokens(mo.get("note", ""))
+        seen = any(a - 0.5 <= mo["at"] < b for a, b in shown)
+        return (not seen, 2 * len(toks & words) + len(toks & said), -mo["at"])
+
+    return float(max(moments, key=rank)["at"])
 
 
 def _gaps_without_picture(tl: Timeline, analysis: Analysis) -> list[tuple[int, int]]:
@@ -908,9 +934,13 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
                 src_in, frames = Fraction(0), want
             else:
                 grid = m.frame_duration or fd
-                start_at = video_cursor.get(best.id, m.duration * Fraction(1, 10))
-                if start_at + want * fd > m.duration:
-                    start_at = m.duration * Fraction(1, 10)
+                at = _pick_moment(tl, best, said)
+                if at is not None:
+                    start_at = Fraction(at).limit_denominator(1000)
+                else:
+                    start_at = video_cursor.get(best.id, m.duration * Fraction(1, 10))
+                    if start_at + want * fd > m.duration:
+                        start_at = m.duration * Fraction(1, 10)
                 src_in, frames = _video_window(m, want, fd, start_at)
                 video_cursor[best.id] = src_in + frames * fd + 1
             if frames < 1:
