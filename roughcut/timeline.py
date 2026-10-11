@@ -8,6 +8,7 @@ coordinates; nothing here knows about XML.
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 from collections import Counter
@@ -208,6 +209,9 @@ BREATH_MARGIN = 0.05  # kept either side of a breath in narration
 MIN_TRIM = 0.1  # a shorter trim isn't worth an edit
 
 
+_CLUSTERS: dict = {}  # memo: speech_pieces asks once per segment, _cut_silences once per piece
+
+
 def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, float]]]]:
     """Silences joined across the breaths and clicks between them: (start, end, the silences).
 
@@ -216,22 +220,37 @@ def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, fl
     marks the breaths (short, quiet, no transcribed word); silences that hold
     a whole word (quiet speech under a raised level) are never joined.
     """
-    spans = sorted(clip.silences)
     if not clip.breaths:
-        return [(s, e, [(s, e)]) for s, e in spans]
-    spoken = [(w.start, w.end) for seg in clip.segments for w in seg.words]
+        return [(s, e, [(s, e)]) for s, e in sorted(clip.silences)]
+    key = (id(clip), clip.id, tuple(clip.silences), tuple(clip.breaths), id(clip.segments), sum(len(s.words) for s in clip.segments))
+    if key in _CLUSTERS:
+        return _CLUSTERS[key]
+    spans = sorted(clip.silences)
+    spoken = sorted((w.start, w.end) for seg in clip.segments for w in seg.words)
+    starts = [ws for ws, _ in spoken]
+    breaths = sorted(clip.breaths)
 
     def holds_word(s: float, e: float) -> bool:
-        return any(s <= ws and we <= e for ws, we in spoken)
+        i = bisect.bisect_left(starts, s)
+        while i < len(spoken) and spoken[i][0] <= e:
+            if spoken[i][1] <= e:
+                return True
+            i += 1
+        return False
+
+    def breath_between(a: float, b: float) -> bool:
+        i = bisect.bisect_left(breaths, (a - 1e-3,))
+        return i < len(breaths) and abs(breaths[i][0] - a) < 1e-3 and abs(breaths[i][1] - b) < 1e-3
 
     out: list[tuple[float, float, list[tuple[float, float]]]] = []
     for s, e in spans:
-        if out and not holds_word(s, e) and not holds_word(*out[-1][2][-1]):
-            prev_end = out[-1][1]
-            if any(abs(b0 - prev_end) < 1e-3 and abs(b1 - s) < 1e-3 for b0, b1 in clip.breaths):
-                out[-1] = (out[-1][0], e, out[-1][2] + [(s, e)])
-                continue
+        if out and breath_between(out[-1][1], s) and not holds_word(s, e) and not holds_word(*out[-1][2][-1]):
+            out[-1] = (out[-1][0], e, out[-1][2] + [(s, e)])
+            continue
         out.append((s, e, [(s, e)]))
+    if len(_CLUSTERS) > 64:
+        _CLUSTERS.clear()
+    _CLUSTERS[key] = out
     return out
 
 
