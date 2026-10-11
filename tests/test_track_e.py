@@ -478,18 +478,22 @@ def test_built_in_presets(config):
     assert presets.check(vo) is None and presets.check(stk) is None
 
 
-def test_no_invented_brand_colors_anywhere():
+def test_brand_colors_come_only_from_the_brand():
+    """No invented hex codes: Venture OC's are the palette ventureoc.com uses, and nothing else names any."""
     import re
 
-    from roughcut import presets
+    from roughcut import brand_fonts, presets
     from roughcut.cli import build_parser
 
     hex_code = re.compile(r"#[0-9A-Fa-f]{6}\b")
+    site_palette = {"#0A2540", "#FD8C27", "#E8C778", "#E6E9EB"}  # ventureoc.com: navy, orange, gold, soft gray
+    assert set(hex_code.findall(presets.VENTURE_OC_LOOK)) == site_palette
     help_text = build_parser()._subparsers._group_actions[0].choices["build"].format_help()
-    for text in (presets.VENTURE_OC_LOOK, presets.SAVE_THE_KID_LOOK, presets.VENTURE_OC_BRIEF, help_text, README.read_text(encoding="utf-8")):
+    for text in (presets.SAVE_THE_KID_LOOK, presets.VENTURE_OC_BRIEF, help_text, README.read_text(encoding="utf-8")):
         assert not hex_code.search(text), hex_code.search(text)
-    # But the brand's color family is pinned, so two runs don't pick two different accents.
-    assert "navy" in presets.VENTURE_OC_LOOK and "orange accent" in presets.VENTURE_OC_LOOK
+    # Its typefaces ship with roughcut, so the render never falls back to a system font.
+    for family in ("Jost", "Inter", "Fraunces"):
+        assert family in presets.VENTURE_OC_LOOK and family in brand_fonts.families()
 
 
 def test_preset_fills_in_what_you_didnt_type(footage, config, capture):

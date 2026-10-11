@@ -25,11 +25,16 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 # The graphics look for each built-in preset: one constant each, used nowhere else.
-# Color families, no hex codes: the exact shades come from the owner (`roughcut preset
-# save venture-oc --graphics-style "..."`), never from a guess.
+# Venture OC's palette and typefaces are the ones ventureoc.com uses (navy text and
+# plates, orange buttons, gold highlights; Jost headings, Inter body, Fraunces
+# display), and those three fonts ship with roughcut so renders never fall back.
+# Save the Kid has no published brand, so its look stays a description.
 VENTURE_OC_LOOK = (
-    "Venture Orange County house look: bold geometric sans-serif type, white text on solid deep navy plates "
-    "with one orange accent, crisp confident ease-out motion, premium and energetic, no gimmicks."
+    "Venture Orange County house look (from ventureoc.com): deep navy #0A2540 for plates and dark text, "
+    "orange #FD8C27 as the one accent (rules, underlines, highlighted words), warm gold #E8C778 sparingly for "
+    "big numbers, white or soft gray #E6E9EB text on navy. Type: Jost bold for headlines and names, Inter for "
+    "small labels and roles, Fraunces italic only for pulled quotes. Softly rounded plates (about 14 px corners), "
+    "crisp confident ease-out motion, premium and energetic, no gimmicks."
 )
 SAVE_THE_KID_LOOK = (
     "Understated and warm: clean white type with a soft shadow or a thin translucent plate, no loud colors, "
