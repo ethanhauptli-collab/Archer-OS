@@ -520,6 +520,33 @@ def test_revise_progress_stream_for_the_app(footage, tmp_path, fake, capsys, sha
     assert [e["stage"] for e in events if e["event"] == "stage"] == ["plan", "cut", "write"]
     done = events[-1]["result"]
     assert done["version"] == 2 and done["stringout_seconds"] is None and done["project"].startswith("footage - Rough Cut v2")
+    # A revision writes no stringout, but a re-cut of it still makes one: "cut" is what a re-cut keeps.
+    assert done["cut"] == {"style": "medium", "format": None, "keep_fillers": False, "stringout": True}
+
+
+def test_the_apps_revise_of_a_cut_made_without_ai_uses_the_planner_it_names(footage, tmp_path, capsys, monkeypatch, shared_cache):
+    """A --provider none cut has no planner to reuse, so a bare revise falls back to the API key, which a
+    Claude-plan user doesn't have. The app names the planner (ReviseOptions.revising) and the CLI uses it."""
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none",
+                 "--cache-dir", str(shared_cache), "--progress-json"]) == 0
+    assert _events(capsys.readouterr().out)[-1]["result"]["planned_by"] == "heuristic"  # RunResult.madeWithoutAI
+    asked = []
+    provider = FakeProvider()
+
+    def make(name, **kw):
+        asked.append((name, kw.get("model"), kw.get("effort")))
+        return provider
+
+    monkeypatch.setattr(pipeline, "make_provider", make)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Tighter hook.")
+    assert main(["revise", str(out), "--progress-json", f"--notes-file={notes}"]) == 0
+    assert asked == [("anthropic", None, "high")]  # what the app used to get: the API key
+    assert main(["revise", str(out), "--progress-json", f"--notes-file={notes}", "--target=60", "--provider", "claude-code", "--effort", "high"]) == 0
+    assert asked[1] == ("claude-code", None, "high")
+    done = _events(capsys.readouterr().out)[-1]["result"]
+    assert done["version"] == 3 and done["planned_by"] == "fake:fake-model"
 
 
 def test_revise_needs_notes(tmp_path, capsys):
@@ -1014,26 +1041,51 @@ def test_graphics_of_a_cut_already_in_final_cut_outlive_its_history(tmp_path):
     assert listed[0]["graphics"] == ["G01-title-card.mov"] and listed[0].get("pruned")
 
 
-def test_the_apps_recut_gets_what_its_form_says(footage, tmp_path, capsys, shared_cache):
-    """Re-cut sends --style always, --format/--keep-fillers/--no-stringout only when set: the rest means the default."""
+def test_the_apps_recut_keeps_this_cuts_settings_unless_it_says_otherwise(footage, tmp_path, capsys, shared_cache):
+    """A vertical promo re-cut "tighter" from the app came back 16:9, and plan.json forgot it was vertical.
+
+    The app's Re-cut always sends --style; it sends --format only when you pick one ("Match footage" is
+    --format auto) and fillers/stringout only as explicit on/off flags. No flag keeps this cut's setting,
+    exactly as in Terminal, and the done payload says what the cut has so the app can show it.
+    """
     out = tmp_path / "out"
     assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none",
                  "--cache-dir", str(shared_cache), "--format", "vertical", "--keep-fillers", "--no-stringout", "--progress-json"]) == 0
-    capsys.readouterr()
-    # Pacing tight, Format "From footage", Keep fillers off, Stringout on:
-    assert main(["render", str(out), "--progress-json", "--style", "tight"]) == 0
     done = _events(capsys.readouterr().out)[-1]["result"]
-    assert done["project"] == "footage - Rough Cut v2 (tight, no AI)" and done["stringout_seconds"] is not None
-    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert done["cut"] == {"style": "medium", "format": "vertical", "keep_fillers": True, "stringout": False}
+
+    def recut(*flags: str) -> tuple[dict, dict]:
+        assert main(["render", str(out), "--progress-json", *flags]) == 0
+        result = _events(capsys.readouterr().out)[-1]["result"]
+        assert result == json.loads((out / "result.json").read_text())  # what Recent runs reopens
+        return result, json.loads((out / "plan.json").read_text())["settings"]
+
+    # Pacing tight, Format "Same as this cut": still vertical, fillers kept, no stringout.
+    done, settings = recut("--style", "tight")
+    assert done["project"] == "footage - Rough Cut v2 (tight, vertical, no AI)" and done["stringout_seconds"] is None
+    assert (settings["format"], settings["keep_fillers"], settings["stringout"]) == ("vertical", True, False)
+    assert done["cut"] == {"style": "tight", "format": "vertical", "keep_fillers": True, "stringout": False}
+
+    # "Finish without AI" sends only the folder: the saved settings, like `roughcut render <folder>` in Terminal.
+    done, _ = recut()
+    assert done["project"] == "footage - Rough Cut v3 (tight, vertical, no AI)"
+
+    # Format "Match footage" goes back to the footage's own shape; explicit toggles take over.
+    done, settings = recut("--style", "tight", "--format", "auto", "--no-keep-fillers", "--stringout")
+    assert done["project"] == "footage - Rough Cut v4 (tight, no AI)" and done["stringout_seconds"] is not None
     assert (settings["format"], settings["keep_fillers"], settings["stringout"]) == (None, False, True)
+    assert done["cut"] == {"style": "tight", "format": None, "keep_fillers": False, "stringout": True}
+
+    # A format the picker doesn't list (a preset's WxH@fps) goes through as typed.
+    done, settings = recut("--style", "loose", "--format=1080x1920@29.97")
+    assert done["cut"]["format"] == "1080x1920@29.97" and "vertical" in done["project"]
 
     # In Terminal, no flag still means "as before", and --format auto goes back to the footage's own shape.
-    assert main(["render", str(out), "--format", "vertical"]) == 0
     assert main(["render", str(out)]) == 0
-    assert "Rough Cut v4 (tight, vertical, no AI)" in next(out.glob("*.fcpxml")).read_text()
+    assert "Rough Cut v6 (loose, vertical, no AI)" in next(out.glob("*.fcpxml")).read_text()
     assert main(["render", str(out), "--format", "auto"]) == 0
     projects = check_invariants(next(out.glob("*.fcpxml")))
-    assert "footage - Rough Cut v5 (tight, no AI)" in projects
+    assert "footage - Rough Cut v7 (loose, no AI)" in projects
 
 
 def test_a_run_started_with_nohup_survives_the_terminal_closing():

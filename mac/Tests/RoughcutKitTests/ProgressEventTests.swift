@@ -41,6 +41,10 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNotNil(result.visualLog)
         XCTAssertNotNil(result.skipped)
         XCTAssertTrue(result.reportHtml?.hasSuffix(".html") ?? false)
+        // What a re-cut keeps unless it changes it (Re-cut's "Same as this cut").
+        XCTAssertEqual(result.cut, CutSettings(style: "medium", format: nil, keepFillers: false, stringout: true))
+        XCTAssertEqual(result.cut?.sequenceFormat, .auto)
+        XCTAssertFalse(result.madeWithoutAI)
     }
 
     func testUnknownStageStillDecodes() throws {

@@ -78,6 +78,11 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var usage: UsageSummary?
     /// The paper edit as a web page.
     public var reportHtml: String?
+    /// The settings a re-cut of this version keeps unless it changes them (nil from older CLIs and older recent runs).
+    public var cut: CutSettings?
+
+    /// No model planned this cut (`--provider none`, or the stringout fallback): `planned_by` names no "provider:model".
+    public var madeWithoutAI: Bool { !plannedBy.contains(":") }
 
     public var outDirURL: URL { URL(fileURLWithPath: outDir, isDirectory: true) }
     public var fcpxmlURL: URL { URL(fileURLWithPath: fcpxml) }
@@ -90,6 +95,25 @@ public struct RunResult: Codable, Equatable, Sendable {
         }
         return reportURL
     }
+}
+
+/// A version's cut settings, as saved in its plan.json (`result_summary`'s "cut").
+public struct CutSettings: Codable, Equatable, Sendable {
+    public var style: String?
+    /// The `--format` it was cut with; nil is the footage's own format.
+    public var format: String?
+    public var keepFillers: Bool?
+    public var stringout: Bool?
+
+    public init(style: String? = nil, format: String? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil) {
+        self.style = style
+        self.format = format
+        self.keepFillers = keepFillers
+        self.stringout = stringout
+    }
+
+    public var cutStyle: CutStyle? { style.flatMap(CutStyle.init(rawValue:)) }
+    public var sequenceFormat: SequenceFormat { SequenceFormat(cliText: format) }
 }
 
 public struct GraphicsSummary: Codable, Equatable, Sendable {

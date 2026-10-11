@@ -30,9 +30,13 @@ The build is signed ad hoc, so after each rebuild macOS may ask again to allow K
 
 | | |
 |---|---|
-| `Sources/RoughcutKit/` | Foundation-only core: `BuildOptions` (form → CLI arguments), `ProgressEvent`/`RunResult` (JSON-lines decoding), `CLIProcess` (runs the CLI and streams its output, never dropping the final `done` event), `CLILocator` (finds the CLI, fixes PATH for Homebrew). Unit-tested. |
+| `Sources/RoughcutKit/` | Foundation-only core: `BuildOptions` (form → CLI arguments), `ProgressEvent`/`RunResult` (JSON-lines decoding), `Revisions` (presets, `ReviseOptions`), `RunState` (where the window goes when a run ends), `CLIProcess` (runs the CLI and streams its output, never dropping the final `done` event), `CLILocator` (finds the CLI, fixes PATH for Homebrew). Unit-tested. |
 | `Sources/Roughcut/` | The SwiftUI app: `AppModel` (state machine: form → running → finished/failed), `ContentView` (form and drop zone), `RunView` (stage checklist and log), `ResultView` (open in FCP, Finder, paper edit, re-cut), `SettingsView`, `Keychain`. |
 | `Tests/RoughcutKitTests/Fixtures/progress-sample.jsonl` | Real CLI output. `tests/test_progress.py` in the Python suite fails if the CLI's output drifts from it. |
 | `scripts/build-app.sh` | Packages the SwiftPM executable as a signed (ad-hoc) `.app` with an icon. It also records this repo's CLI path in `Info.plist`. |
 
-**Re-cut** in the result screen runs `roughcut render`: the same plan at a different pace or format, with no model call.
+**Re-cut** in the result screen runs `roughcut render`: the same plan at a different pace or format, with no model call. Format starts at **Same as this cut**, so a vertical cut stays vertical; pick **Match footage** to go back to the footage's own shape. Keep um/uh and the Stringout stay as the cut has them (the build form's toggles are for the next build). **Finish without AI** runs `roughcut render <folder>` with the run's own settings, as the CLI's hint says.
+
+**Revise** re-plans the cut from your notes. A cut made without AI (provider None) has no planner to reuse, so the box asks which one re-plans it: Claude through your plan (Claude Code) or your API key, or the form's OpenAI/Ollama model. If a revision or re-cut stops (plan limit, error, Cancel), the window goes back to the cut with your notes still in the box and says what happened; **Finish without AI** appears there when the new plan was saved.
+
+**Presets**: the picked preset is remembered across launches and filled in again from the preset as it is now (brief, length, pacing, format and graphics look). A format or length saved in Terminal (`--format 1080x1920@29.97`, `--target "90 sec"`) carries over as written. If an approved graphic or logo has gone since, the form says so before you build.

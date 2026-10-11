@@ -8,6 +8,169 @@ final class RevisionTests: XCTestCase {
         return o
     }
 
+    /// A `done` payload for a cut in /o/Promo_roughcut.
+    private func result(plannedBy: String, extra: String = "") throws -> RunResult {
+        let line = "{\"event\": \"done\", \"result\": {\"title\": \"Promo\", \"out_dir\": \"/o/Promo_roughcut\", \"fcpxml\": \"/o/Promo_roughcut/Promo v1.fcpxml\", \"report\": \"/o/Promo_roughcut/edit_report.md\", \"rough_seconds\": 90, \"stringout_seconds\": null, \"edits\": 12, \"broll\": 3, \"sections\": [], \"planned_by\": \"\(plannedBy)\", \"fell_back\": false, \"warnings\": []\(extra)}}"
+        return try XCTUnwrap(JSONLines.event(from: line)?.result)
+    }
+
+    private func doctor(claudeCodeAuth: String?, keyStatus: String) throws -> DoctorReport {
+        let auth = claudeCodeAuth.map { "\"\($0)\"" } ?? "null"
+        let line = "{\"version\": \"0.1.0\", \"python\": \"3.12.4\", \"executable\": \"/x\", \"anthropic_key\": \(keyStatus == "ok"), \"anthropic_key_status\": \"\(keyStatus)\", \"openai_key\": false, \"openai_installed\": false, \"claude_code\": \"/opt/homebrew/bin/claude\", \"claude_code_auth\": \(auth)}"
+        return try XCTUnwrap(JSONLines.doctor(from: line))
+    }
+
+    func testPresetFormatsAndLengthsTheCLIAccepts() throws {
+        // Saved in Terminal: `preset save reels --format 1080x1920@29.97 --target "90 sec"` and `--format 4K --target "10 mins"`.
+        let json = #"[{"name": "reels", "brief": "Reels brief", "target": "90 sec", "style": "tight", "format": "1080x1920@29.97", "graphics": false, "look": []}, {"name": "stk-4k", "brief": "Episode brief", "target": "10 mins", "style": "loose", "format": "4K", "graphics": false}, {"name": "long", "format": "uhd", "target": "1hr"}]"#
+        let presets = try XCTUnwrap(JSONLines.presets(from: json))
+        var o = options()
+        presets[0].apply(to: &o)
+        XCTAssertEqual(o.format, .custom("1080x1920@29.97"))  // was "Match footage": a 16:9 cut from a vertical preset
+        XCTAssertEqual(o.problems, [])  // "90 sec" blocked Build
+        var args = o.arguments()
+        XCTAssertTrue(args.contains("--format=1080x1920@29.97"))
+        XCTAssertTrue(args.contains("--target=90"))
+
+        presets[1].apply(to: &o, replacing: presets.compactMap(\.brief))
+        XCTAssertEqual(o.format, .uhd)
+        XCTAssertEqual(o.problems, [])
+        args = o.arguments()
+        XCTAssertEqual(args.firstIndex(of: "--format").map { args[$0 + 1] }, "4k")
+        XCTAssertTrue(args.contains("--target=600"))
+
+        presets[2].apply(to: &o)
+        XCTAssertEqual(o.format, .uhd)
+        XCTAssertTrue(o.arguments().contains("--target=3600"))
+    }
+
+    func testPresetIsFilledInAgainAfterARelaunch() throws {
+        let before = #"[{"name": "venture-oc", "description": "Venture Orange County promos", "brief": "Promo brief", "target": "90s", "style": "tight", "format": "vertical", "graphics": true, "graphics_style": "navy and orange", "logo": "/b/logo.png", "look": ["/cfg/venture-oc.look/1-G01-lower-third.html"]}]"#
+        var o = options()
+        try XCTUnwrap(JSONLines.presets(from: before))[0].apply(to: &o)
+        let saved = try JSONEncoder().encode(o.preferencesOnly)
+
+        // Quit and relaunch: preferences keep the preset's name but not its brief and length,
+        // so the picker said "Venture OC" while the build got no brief and no target.
+        var relaunched = try JSONDecoder().decode(BuildOptions.self, from: saved)
+        XCTAssertEqual(relaunched.presetName, "venture-oc")
+        XCTAssertEqual(relaunched.brief, "")
+        XCTAssertEqual(relaunched.targetLength, "")
+        // Meanwhile `roughcut preset save venture-oc --look-from …` replaced the approved design.
+        let after = before.replacingOccurrences(of: "1-G01-lower-third.html", with: "2-G02-stat.html")
+        let presets = try XCTUnwrap(JSONLines.presets(from: after))
+        relaunched.reapplyPreset(from: presets)
+        XCTAssertEqual(relaunched.brief, "Promo brief")
+        XCTAssertEqual(relaunched.targetLength, "90s")
+        XCTAssertEqual(relaunched.style, .tight)
+        XCTAssertEqual(relaunched.format, .vertical)
+        XCTAssertEqual(relaunched.graphicsLook, ["/cfg/venture-oc.look/2-G02-stat.html"])
+        let args = relaunched.arguments()
+        XCTAssertTrue(args.contains("--context=Promo brief"))
+        XCTAssertTrue(args.contains("--target=90"))
+
+        // What was typed before the list loaded stays.
+        var typed = try JSONDecoder().decode(BuildOptions.self, from: saved)
+        typed.brief = "OC Food Fest, feature Maria"
+        typed.targetLength = "60s"
+        typed.reapplyPreset(from: presets)
+        XCTAssertEqual(typed.brief, "Promo brief\n\nOC Food Fest, feature Maria")
+        XCTAssertEqual(typed.targetLength, "60s")
+
+        // A preset that's gone isn't shown as picked, and the approved graphics it brought go with it.
+        var gone = try JSONDecoder().decode(BuildOptions.self, from: saved)
+        gone.reapplyPreset(from: [])
+        XCTAssertEqual(gone.presetName, "")
+        XCTAssertEqual(gone.graphicsLook, [])
+
+        // No preset picked: nothing changes.
+        var plain = options()
+        plain.brief = "mine"
+        let untouched = plain
+        plain.reapplyPreset(from: presets)
+        XCTAssertEqual(plain, untouched)
+    }
+
+    func testReviseOfACutMadeWithoutAIUsesTheChosenPlanner() throws {
+        // A "None: just cut the silence" cut has no planner to reuse: the CLI fell back to the API key,
+        // which a Claude-plan user doesn't have, and stopped with "No Claude API key is set".
+        let quick = try result(plannedBy: "heuristic")
+        XCTAssertTrue(quick.madeWithoutAI)
+        var form = BuildOptions()
+        form.provider = .none  // the form still says how the quick cut was made
+        let notes = URL(fileURLWithPath: "/tmp/notes.txt")
+        XCTAssertEqual(ReviseOptions.revising(quick, notesFile: notes, targetLength: "60 sec", provider: .claudeCode, form: form).arguments(), [
+            "revise", "/o/Promo_roughcut", "--progress-json", "--notes-file=/tmp/notes.txt", "--target=60",
+            "--provider", "claude-code", "--effort", "high",
+        ])
+        // Claude models carry over between the API and Claude Code; another provider's model doesn't.
+        form.provider = .claudeCode
+        form.model = "claude-sonnet-5-5"
+        form.effort = .max
+        let viaKey = ReviseOptions.revising(quick, notesFile: notes, targetLength: "", provider: .anthropic, form: form).arguments()
+        XCTAssertEqual(Array(viaKey.dropFirst(4)), ["--provider", "anthropic", "--model=claude-sonnet-5-5", "--effort", "max"])
+        form.provider = .ollama
+        form.model = "llama3.3"
+        let local = ReviseOptions.revising(quick, notesFile: notes, targetLength: "", provider: .ollama, form: form).arguments()
+        XCTAssertEqual(Array(local.dropFirst(4)), ["--provider", "ollama", "--model=llama3.3"])
+        let claude = ReviseOptions.revising(quick, notesFile: notes, targetLength: "", provider: .claudeCode, form: form).arguments()
+        XCTAssertEqual(Array(claude.dropFirst(4)), ["--provider", "claude-code", "--effort", "max"])
+
+        // A cut a model planned is re-planned by that model, the CLI's default: no provider flags.
+        let planned = try result(plannedBy: "claude-code:claude-opus-5-5")
+        XCTAssertFalse(planned.madeWithoutAI)
+        XCTAssertEqual(ReviseOptions.revising(planned, notesFile: notes, targetLength: "", provider: .anthropic, form: form).arguments(), [
+            "revise", "/o/Promo_roughcut", "--progress-json", "--notes-file=/tmp/notes.txt",
+        ])
+    }
+
+    func testRevisePlannerChoices() throws {
+        var form = BuildOptions()
+        form.provider = .none
+        XCTAssertEqual(ReviseOptions.providers(form: form), [.claudeCode, .anthropic])
+        // Signed in to Claude Code with a plan: that first; with only an API key, the key.
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: try doctor(claudeCodeAuth: "claude.ai", keyStatus: "missing")), .claudeCode)
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: try doctor(claudeCodeAuth: nil, keyStatus: "ok")), .anthropic)
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: try doctor(claudeCodeAuth: "api_key", keyStatus: "ok")), .anthropic)
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: nil), .anthropic)
+        // The form's own provider when it can re-plan.
+        form.provider = .claudeCode
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: try doctor(claudeCodeAuth: nil, keyStatus: "ok")), .claudeCode)
+        form.provider = .ollama
+        form.model = "llama3.3"
+        XCTAssertEqual(ReviseOptions.providers(form: form), [.claudeCode, .anthropic, .ollama])
+        XCTAssertEqual(ReviseOptions.defaultProvider(form: form, doctor: nil), .ollama)
+        // `revise` takes no server address, so a compatible server isn't offered.
+        form.provider = .openaiCompatible
+        XCTAssertEqual(ReviseOptions.providers(form: form), [.claudeCode, .anthropic])
+        // A choice the form no longer allows falls back to the first choice.
+        XCTAssertEqual(ReviseOptions.planner(.ollama, form: form, doctor: try doctor(claudeCodeAuth: "claude.ai", keyStatus: "missing")), .claudeCode)
+        XCTAssertEqual(ReviseOptions.planner(.anthropic, form: form, doctor: nil), .anthropic)
+    }
+
+    func testReviseLengthThatDoesNotReadIsCaught() {
+        // It used to be dropped without a word, and the revision kept the build's length.
+        XCTAssertEqual(ReviseOptions.lengthProblem("about a minute"), "New length should look like 8m, 90s or 8:30.")
+        XCTAssertNil(ReviseOptions.lengthProblem(""))
+        XCTAssertNil(ReviseOptions.lengthProblem("  "))
+        XCTAssertNil(ReviseOptions.lengthProblem("60 sec"))
+        XCTAssertNil(ReviseOptions.lengthProblem("1:30"))
+    }
+
+    func testDoneEventCarriesTheCutsSettings() throws {
+        let vertical = try result(plannedBy: "anthropic:claude-opus-5-5", extra: #", "cut": {"style": "tight", "format": "vertical", "keep_fillers": true, "stringout": false}"#)
+        XCTAssertEqual(vertical.cut, CutSettings(style: "tight", format: "vertical", keepFillers: true, stringout: false))
+        XCTAssertEqual(vertical.cut?.sequenceFormat, .vertical)
+        XCTAssertEqual(vertical.cut?.cutStyle, .tight)
+        // Saved with Recent runs and read back.
+        let saved = try JSONEncoder().encode(vertical)
+        XCTAssertEqual(try JSONDecoder().decode(RunResult.self, from: saved), vertical)
+        // The footage's own format is a null format; an older CLI sends no "cut" at all.
+        let footage = try result(plannedBy: "heuristic", extra: #", "cut": {"style": "medium", "format": null, "keep_fillers": false, "stringout": true}"#)
+        XCTAssertEqual(footage.cut?.sequenceFormat, .auto)
+        XCTAssertNil(try result(plannedBy: "heuristic").cut)
+    }
+
     func testAudioMusicLogoAndLookFlags() {
         var o = options()
         o.music = [URL(fileURLWithPath: "/Users/you/Music/bed one.m4a")]
