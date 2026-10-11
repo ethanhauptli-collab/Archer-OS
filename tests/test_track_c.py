@@ -319,3 +319,107 @@ def test_report_and_render_say_how_long_against_the_target(footage, tmp_path, mo
     assert main(["render", str(out), "--style", "tight"]) == 0
     assert ", target 1:00 (" in capsys.readouterr().out
     assert "target 1:00" in (out / "edit_report.md").read_text()
+
+
+# ------------------------------------------------------------ T6: finished promos over a music bed
+
+# One sentence with a 0.8 s breath in the middle (longer than medium's 0.6 s), then another.
+PROMO = [(1.0, 3.0, "So this is the new arena district"), (3.8, 5.6, "coming to Anaheim next year."), (6.4, 9.0, "It opens with restaurants and music.")]
+BEDS = {
+    "music": "aevalsrc=exprs='0.02*(sin(2*PI*262*t)+sin(2*PI*330*t)+sin(2*PI*392*t)+0.5*sin(2*PI*(523+262*floor(mod(t*2,2)))*t))':s=48000:d=11",
+    "noise": "anoisesrc=c=pink:a=0.06:d=11:r=48000",
+}
+
+
+@pytest.fixture(scope="module")
+def promos(tmp_path_factory):
+    import json
+    import shutil
+    import subprocess
+
+    from conftest import spread_words
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("promos")
+    gates = "+".join(f"between(t,{s},{e})" for s, e, _ in PROMO)
+    speech = f"0.5*sin(2*PI*180*t)*(0.6+0.4*sin(2*PI*5*t))*({gates})"
+    words = [w for s, e, text in PROMO for w in spread_words(s, e, text)]
+    for name, bed in BEDS.items():
+        folder = root / name
+        folder.mkdir()
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=4", "-f", "lavfi", "-i", "smptebars=size=320x180:rate=25:duration=4",
+             "-f", "lavfi", "-i", "color=c=navy:size=320x180:rate=25:duration=3",
+             "-f", "lavfi", "-i", f"aevalsrc=exprs='{speech}':s=48000:d=11", "-f", "lavfi", "-i", bed,
+             "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v];[3:a][4:a]amix=inputs=2:normalize=0[a]",
+             "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+             str(folder / "promo.mov")],
+            check=True,
+        )
+        (folder / "promo.json").write_text(json.dumps({"words": words}))
+    return root
+
+
+def _analyse(folder, cache_dir):
+    from roughcut.analyze import Cache, analyze
+
+    return analyze([folder / "promo.mov"], transcriber=None, cache=Cache(cache_dir))
+
+
+def _spans(tl):
+    return [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]
+
+
+def test_a_promo_over_music_keeps_its_breaths_and_noise_does_not(promos, tmp_path):
+    from roughcut.plan import heuristic_plan
+    from roughcut.prompts import render_media
+
+    music = _analyse(promos / "music", tmp_path / "cache")
+    clip = music.clips[0]
+    assert clip.silence_db > -35 and clip.bed == "music" and clip.cuts_per_min >= 4  # two picture cuts in 11 s
+    assert any("speech over a music bed in a finished edit" in n for n in music.notes)
+    assert "a finished edit, speech over a music bed: take consecutive lines together" in render_media(music)
+    tl = build_timeline(heuristic_plan(music), music, style=STYLES["medium"], name="t")
+    assert any(a < 3.0 and b > 3.8 for a, b in _spans(tl)), _spans(tl)  # the 0.8 s breath plays
+
+    noise = _analyse(promos / "noise", tmp_path / "cache")
+    assert noise.clips[0].silence_db > -35 and noise.clips[0].bed == "noise"
+    assert "music bed" not in render_media(noise)
+    tl = build_timeline(heuristic_plan(noise), noise, style=STYLES["medium"], name="t")
+    assert not any(a < 3.2 and b > 3.6 for a, b in _spans(tl)), _spans(tl)  # dead air over room noise goes
+
+    # Cached: a second analysis doesn't measure again, and the result survives analysis.json.
+    again = Analysis.from_json(_analyse(promos / "music", tmp_path / "cache").to_json())
+    assert (again.clips[0].bed, again.clips[0].cuts_per_min) == ("music", clip.cuts_per_min)
+
+
+def test_jumps_in_a_music_bed_get_markers_and_a_clashing_cue_a_warning():
+    from conftest import SPEECH
+
+    v01 = make_clip("V01", seconds=20, sentences=SPEECH)
+    v01.bed, v01.cuts_per_min = "music", 12.0
+    a = Analysis(clips=[v01, make_clip("A01", kind="audio", seconds=60)])
+    raw = {"sections": [{"name": "x", "items": ["V01.S005", "V01.S003", "V01.S004"]}], "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 0}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    todo = [m for m in tl.markers if m.kind == "todo"]
+    assert [m.value for m in todo] == ["Music jumps: smooth this edit"]  # S005 -> S003; S003+S004 play straight through
+    assert len({m.frame for m in todo}) == len(todo)  # not also marked as a jump cut
+    assert any("1 edit jumps the music" in n for n in tl.notes)
+    assert any("music A01 plays over V01" in w for w in tl.warnings)
+
+
+@pytest.mark.parametrize("bed,pieces", [("music", 1), ("noise", 2), (None, 2)])
+def test_pauses_over_a_music_bed_stay_up_to_a_second(bed, pieces):
+    from roughcut.timeline import kept_length
+
+    clip = make_clip("V01", seconds=12, sentences=PROMO, silences=[(3.0, 3.8), (5.6, 6.4)])
+    clip.bed = bed
+    a = Analysis(clips=[clip])
+    seg = clip.segments[0]  # "... district [0.8 s] coming to Anaheim next year."
+    assert kept_length(seg, clip, a, STYLES["medium"])[1] == pieces - 1
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S002"]}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    assert len(tl.spine) == pieces + (0 if bed == "music" else 1)  # S001 and S002 join over music too
+    assert kept_length(seg, clip, a, STYLES["loose"])[1] == 0  # loose keeps 1.2 s anyway

@@ -94,6 +94,8 @@ class Clip:
     duplicate_of: str | None = None  # same footage exported again: hidden
     take_of: str | None = None  # another read of the same narration script
     same_words: float = 0.0  # word overlap with take_of
+    bed: str | None = None  # what plays in the pauses when the silence level is raised: "music" / "noise"
+    cuts_per_min: float | None = None  # picture cuts a minute, for a clip over a music bed (finished edit?)
     silence_db: float | None = None  # level the silence map was detected at
     background_db: float | None = None  # this clip's measured background (peak dBFS)
 
@@ -126,6 +128,8 @@ class Clip:
             "duplicate_of": self.duplicate_of,
             "take_of": self.take_of,
             "same_words": self.same_words,
+            "bed": self.bed,
+            "cuts_per_min": self.cuts_per_min,
             "silence_db": self.silence_db,
             "background_db": self.background_db,
         }
@@ -144,6 +148,8 @@ class Clip:
             duplicate_of=d.get("duplicate_of"),
             take_of=d.get("take_of"),
             same_words=d.get("same_words", 0.0),
+            bed=d.get("bed"),
+            cuts_per_min=d.get("cuts_per_min"),
             silence_db=d.get("silence_db"),
             background_db=d.get("background_db"),
         )
@@ -368,6 +374,9 @@ def analyze(
     notes = mark_duplicates(clips, cache, prefer_vertical=prefer_vertical)
     for note in notes:
         log(note)
+    from .pauses import mark_beds
+
+    notes += mark_beds(clips, cache, workers=workers)
     for clip in clips:
         if clip.silence_db is not None and clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB and clip.role in ("aroll", "voiceover"):
             louder = clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB

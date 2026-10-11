@@ -127,6 +127,12 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
         copies = [c for c in analysis.clips if c.duplicate_of == clip.id]
         if copies:
             bits.append("also exported as " + ", ".join(c.id for c in copies) + " (hidden; use this one)")
+    if clip.bed == "music":
+        finished = "a finished edit, " if (clip.cuts_per_min or 0) >= 4 else ""
+        bits.append(
+            f"{finished}speech over a music bed: take consecutive lines together so the music flows "
+            "(every jump in the music gets a to-do marker); B-roll optional"
+        )
     if clip.take_of:
         kind = "another take" if clip.same_words >= 0.9 else "a different version"
         bits.append(

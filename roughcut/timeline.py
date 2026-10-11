@@ -204,6 +204,16 @@ def _pause_between(prev_start: float, next_end: float, silences: list[tuple[floa
     return max((e - s for s, e in silences if s >= prev_start + eps and e <= next_end - eps), default=0.0)
 
 
+def _gap_limit(clip: Clip, style: Style) -> float:
+    """Longest pause kept inside speech. Over a music bed (a finished promo) the pauses carry
+    the music, and cutting every breath makes it stutter, so they stay longer."""
+    return max(1.0, 2 * style.max_gap) if clip.bed == "music" else style.max_gap
+
+
+def _gap_limits(analysis: Analysis, style: Style) -> dict[str, float]:
+    return {c.id: _gap_limit(c, style) for c in analysis.clips if c.bed == "music"}
+
+
 def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[_Piece]:
     dur = clip.duration
     if not seg.words:
@@ -219,6 +229,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     # On camera, cutting out a very short um/uh jumps the picture, so it stays. Narration
     # has no picture of its own (B-roll covers it), so every um/uh can go.
     filler_floor = 0.25 if clip.media.has_video else 0.0
+    max_gap = _gap_limit(clip, style)
     for i, w in enumerate(all_words):
         if style.remove_fillers and w.is_filler:
             removed_since_last = True
@@ -226,7 +237,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         if current:
             prev = all_words[current[-1]]
             gap = max(w.start - prev.end, _pause_between(prev.start, w.end, clip.silences))
-            if gap > style.max_gap or (removed_since_last and gap > filler_floor):
+            if gap > max_gap or (removed_since_last and gap > filler_floor):
                 runs.append(current)
                 current = []
         current.append(i)
@@ -305,7 +316,7 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
         clip = analysis.clip(p.clip_id)
         spoken = [(w.start, w.end) for seg in clip.segments for w in seg.words]
         if p.seg_ids:
-            longest = style.max_gap
+            longest = _gap_limit(clip, style)
         elif clip.role in ("aroll", "voiceover"):  # a timed range of talking footage
             longest = max(1.0, 2 * style.max_gap)
         else:
@@ -320,18 +331,18 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
     return out
 
 
-def _merge(pieces: list[_Piece], max_gap: float, warnings: list[str] | None = None) -> list[_Piece]:
+def _merge(pieces: list[_Piece], max_gap: float, warnings: list[str] | None = None, limits: dict[str, float] | None = None) -> list[_Piece]:
     """Join back-to-back sentences from the same take when the pause between them is natural.
 
     Only pieces with nothing cut between them are joined, so removed fillers
-    and long pauses stay removed.
+    and long pauses stay removed. `limits` sets a longer pause per clip (music beds).
     """
     merged: list[_Piece] = []
     for p in pieces:
         if merged:
             q = merged[-1]
             adjacent = q.w1 is not None and p.w0 is not None and p.w0 == q.w1 + 1
-            if adjacent and q.clip_id == p.clip_id and q.section == p.section and 0 <= p.wa - q.wb <= max_gap:
+            if adjacent and q.clip_id == p.clip_id and q.section == p.section and 0 <= p.wa - q.wb <= (limits or {}).get(p.clip_id, max_gap):
                 q.b = max(q.b, p.b)
                 q.wb = max(q.wb, p.wb)
                 q.w1 = p.w1
@@ -378,7 +389,7 @@ def build_timeline(
                 raw_pieces.extend(speech_pieces(seg, clip, style, s_idx))
             else:
                 raw_pieces.append(_Piece(clip.id, item.start, item.end, item.start, item.end, s_idx, []))
-    pieces = _cut_silences(_merge(raw_pieces, style.max_gap, warnings), analysis, style)
+    pieces = _cut_silences(_merge(raw_pieces, style.max_gap, warnings, _gap_limits(analysis, style)), analysis, style)
 
     width, height, seq_fd = choose_format(pieces, analysis, format_override)
     tl = Timeline(name=name, frame_duration=seq_fd, width=width, height=height)
@@ -457,6 +468,7 @@ def build_timeline(
     tl.target_seconds = target_seconds
     tl.review = review(tl, plan, analysis, target_seconds)
     if plan.source != "heuristic":  # a stringout is all jump cuts by design
+        _mark_bed_jumps(tl, analysis, warnings)
         _mark_jump_cuts(tl, tl.review)
     _place_markers(tl, plan, analysis)
     tl.warnings = warnings
@@ -939,7 +951,7 @@ def kept_length(seg: Segment, clip: Clip, analysis: Analysis, style: Style) -> t
     The same pause and filler trimming the timeline does, so the planner's
     sums match what gets built.
     """
-    pieces = _cut_silences(_merge(speech_pieces(seg, clip, style, 0), style.max_gap), analysis, style)
+    pieces = _cut_silences(_merge(speech_pieces(seg, clip, style, 0), style.max_gap, None, _gap_limits(analysis, style)), analysis, style)
     return sum(p.b - p.a for p in pieces), max(0, len(pieces) - 1)
 
 
@@ -1034,7 +1046,9 @@ MAX_JUMP_MARKERS = 10
 
 def _mark_jump_cuts(tl: Timeline, rv: Review) -> None:
     """To-do markers on the uncovered jump cuts that matter most: between lines first, then pause trims."""
-    worst = sorted(rv.jump_cuts, key=lambda j: (not j.between_lines, -(abs(j.src_to - j.src_from))))[:MAX_JUMP_MARKERS]
+    marked = {m.frame for m in tl.markers if m.kind == "todo"}  # one to-do per edit
+    jumps = [j for j in rv.jump_cuts if j.frame not in marked]
+    worst = sorted(jumps, key=lambda j: (not j.between_lines, -(abs(j.src_to - j.src_from))))[:MAX_JUMP_MARKERS]
     for j in sorted(worst, key=lambda j: j.frame):
         what = f"{', '.join(j.before) or 'range'} \u2192 {', '.join(j.after) or 'range'}"
         tl.markers.append(
@@ -1045,6 +1059,46 @@ def _mark_jump_cuts(tl: Timeline, rv: Review) -> None:
                 note=f"{j.clip_id} jumps from {tc.seconds_to_clock(j.src_from, millis=True)} to {tc.seconds_to_clock(j.src_to, millis=True)} ({what})",
             )
         )
+
+
+MAX_BED_MARKERS = 20
+
+
+def _mark_bed_jumps(tl: Timeline, analysis: Analysis, warnings: list[str]) -> None:
+    """To-do markers where an edit jumps the music under a finished promo, and a warning
+    when the plan's music plays over one (two songs at once)."""
+    fd = tl.frame_duration
+    bed = {c.id for c in analysis.clips if c.bed == "music"}
+    if not bed:
+        return
+    jumps = []
+    for a, b in zip(tl.spine, tl.spine[1:]):
+        if not ({a.clip_id, b.clip_id} & bed):
+            continue
+        if a.clip_id == b.clip_id and a.src_in + a.frames * fd == b.src_in:
+            continue
+        jumps.append((b.offset, a, b))
+    for frame, a, b in jumps[:MAX_BED_MARKERS]:
+        name = analysis.clip(b.clip_id if b.clip_id in bed else a.clip_id).media.name
+        tl.markers.append(
+            Marker(
+                frame=frame,
+                value="Music jumps: smooth this edit",
+                kind="todo",
+                note=f"The music bed in {name} jumps at this edit ({a.clip_id} \u2192 {b.clip_id}). Try a crossfade, a J/L-cut, or a music cue over it.",
+            )
+        )
+    if jumps:
+        more = f" (markers on the first {MAX_BED_MARKERS})" if len(jumps) > MAX_BED_MARKERS else ""
+        one = len(jumps) == 1
+        tl.notes.append(
+            f"{len(jumps)} {'edit jumps' if one else 'edits jump'} the music under a finished promo; "
+            f"{'it has' if one else 'each has'} a to-do marker{more}."
+        )
+    for cue in (c for c in tl.connected if c.kind == "music"):
+        under = sorted({sc.clip_id for sc in tl.spine if sc.clip_id in bed and sc.offset < cue.end and sc.end > cue.start})
+        if under:
+            warnings.append(f"music {cue.clip_id} plays over {', '.join(under)}, which already {'has' if len(under) == 1 else 'have'} music under the speech; the two will clash")
 
 
 def timeline_stats(tl: Timeline) -> dict:
