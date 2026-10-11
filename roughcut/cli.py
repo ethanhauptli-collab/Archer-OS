@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
     g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
     p.add_argument("--name", help="project/event name (default: folder name)")
+    p.add_argument("--open", action="store_true", help="open the new cut in Final Cut Pro when it's done (Mac)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
 
 
@@ -339,10 +341,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _print_doctor(report)
 
-    from .pipeline import Options, build, rerender, result_summary
-
     json_mode = bool(args.progress_json)
     progress.enable(json_mode)
+    # Only a real command line (not a test calling main()) takes over the process group.
+    restore = _install_stop_handlers(json_mode, own_group=argv is None)
+    try:
+        return _run(args, json_mode)
+    finally:
+        _restore_handlers(restore)
+
+
+def _run(args, json_mode: bool) -> int:
+    from .pipeline import Options, build, rerender, result_summary
 
     # Only the cut settings given on the command line; the rest are defaults (build) or the saved run's (render).
     given = {
@@ -420,8 +430,11 @@ def main(argv: list[str] | None = None) -> int:
         _log_end("STOPPED by a bug:\n" + traceback.format_exc() + (f"\n{hint}" if hint else ""))
         raise
     _log_end(f"FINISHED: {result.fcpxml.name} and {result.report.name} written")
+    opened = open_in_final_cut(result.fcpxml) if args.open else None
 
     if json_mode:
+        if opened:
+            progress.emit("log", message=opened)
         progress.emit("done", result=result_summary(result))
         return 3 if result.fell_back else 0
 
@@ -442,9 +455,83 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ! {w}")
     print(f"FCPXML:    {result.fcpxml}")
     print(f"Report:    {result.report}")
-    print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
-    print(f"Then open the project \"{tl.name}\" in the new event. The clip itself in the browser stays your untouched original.")
+    if result.version > 1:
+        print(f"This is version {result.version}; earlier cuts are in {result.out_dir / 'history'}.")
+    if opened:
+        print(f"\n{opened}")
+    else:
+        print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
+    print(f"Then open the project \"{result.project or tl.name}\" in the event \"{result.event}\". The clips in the browser stay your untouched originals.")
     return 3 if result.fell_back else 0
+
+
+def open_in_final_cut(path: Path, run=subprocess.run) -> str:
+    """--open: hand the new FCPXML to Final Cut Pro (macOS), else to whatever opens .fcpxml files."""
+    if sys.platform != "darwin":
+        return "--open only works on a Mac; import the .fcpxml with File > Import > XML... in Final Cut Pro."
+    for cmd, said in (
+        (["open", "-a", "Final Cut Pro", str(path)], "Opened in Final Cut Pro: pick a library in the import window."),
+        (["open", str(path)], "Opened with the app your Mac uses for .fcpxml files."),
+    ):
+        try:
+            if run(cmd, capture_output=True, timeout=60).returncode == 0:
+                return said
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return "Couldn't open Final Cut Pro automatically: import the .fcpxml with File > Import > XML..."
+
+
+def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
+    """Log how the run ended when the app cancels it (SIGTERM) or Terminal closes (SIGHUP).
+
+    Under the Mac app (--progress-json) roughcut leads its own process group,
+    so cancelling also stops the `claude`, ffmpeg and browser processes it started.
+    """
+    import signal
+
+    in_group = False
+    if json_mode and own_group and hasattr(os, "setpgrp"):
+        try:
+            os.setpgrp()
+            in_group = True
+        except OSError:
+            pass
+
+    def stop(signum, frame):  # noqa: ARG001
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)  # the group signal below reaches us too
+        except (ValueError, OSError):
+            pass
+        reason = "cancelled" if signum == signal.SIGTERM else "the Terminal window was closed"
+        _log_end(f"STOPPED: {reason}")
+        if in_group:
+            try:
+                os.killpg(0, signal.SIGTERM)
+            except OSError:
+                pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    previous = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, stop)
+        except (ValueError, OSError):  # not the main thread
+            pass
+    return previous
+
+
+def _restore_handlers(previous: dict) -> None:
+    import signal
+
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+        except (ValueError, OSError, TypeError):
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover

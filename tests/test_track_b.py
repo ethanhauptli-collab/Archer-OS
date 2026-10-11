@@ -176,3 +176,215 @@ def test_progress_stream_with_graphics_only_moves_forward(footage, tmp_path, mon
     idx = [progress.STAGES.index(s) for s in stages]
     assert idx == sorted(idx) and stages[-1] == "write" and "graphics" in stages
     assert events[-1]["event"] == "done"
+
+
+# ---------------------------------------------------------------- N5: versions, history, stopping honestly
+
+
+def _top_fcpxml(out: Path) -> list[str]:
+    return sorted(p.name for p in out.glob("*.fcpxml"))
+
+
+def test_every_run_is_a_new_version_with_its_own_project_name(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    first = pipeline.build(_opts(footage, out, tmp_path / "c"))
+    assert (first.version, first.project) == (1, "footage - Rough Cut v1 (medium, fake-model)")
+    assert _top_fcpxml(out) == ["footage v1.fcpxml"]
+
+    second = pipeline.rerender(out, Options(inputs=[], style="tight"))
+    assert (second.version, second.project) == (2, "footage - Rough Cut v2 (tight, fake-model)")
+    assert set(check_invariants(second.fcpxml)) == {"footage - Rough Cut v2 (tight, fake-model)", "footage - Stringout v2"}
+    assert _top_fcpxml(out) == ["footage v2.fcpxml"]  # the newest cut is the only one on top
+
+    v1 = next((out / "history").glob("v1 *"))
+    assert {p.name for p in v1.iterdir()} >= {"footage v1.fcpxml", "plan.json", "edit_report.md", "prompt.md"}
+    validate_dtd(v1 / "footage v1.fcpxml")  # still importable, untouched
+    assert "Rough Cut v1 (medium" in (v1 / "footage v1.fcpxml").read_text()
+
+    summary = pipeline.result_summary(second)
+    assert summary["version"] == 2 and summary["project"] == second.project and summary["event"].startswith("footage (")
+    listed = json.loads((out / "versions.json").read_text())["versions"]
+    assert [(v["n"], v["command"], v["style"]) for v in listed] == [(1, "build", "medium"), (2, "render", "tight")]
+
+
+def test_history_keeps_the_last_five_versions(footage, tmp_path):
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--name", "f", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 0
+    for _ in range(6):
+        assert main(["render", str(out)]) == 0
+    kept = sorted(int(p.name.split()[0][1:]) for p in (out / "history").iterdir())
+    assert kept == [2, 3, 4, 5, 6] and _top_fcpxml(out) == ["f v7.fcpxml"]
+    listed = json.loads((out / "versions.json").read_text())["versions"]
+    assert listed[0]["n"] == 1 and listed[0].get("pruned") and "snapshot" not in listed[0]
+
+
+def test_graphics_used_by_a_kept_version_are_never_deleted(tmp_path):
+    from roughcut import versions
+
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    (out / "history" / "v1 2026-10-01 10.00").mkdir(parents=True)
+    for name in ("G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G02-quote-cccccc.mov", "G03-list-dddddd.partial.mov", "G01-stat.html", "G09-old.html"):
+        (out / "graphics" / name).write_bytes(b"x")
+    uri = (out / "graphics").as_uri()
+    (out / "f v2.fcpxml").write_text(f'<media-rep src="{uri}/G01-stat-bbbbbb.mov"/>')
+    (out / "history" / "v1 2026-10-01 10.00" / "f v1.fcpxml").write_text(f'<media-rep src="{uri}/G01-stat-aaaaaa.mov"/>')
+    (out / "graphics.json").write_text(json.dumps({"graphics": [{"id": "G01", "html": "graphics/G01-stat.html"}]}))
+    removed = versions.prune_graphics(out)
+    assert sorted(removed) == ["G02-quote-cccccc.mov", "G03-list-dddddd.partial.mov", "G09-old.html"]
+    assert sorted(p.name for p in (out / "graphics").iterdir()) == ["G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G01-stat.html"]
+
+
+def test_a_failed_write_leaves_the_previous_version_intact(footage, tmp_path, monkeypatch, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
+
+    def broken(*a, **k):
+        raise RuntimeError("report failed")
+
+    monkeypatch.setattr(pipeline, "build_report", broken)
+    with pytest.raises(RuntimeError):
+        pipeline.rerender(out, Options(inputs=[], style="tight"))
+    after = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
+    assert after == before and not (out / "history").exists()
+
+
+def test_atomic_write_never_leaves_a_half_written_file(tmp_path, monkeypatch):
+    import os
+
+    from roughcut.versions import atomic_write
+
+    target = tmp_path / "plan.json"
+    atomic_write(target, "old")
+
+    def fail(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail)
+    with pytest.raises(OSError):
+        atomic_write(target, "new")
+    assert target.read_text() == "old" and [p.name for p in tmp_path.iterdir()] == ["plan.json"]
+
+
+def test_render_works_on_a_folder_from_before_versions(footage, tmp_path, fake):
+    """Output folders written by earlier roughcut releases: one <name>.fcpxml, plan.json without settings."""
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", style="tight"))
+    # Turn it into the old layout by hand.
+    (out / "versions.json").unlink()
+    (out / "footage v1.fcpxml").rename(out / "footage.fcpxml")
+    saved = json.loads((out / "plan.json").read_text())
+    (out / "plan.json").write_text(json.dumps({"name": saved["name"], "plan": saved["plan"], "raw": saved["raw"]}))
+
+    assert main(["render", str(out)]) == 0
+    assert _top_fcpxml(out) == ["footage v2.fcpxml"]
+    old = next((out / "history").glob("v1 *"))
+    assert (old / "footage.fcpxml").is_file() and (old / "plan.json").is_file()
+    projects = check_invariants(out / "footage v2.fcpxml")
+    assert "footage - Rough Cut v2 (medium, fake-model)" in projects  # no saved settings: the defaults
+    validate_dtd(out / "footage v2.fcpxml")
+
+
+def test_a_run_that_never_finished_is_reported_next_time(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    log = out / "roughcut.log"
+    log.write_text(log.read_text() + "2025-01-02 14:02:00  === roughcut build started (output: x)\n2025-01-02 14:02:01  found 5 media files\n")
+    assert main(["render", str(out)]) == 0
+    assert "previous run here (started 2025-01-02 14:02) never finished" in log.read_text()
+    assert pipeline.unfinished_run(log) is None  # the render itself ended with FINISHED
+
+
+def test_open_hands_the_cut_to_final_cut(monkeypatch, tmp_path):
+    import sys
+
+    from roughcut import cli
+
+    calls = []
+
+    def run(cmd, **k):
+        calls.append(cmd)
+        return type("P", (), {"returncode": 1 if "-a" in cmd else 0})()
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    said = cli.open_in_final_cut(tmp_path / "f v2.fcpxml", run=run)
+    assert calls == [["open", "-a", "Final Cut Pro", str(tmp_path / "f v2.fcpxml")], ["open", str(tmp_path / "f v2.fcpxml")]]
+    assert "Opened" in said
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert "only works on a Mac" in cli.open_in_final_cut(tmp_path / "x.fcpxml", run=run)
+
+
+def test_build_open_flag_opens_the_new_cut(footage, tmp_path, monkeypatch, capsys):
+    from roughcut import cli
+
+    opened = []
+    monkeypatch.setattr(cli, "open_in_final_cut", lambda path: opened.append(path) or "Opened in Final Cut Pro.")
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--open"]) == 0
+    assert opened == [out / "footage v1.fcpxml"]
+    printed = capsys.readouterr().out
+    assert "Opened in Final Cut Pro." in printed and 'the project "footage - Rough Cut v1 (medium, no AI)" in the event "footage (' in printed
+
+
+FAKE_SLOW_CLAUDE = r'''#!{python}
+import json, os, sys, time
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai"}}))
+    sys.exit(0)
+open(os.environ["FAKE_CLAUDE_PID"], "w").write(str(os.getpid()))
+time.sleep(120)
+'''
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie nobody reaped yet has stopped running
+        return Path(f"/proc/{pid}/stat").read_text().split(") ")[1][0] != "Z"
+    except OSError:
+        return True
+
+
+def test_cancel_from_the_app_stops_claude_and_logs_it(footage, tmp_path):
+    """The app cancels with SIGTERM; `claude -p` mid-request must not keep running (and billing) on its own."""
+    import os
+    import signal
+    import stat
+    import subprocess
+    import sys
+    import time
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exe = bin_dir / "claude"
+    exe.write_text(FAKE_SLOW_CLAUDE.format(python=sys.executable))
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    pid_file = tmp_path / "claude.pid"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_CLAUDE_PID": str(pid_file)}
+    out = tmp_path / "out"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "roughcut", "build", str(footage), "--provider", "claude-code", "--model", "sonnet", "--no-vision",
+         "--transcriber", "none", "-o", str(out), "--cache-dir", str(tmp_path / "c"), "--progress-json"],
+        cwd=Path(__file__).parents[1], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while not pid_file.exists() or not pid_file.read_text():
+            assert proc.poll() is None and time.monotonic() < deadline, "roughcut never asked Claude Code for a plan"
+            time.sleep(0.1)
+        claude_pid = int(pid_file.read_text())
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=20) == -signal.SIGTERM
+        deadline = time.monotonic() + 10
+        while _alive(claude_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _alive(claude_pid)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert (out / "roughcut.log").read_text().rstrip().endswith("STOPPED: cancelled")

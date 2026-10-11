@@ -89,7 +89,7 @@ def test_build_with_model_plan(footage, tmp_path, fake):
 
     validate_dtd(result.fcpxml)
     projects = check_invariants(result.fcpxml)
-    assert set(projects) == {"footage - Rough Cut", "footage - Stringout"}
+    assert set(projects) == {"footage - Rough Cut v1 (medium, fake-model)", "footage - Stringout v1"}
 
     xml = result.fcpxml.read_text()
     root = ET.fromstring(xml)
@@ -107,7 +107,7 @@ def test_build_with_model_plan(footage, tmp_path, fake):
     # neither covers the "uh".
     s, e, _ = SPEECH[5]
     uh_start = s + 2 * (e - s) / 7
-    rough = projects["footage - Rough Cut"]["spine"]
+    rough = projects["footage - Rough Cut v1 (medium, fake-model)"]["spine"]
     origin = T(talk_asset.get("start"))
     wrap = [el for el in rough if el.get("name") == "talk" and T(el.get("start")) - origin > 15]
     assert len(wrap) == 2
@@ -125,9 +125,9 @@ def test_rerender_changes_style_without_model(footage, tmp_path, fake):
     out = tmp_path / "out"
     pipeline.build(Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=tmp_path / "cache"))
     n_calls = len(fake.calls)
-    medium = check_invariants(next(out.glob("*.fcpxml")))["footage - Rough Cut"]["seconds"]
+    medium = check_invariants(next(out.glob("*.fcpxml")))["footage - Rough Cut v1 (medium, fake-model)"]["seconds"]
     assert main(["render", str(out), "--style", "tight", "--name", "footage"]) == 0
-    tight = check_invariants(next(out.glob("*.fcpxml")))["footage - Rough Cut"]["seconds"]
+    tight = check_invariants(next(out.glob("*.fcpxml")))["footage - Rough Cut v2 (tight, fake-model)"]["seconds"]
     assert tight < medium
     assert len(fake.calls) == n_calls
 
@@ -139,7 +139,7 @@ def test_silence_only_mode_via_cli(footage, tmp_path):
     fcpxml = next(out.glob("*.fcpxml"))
     validate_dtd(fcpxml)
     projects = check_invariants(fcpxml)
-    rough = projects["footage - Rough Cut"]
+    rough = projects["footage - Rough Cut v1 (medium, vertical, no AI)"]
     # 20s talk clip with ~12s of sound: dead air is gone.
     assert 10 < rough["seconds"] < 17
     root = ET.parse(fcpxml).getroot()

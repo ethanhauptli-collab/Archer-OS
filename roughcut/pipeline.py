@@ -7,7 +7,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import progress
@@ -20,7 +20,8 @@ from .providers import Provider, ProviderAuthError, ProviderError, TextPart, mak
 from .report import build_report
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
-from .versions import atomic_write
+from . import versions
+from .versions import atomic_write, planner_label, safe_name
 
 
 @dataclass
@@ -71,10 +72,16 @@ class Result:
     fell_back: bool = False
     warnings: list[str] = field(default_factory=list)
     dead_air: tuple[float, float] | None = None  # (talking footage, stringout) seconds
+    version: int = 0  # this cut's number in the output folder (versions.py)
+    project: str = ""  # the Rough Cut project's name in Final Cut
+    event: str = ""  # the event it's imported into
 
 
 def result_summary(result: Result) -> dict:
-    """What the Mac app shows when a run finishes (the `done` event payload)."""
+    """What the Mac app shows when a run finishes (the `done` event payload).
+
+    Keys may be added, never removed or renamed: the app decodes this.
+    """
     tl = result.timeline
     return {
         "title": result.plan.title,
@@ -89,6 +96,9 @@ def result_summary(result: Result) -> dict:
         "planned_by": result.plan.source,
         "fell_back": result.fell_back,
         "warnings": result.warnings,
+        "version": result.version,
+        "project": result.project,
+        "event": result.event,
     }
 
 
@@ -251,26 +261,62 @@ def write_outputs(
     stringout: Timeline | None,
     report_kwargs: dict,
     *,
+    version: int,
+    command: str = "build",
+    entry: dict | None = None,
     quiet: bool = False,
 ) -> tuple[Path, Path]:
-    """Write the FCPXML, plan.json and the paper edit.
+    """Write version `version`: the FCPXML, plan.json and the paper edit.
 
-    `quiet` writes an interim cut (before graphics) without a `write` stage
-    event: the app ticks stages off in order and `write` comes last.
-    Everything is built in memory first, so an error leaves the old files.
+    The previous version's files are copied into history/ first. `quiet`
+    writes an interim cut (before graphics) without a `write` stage event:
+    the app ticks stages off in order and `write` comes last. Everything is
+    built in memory before the first file changes, so an error leaves the
+    previous version as it was.
     """
     if not quiet:
         progress.stage("write", "Writing the Final Cut file")
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
-    xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
+    event = event_name(name)
+    xml = build_fcpxml(timelines, analysis, event_name=event)
     report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fcpxml_path = out_dir / f"{slug(name)}.fcpxml"
+    versions.snapshot(out_dir, before=version)
+    fcpxml_path = out_dir / f"{slug(name)} v{version}.fcpxml"
     atomic_write(fcpxml_path, xml)
-    atomic_write(out_dir / "plan.json", json.dumps(record, indent=1))
+    atomic_write(out_dir / "plan.json", json.dumps({**record, "version": version}, indent=1))
     report_path = out_dir / "edit_report.md"
     atomic_write(report_path, report)
+    versions.record(
+        out_dir,
+        {
+            "n": version,
+            "command": command,
+            "fcpxml": fcpxml_path.name,
+            "project": rough.name,
+            "stringout_project": stringout.name if stringout is not None and stringout.spine else None,
+            "event": event,
+            "rough_seconds": round(rough.seconds, 3),
+            "planned_by": plan.source,
+            **(entry or {}),
+            **({"partial": True} if quiet else {}),
+        },
+    )
+    versions.finish(out_dir, version, prune=not quiet)
     return fcpxml_path, report_path
+
+
+def event_name(name: str) -> str:
+    return f"{safe_name(name)} ({date.today().isoformat()})"
+
+
+def name_timelines(rough: Timeline, stringout: Timeline | None, name: str, version: int, style: str, source: str) -> None:
+    """'OCVIBE - Rough Cut v3 (tight, Opus)': every version is its own project in Final Cut."""
+    base = safe_name(name)
+    shape = ", vertical" if rough.height > rough.width else ", square" if rough.height == rough.width else ""
+    rough.name = f"{base} - Rough Cut v{version} ({style}{shape}, {planner_label(source)})"
+    if stringout is not None:
+        stringout.name = f"{base} - Stringout v{version}"
 
 
 def start_log(out_dir: Path, command: str) -> None:
@@ -278,8 +324,30 @@ def start_log(out_dir: Path, command: str) -> None:
     from .analyze import log_to
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    unfinished = unfinished_run(out_dir / "roughcut.log")
     log_to(out_dir / "roughcut.log")
     log(f"=== roughcut {command} started (output: {out_dir})")
+    if unfinished:
+        log(f"Note: the previous run here (started {unfinished}) never finished (it was killed, or the Mac slept or shut down); anything it hadn't written yet is still from the run before.")
+
+
+def unfinished_run(log_path: Path) -> str | None:
+    """When the last run in roughcut.log started but never logged FINISHED or STOPPED: its start time."""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for i in range(len(lines) - 1, -1, -1):
+        if "=== roughcut " in lines[i] and " started" in lines[i]:
+            if any(("FINISHED" in ln or "STOPPED" in ln) for ln in lines[i + 1 :]):
+                return None
+            stamp = lines[i][:19]
+            try:
+                when = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return "earlier"
+            return when.strftime("%H:%M") if when.date() == date.today() else when.strftime("%Y-%m-%d %H:%M")
+    return None
 
 
 def build(opts: Options) -> Result:
@@ -360,29 +428,34 @@ def build(opts: Options) -> Result:
     # Save what the model was paid for before anything else can fail. Nothing
     # before this point touches the output folder's earlier files, so a run
     # that stops early leaves the previous cut (and `render`) working.
+    version = versions.next_number(out_dir)
+    versions.snapshot(out_dir, before=version)  # the previous version's plan and designs, into history/
     record = plan_record(name, plan, raw_plan, analysis, run_settings(opts, provider))
     save_checkpoint(out_dir, analysis, prompt, record)
     # Graphics belong to the cut they were made for: a new build makes its own or none.
-    stale = out_dir / "graphics.json"
-    if stale.is_file():
-        stale.replace(out_dir / "graphics.previous.json")
+    (out_dir / "graphics.json").unlink(missing_ok=True)
     try:
-        return _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start)
+        return _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version)
     except BaseException as e:
         _mark_plan_saved(e, out_dir)
         raise
 
 
-def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start) -> Result:
+def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version) -> Result:
     rough, stringout = make_timelines(plan, analysis, opts, name)
+    name_timelines(rough, stringout, name, version, opts.style, plan.source)
+    entry = {"style": opts.style, "planner": planner_label(plan.source)}
     placed, with_graphics = [], analysis
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
             from . import graphics
 
             # A complete cut without graphics first: if rendering stops, there's still a cut to open.
-            pending = ["Motion graphics were still being made when this cut was written. If the run stopped, `roughcut render` adds the ones that finished."]
-            write_outputs(out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending), quiet=True)
+            pending = ["Motion graphics were still being made when this cut was written; if the run stopped there, this cut has none. `roughcut render` adds any whose designs were saved."]
+            write_outputs(
+                out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending),
+                version=version, entry=entry, quiet=True,
+            )
             t = time.monotonic()
             g_clips, placed, g_warnings = graphics.make(
                 provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
@@ -404,9 +477,14 @@ def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_ba
         rough,
         stringout,
         dict(usage=usage, timings=timings, extra_warnings=extra_warnings, graphics=placed),
+        version=version,
+        entry=entry,
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout))
+    return Result(
+        out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
+        version=version, project=rough.name, event=event_name(name),
+    )
 
 
 def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None) -> Result:
@@ -435,7 +513,9 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     # The next render starts from this one's settings.
     record = {**saved, "name": name, "settings": {**settings, **{f: getattr(opts, f) for f in RENDER_FIELDS}}}
+    version = versions.next_number(out_dir)
     rough, stringout = make_timelines(plan, analysis, opts, name)
+    name_timelines(rough, stringout, name, version, opts.style, plan.source)
     graphics_warnings: list[str] = []
     placed, with_graphics = [], analysis
     if (out_dir / "graphics.json").is_file():
@@ -450,6 +530,12 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
             g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
-    fcpxml_path, report_path = write_outputs(out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings})
+    fcpxml_path, report_path = write_outputs(
+        out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings},
+        version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
+    )
     warnings = plan.warnings + rough.warnings + graphics_warnings
-    return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout))
+    return Result(
+        out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
+        version=version, project=rough.name, event=event_name(name),
+    )

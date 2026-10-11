@@ -369,15 +369,16 @@ def render(placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: 
     folder.mkdir(parents=True, exist_ok=True)
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
-    old = {g["id"]: g for g in _read_manifest(folder.parent).get("graphics", [])}
     jobs, done = [], {}
     for g in placed:
         if g.id not in html:
             continue
         digest = _digest(html[g.id], g.frames, rate, tl.width, tl.height)
-        out = folder / f"{g.slug}.mov"
+        # The digest is in the name: a changed graphic is a new file, so a cut
+        # already imported into Final Cut keeps the clip it was made with.
+        out = folder / f"{g.slug}-{digest[:6]}.mov"
         (folder / f"{g.slug}.html").write_text(html[g.id], encoding="utf-8")
-        if out.exists() and old.get(g.id, {}).get("digest") == digest:
+        if out.exists():
             done[g.id] = out
             continue
         jobs.append(
@@ -448,7 +449,9 @@ def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, 
         if g.id in files:
             entry["file"] = f"graphics/{files[g.id].name}"
         entries.append(entry)
-    (out_dir / MANIFEST).write_text(json.dumps({"style": style, "graphics": entries}, indent=1))
+    from .versions import atomic_write
+
+    atomic_write(out_dir / MANIFEST, json.dumps({"style": style, "graphics": entries}, indent=1))
 
 
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
