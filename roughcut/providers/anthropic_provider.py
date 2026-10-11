@@ -8,6 +8,7 @@ import os
 import re
 import time
 
+from .. import progress
 from .base import ImagePart, Part, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -226,7 +227,7 @@ class AnthropicProvider:
 
         t0 = time.monotonic()
         try:
-            with self.client.beta.messages.stream(**params) as stream:
+            with progress.doing(f"waiting for {self.model} ({purpose})"), self.client.beta.messages.stream(**params) as stream:
                 message = stream.get_final_message()
         except TypeError as e:  # the SDK found no credentials at all
             if "authentication" not in str(e).lower():

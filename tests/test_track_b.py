@@ -763,3 +763,37 @@ def test_a_used_up_plan_during_revise_changes_nothing(footage, tmp_path, monkeyp
     with pytest.raises(ProviderLimitError, match="Nothing changed: v1 is still the latest cut. Run the same revise again after the reset."):
         pipeline.revise(out, "Tighter.", Options(inputs=[]))
     assert _top_fcpxml(out) == ["footage v1.fcpxml"]
+
+
+# ---------------------------------------------------------------- T5: heartbeat and stall dump
+
+
+def test_a_long_step_says_it_is_still_working_and_a_stall_leaves_a_stack(footage, tmp_path, monkeypatch, capsys):
+    import time
+
+    class SlowPlanner(FakeProvider):
+        def complete_json(self, *a, **k):
+            if k.get("schema_name") == "edit_plan":
+                time.sleep(1.6)
+            return super().complete_json(*a, **k)
+
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: SlowPlanner())
+    monkeypatch.setattr(progress, "HEARTBEAT_SECONDS", 0.3)
+    monkeypatch.setattr(progress, "STALL_SECONDS", 0.9)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--progress-json"]) == 0
+    log = (out / "roughcut.log").read_text()
+    assert "still working (" in log and "): planning the edit with fake-model" in log
+    assert "most recent call first" in log and "in complete_json" in log  # exactly where it was waiting
+    assert "nothing has moved for" in log
+    events = _events(capsys.readouterr().out)
+    assert any(e["event"] == "log" and e["message"].startswith("still working") for e in events)  # the app sees it too
+    assert not progress._watch  # stopped with the run: no heartbeat or dump afterwards
+
+
+def test_the_heartbeat_names_the_innermost_step():
+    with progress.doing("planning the edit with opus"):
+        with progress.doing("waiting for claude-opus-5-5 (edit plan)"):
+            assert progress.current_activity()[0] == "waiting for claude-opus-5-5 (edit plan)"
+        assert progress.current_activity()[0] == "planning the edit with opus"
+    assert progress._elapsed(370) == "6m10s" and progress._elapsed(42) == "42s"

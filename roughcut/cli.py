@@ -341,6 +341,7 @@ def resume_hint(e: BaseException) -> str | None:
 def _log_end(line: str) -> None:
     from .analyze import log_file_only, log_to
 
+    progress.stop_watch()
     log_file_only(line)
     log_to(None)
 

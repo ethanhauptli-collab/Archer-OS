@@ -388,6 +388,7 @@ def start_log(out_dir: Path, command: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     unfinished = unfinished_run(out_dir / "roughcut.log")
     log_to(out_dir / "roughcut.log")
+    progress.start_watch(out_dir / "roughcut.log")  # heartbeat, and a stack dump there if it ever stalls
     log(f"=== roughcut {command} started (output: {out_dir})")
     if unfinished:
         log(f"Note: the previous run here (started {unfinished}) never finished (it was killed, or the Mac slept or shut down); anything it hadn't written yet is still from the run before.")
@@ -456,7 +457,8 @@ def build(opts: Options) -> Result:
             t = time.monotonic()
             cache = Cache(opts.cache_dir or default_cache_dir())
             try:
-                extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
+                with progress.doing(f"describing clips visually with {vision_provider.model}"):
+                    extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
             except ProviderLimitError as e:
                 raise limit_stop(e, analysis) from e
             timings["visual log"] = time.monotonic() - t
@@ -476,7 +478,8 @@ def build(opts: Options) -> Result:
         progress.stage("plan", f"Planning the edit with {provider.model}")
         log(f"planning the edit with {provider.name}:{provider.model}")
         try:
-            plan, raw_plan = plan_with_model(provider, analysis, opts)
+            with progress.doing(f"planning the edit with {provider.model}"):
+                plan, raw_plan = plan_with_model(provider, analysis, opts)
         except ProviderAuthError:
             raise
         except ProviderLimitError as e:  # not a stringout that looks like a finished cut
@@ -536,15 +539,16 @@ def _finish_build(
                 version=version, command=command, entry=entry, quiet=True,
             )
             t = time.monotonic()
-            if carry is not None:
-                saved_html = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
-                g_clips, placed, g_warnings = graphics.make(
-                    None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers, saved_html=saved_html
-                )
-            else:
-                g_clips, placed, g_warnings = graphics.make(
-                    provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
-                )
+            with progress.doing(f"making {len(plan.graphics)} motion graphics (design, then render)"):
+                if carry is not None:
+                    saved_html = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
+                    g_clips, placed, g_warnings = graphics.make(
+                        None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers, saved_html=saved_html
+                    )
+                else:
+                    g_clips, placed, g_warnings = graphics.make(
+                        provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
+                    )
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
             timings["graphics"] = time.monotonic() - t
@@ -615,7 +619,8 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         else:
             specs, html, style = graphics.saved_designs(out_dir)
             planned_graphics = sum(1 for g in specs if g.text)
-            g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
+            with progress.doing("rendering the saved motion graphics"):
+                g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
     fcpxml_path, report_path = write_outputs(
@@ -769,10 +774,11 @@ def revise(
     progress.stage("plan", f"Revising the edit with {p.model}")
     log(f"revising the edit with {p.name}:{p.model}: {notes.strip()[:200]}")
     try:
-        raw = p.complete_json(
-            PLANNER_SYSTEM, [media_part(analysis), TextPart(request)], plan_schema(opts.graphics),
-            schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
-        )
+        with progress.doing(f"revising the edit with {p.model}"):
+            raw = p.complete_json(
+                PLANNER_SYSTEM, [media_part(analysis), TextPart(request)], plan_schema(opts.graphics),
+                schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
+            )
     except ProviderAuthError:
         raise
     except ProviderError as e:
