@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -19,6 +20,7 @@ from .providers import Provider, ProviderAuthError, ProviderError, TextPart, mak
 from .report import build_report
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
+from .versions import atomic_write
 
 
 @dataclass
@@ -88,6 +90,79 @@ def result_summary(result: Result) -> dict:
         "fell_back": result.fell_back,
         "warnings": result.warnings,
     }
+
+
+# Cut settings `roughcut render` takes from the saved run unless a flag overrides them.
+RENDER_FIELDS = ("style", "format", "keep_fillers", "broll_db", "music_db", "fill", "stringout")
+
+
+def run_settings(opts: Options, provider: Provider | None = None) -> dict:
+    """Everything needed to re-cut (render) or re-plan (revise) this run later, saved in plan.json."""
+    return {
+        **{f: getattr(opts, f) for f in RENDER_FIELDS},
+        "context": opts.context,
+        "target_seconds": opts.target_seconds,
+        "script": opts.script,
+        "graphics": opts.graphics,
+        "graphics_style": opts.graphics_style,
+        "provider": opts.provider,
+        "model": provider.model if provider is not None else opts.model,
+        "vision_model": opts.vision_model,
+        "effort": opts.effort,
+        "base_url": opts.base_url,
+        "api_key_env": opts.api_key_env,
+    }
+
+
+def render_options(opts: Options, settings: dict, overrides: set[str] | None = None) -> Options:
+    """The saved run's cut settings, except the ones given now.
+
+    `overrides` names the settings given on the command line. Without it,
+    any setting that differs from the default counts as given.
+    """
+    if overrides is None:
+        default = Options(inputs=[])
+        overrides = {f for f in RENDER_FIELDS if getattr(opts, f) != getattr(default, f)}
+    saved = {f: settings[f] for f in RENDER_FIELDS if f in settings and f not in overrides}
+    if saved.get("style") not in STYLES:
+        saved.pop("style", None)
+    return replace(opts, **saved)
+
+
+def analysis_digest(analysis: Analysis) -> str:
+    """Which clips, in which order: segment IDs only mean the same thing for the same digest."""
+    h = hashlib.sha1()
+    for c in analysis.clips:
+        h.update(f"{c.id}|{c.media.fingerprint}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def plan_record(name: str, plan: Plan, raw_plan: dict | None, analysis: Analysis, settings: dict | None) -> dict:
+    record = {"name": name, "plan": plan.to_json(), "raw": raw_plan, "analysis_digest": analysis_digest(analysis)}
+    if settings is not None:
+        record["settings"] = settings
+    return record
+
+
+def save_checkpoint(out_dir: Path, analysis: Analysis, prompt: str, record: dict) -> None:
+    """The paid-for part of a run, saved before anything that can still fail (cutting, graphics).
+
+    From here on `roughcut render` can finish the cut without calling the model again.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write(out_dir / "analysis.json", json.dumps(analysis.to_json(), indent=1))
+    atomic_write(out_dir / "prompt.md", prompt)
+    atomic_write(out_dir / "plan.json", json.dumps(record, indent=1))
+    if record.get("raw"):
+        log("plan saved: `roughcut render` can finish this cut without calling the model again")
+
+
+def _mark_plan_saved(e: BaseException, out_dir: Path) -> None:
+    """Tell the CLI the plan survived, so it can print how to finish the cut."""
+    try:
+        e.plan_saved = out_dir  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - some exception types refuse attributes
+        pass
 
 
 def slug(text: str) -> str:
@@ -166,16 +241,35 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
     return rough, stringout
 
 
-def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, analysis: Analysis, rough: Timeline, stringout: Timeline | None, report_kwargs: dict) -> tuple[Path, Path]:
-    progress.stage("write", "Writing the Final Cut file")
-    out_dir.mkdir(parents=True, exist_ok=True)
+def write_outputs(
+    out_dir: Path,
+    name: str,
+    record: dict,
+    plan: Plan,
+    analysis: Analysis,
+    rough: Timeline,
+    stringout: Timeline | None,
+    report_kwargs: dict,
+    *,
+    quiet: bool = False,
+) -> tuple[Path, Path]:
+    """Write the FCPXML, plan.json and the paper edit.
+
+    `quiet` writes an interim cut (before graphics) without a `write` stage
+    event: the app ticks stages off in order and `write` comes last.
+    Everything is built in memory first, so an error leaves the old files.
+    """
+    if not quiet:
+        progress.stage("write", "Writing the Final Cut file")
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
     xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
+    report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
+    out_dir.mkdir(parents=True, exist_ok=True)
     fcpxml_path = out_dir / f"{slug(name)}.fcpxml"
-    fcpxml_path.write_text(xml, encoding="utf-8")
-    (out_dir / "plan.json").write_text(json.dumps({"name": name, "plan": plan.to_json(), "raw": raw_plan}, indent=1))
+    atomic_write(fcpxml_path, xml)
+    atomic_write(out_dir / "plan.json", json.dumps(record, indent=1))
     report_path = out_dir / "edit_report.md"
-    report_path.write_text(build_report(plan, rough, analysis, stringout=stringout, **report_kwargs), encoding="utf-8")
+    atomic_write(report_path, report)
     return fcpxml_path, report_path
 
 
@@ -213,8 +307,6 @@ def build(opts: Options) -> Result:
 
     analysis = run_analysis(opts, out_dir)
     timings["analysis"] = time.monotonic() - t_start
-    out_dir.mkdir(parents=True, exist_ok=True)
-    analysis.save(out_dir / "analysis.json")
 
     usage = []
     extra_warnings: list[str] = []
@@ -233,9 +325,8 @@ def build(opts: Options) -> Result:
             cache = Cache(opts.cache_dir or default_cache_dir())
             extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
             timings["visual log"] = time.monotonic() - t
-            analysis.save(out_dir / "analysis.json")
 
-    (out_dir / "prompt.md").write_text(
+    prompt = (
         "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n"
         + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)
     )
@@ -266,12 +357,32 @@ def build(opts: Options) -> Result:
     if not plan.sections:
         raise RoughcutError("Nothing to cut: no speech or visual clips were found.")
 
+    # Save what the model was paid for before anything else can fail. Nothing
+    # before this point touches the output folder's earlier files, so a run
+    # that stops early leaves the previous cut (and `render`) working.
+    record = plan_record(name, plan, raw_plan, analysis, run_settings(opts, provider))
+    save_checkpoint(out_dir, analysis, prompt, record)
+    # Graphics belong to the cut they were made for: a new build makes its own or none.
+    stale = out_dir / "graphics.json"
+    if stale.is_file():
+        stale.replace(out_dir / "graphics.previous.json")
+    try:
+        return _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start)
+    except BaseException as e:
+        _mark_plan_saved(e, out_dir)
+        raise
+
+
+def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start) -> Result:
     rough, stringout = make_timelines(plan, analysis, opts, name)
     placed, with_graphics = [], analysis
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
             from . import graphics
 
+            # A complete cut without graphics first: if rendering stops, there's still a cut to open.
+            pending = ["Motion graphics were still being made when this cut was written. If the run stopped, `roughcut render` adds the ones that finished."]
+            write_outputs(out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending), quiet=True)
             t = time.monotonic()
             g_clips, placed, g_warnings = graphics.make(
                 provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
@@ -281,12 +392,14 @@ def build(opts: Options) -> Result:
             timings["graphics"] = time.monotonic() - t
         else:
             extra_warnings.append("Motion graphics were on, but the plan didn't ask for any.")
+    elif opts.graphics and fell_back:
+        extra_warnings.append("Motion graphics were on, but AI planning failed, so this cut has none.")
     timings["total"] = time.monotonic() - t_start
     fcpxml_path, report_path = write_outputs(
         out_dir,
         name,
+        record,
         plan,
-        raw_plan,
         with_graphics,
         rough,
         stringout,
@@ -296,18 +409,32 @@ def build(opts: Options) -> Result:
     return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout))
 
 
-def rerender(out_dir: Path, opts: Options) -> Result:
-    """Rebuild the FCPXML from a saved analysis + plan (no model calls)."""
+def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None) -> Result:
+    """Rebuild the FCPXML from a saved analysis + plan (no model calls).
+
+    Cut settings (style, format, fillers, levels...) come from the saved run
+    unless `overrides` (or, without it, a non-default value in `opts`) says otherwise.
+    """
     if not (out_dir / "analysis.json").is_file() or not (out_dir / "plan.json").is_file():
         raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
     start_log(out_dir, "render")
     analysis = Analysis.load(out_dir / "analysis.json")
     saved = json.loads((out_dir / "plan.json").read_text())
+    digest = saved.get("analysis_digest")
+    if digest and digest != analysis_digest(analysis):
+        raise RoughcutError(
+            "plan.json was made for a different set of clips than analysis.json (the footage changed since it was planned), "
+            "so its segment IDs would point at the wrong clips. Run `roughcut build` again."
+        )
+    settings = saved.get("settings") or {}
+    opts = render_options(opts, settings, overrides)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
+    # The next render starts from this one's settings.
+    record = {**saved, "name": name, "settings": {**settings, **{f: getattr(opts, f) for f in RENDER_FIELDS}}}
     rough, stringout = make_timelines(plan, analysis, opts, name)
     graphics_warnings: list[str] = []
     placed, with_graphics = [], analysis
@@ -323,6 +450,6 @@ def rerender(out_dir: Path, opts: Options) -> Result:
             g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
-    fcpxml_path, report_path = write_outputs(out_dir, name, plan, saved.get("raw"), with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings})
+    fcpxml_path, report_path = write_outputs(out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings})
     warnings = plan.warnings + rough.warnings + graphics_warnings
     return Result(out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout))

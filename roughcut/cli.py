@@ -21,14 +21,15 @@ def _read(path: str | None) -> str:
 
 
 def _add_render_args(p: argparse.ArgumentParser) -> None:
-    g = p.add_argument_group("cut style")
-    g.add_argument("--style", choices=["tight", "medium", "loose"], default="medium", help="how aggressively pauses are trimmed (default: medium)")
-    g.add_argument("--keep-fillers", action="store_true", help="don't cut um/uh")
+    # Defaults are None so `render` can tell "not given" (keep the saved run's setting) from a choice.
+    g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
+    g.add_argument("--style", choices=["tight", "medium", "loose"], help="how aggressively pauses are trimmed (default: medium)")
+    g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, or WxH@fps (default: from the footage)")
-    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll audio level in dB (default: -20)")
-    g.add_argument("--music-db", type=float, default=-14.0, help="music level in dB (default: -14)")
-    g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
-    g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
+    g.add_argument("--broll-db", type=float, help="B-roll audio level in dB (default: -20)")
+    g.add_argument("--music-db", type=float, help="music level in dB (default: -14)")
+    g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
+    g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
     p.add_argument("--name", help="project/event name (default: folder name)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
 
@@ -301,6 +302,19 @@ def _print_doctor(r: dict) -> int:
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
 
 
+def resume_command(e: BaseException) -> str | None:
+    """`roughcut render '<out_dir>'` when the run stopped after its plan was saved."""
+    out_dir = getattr(e, "plan_saved", None)
+    return f"roughcut render {shlex.quote(str(out_dir))}" if out_dir else None
+
+
+def resume_hint(e: BaseException) -> str | None:
+    command = resume_command(e)
+    if not command:
+        return None
+    return f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}"
+
+
 def _log_end(line: str) -> None:
     from .analyze import log_file_only, log_to
 
@@ -330,19 +344,24 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = bool(args.progress_json)
     progress.enable(json_mode)
 
-    common = dict(
-        name=args.name,
-        style=args.style,
-        keep_fillers=args.keep_fillers,
-        format=args.format,
-        broll_db=args.broll_db,
-        music_db=args.music_db,
-        stringout=not args.no_stringout,
-        fill=not args.no_fill,
-    )
+    # Only the cut settings given on the command line; the rest are defaults (build) or the saved run's (render).
+    given = {
+        k: v
+        for k, v in dict(
+            style=args.style,
+            keep_fillers=args.keep_fillers,
+            format=args.format,
+            broll_db=args.broll_db,
+            music_db=args.music_db,
+            stringout=args.stringout,
+            fill=args.fill,
+        ).items()
+        if v is not None
+    }
+    common = dict(name=args.name, **given)
     try:
         if args.command == "render":
-            result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common))
+            result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common), overrides=set(given))
         else:
             if args.provider in ("anthropic", "claude-code"):
                 from .providers.anthropic_provider import resolve_model
@@ -378,18 +397,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = build(opts)
     except (ProviderError, ValueError, RuntimeError, OSError) as e:
+        hint = resume_hint(e)
         print(f"roughcut: {e}", file=sys.stderr)
-        progress.emit("error", message=str(e))
-        _log_end(f"STOPPED: {e}")
+        if hint:
+            print(hint, file=sys.stderr)
+        progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}))
+        _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
         return 1
-    except KeyboardInterrupt:
-        _log_end("STOPPED: interrupted (Ctrl-C)")
+    except KeyboardInterrupt as e:
+        hint = resume_hint(e)
+        if hint:
+            print(f"\n{hint}", file=sys.stderr)
+        _log_end("STOPPED: interrupted (Ctrl-C)" + (f"\n{hint}" if hint else ""))
         raise
     except Exception as e:  # a bug: tell the app, then show the traceback
         progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}")
         import traceback
 
-        _log_end("STOPPED by a bug:\n" + traceback.format_exc())
+        hint = resume_hint(e)
+        if hint:
+            print(hint, file=sys.stderr)
+        _log_end("STOPPED by a bug:\n" + traceback.format_exc() + (f"\n{hint}" if hint else ""))
         raise
     _log_end(f"FINISHED: {result.fcpxml.name} and {result.report.name} written")
 
