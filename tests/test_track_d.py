@@ -583,3 +583,131 @@ def test_music_flag_end_to_end(footage, tmp_path):
     assert "Sunrise Theme.m4a (--music) runs under the whole cut" in report
 
     assert main(["build", str(footage), "-o", str(tmp_path / "o2"), "--provider", "none", "--music", str(footage / "photo.png")]) == 1
+
+
+# ------------------------------------------------------------------- fuzzing
+
+
+def _script(rng, n: int, length: float, words: list[str]) -> list[tuple[float, float, str]]:
+    out, t = [], rng.uniform(0.3, 1.5)
+    for _ in range(n):
+        dur = rng.uniform(0.8, 5.0)
+        if t + dur > length - 0.5:
+            break
+        text = " ".join(rng.choice(words) for _ in range(max(2, int(dur * 2.5)))).capitalize() + "."
+        out.append((round(t, 3), round(t + dur, 3), text))
+        t += dur + rng.choice([0.1, 0.3, 0.6, 1.2, 2.5])
+    return out
+
+
+def _silences(script, length):
+    gaps, cursor = [], 0.0
+    for s, e, _ in script:
+        if s - cursor > 0.35:
+            gaps.append((cursor, s))
+        cursor = e
+    if length - cursor > 0.35:
+        gaps.append((cursor, length))
+    return gaps
+
+
+def fuzz_one(seed: int, tmp) -> None:
+    """One random project through build_timeline and build_fcpxml, checked end to end."""
+    import random
+
+    from roughcut.plan import heuristic_plan
+
+    rng = random.Random(seed)
+    vocab = "boat garage winter harbor ferry bakery trail summit coffee morning kids family river bridge light".split()
+    clips = []
+    talk_script = _script(rng, 8, 60, vocab)
+    clips.append(make_clip("V01", seconds=60, sentences=talk_script, silences=_silences(talk_script, 60)))
+    vo_script = _script(rng, 6, 40, vocab)
+    clips.append(make_clip("A01", kind="audio", seconds=40, sentences=vo_script, role="voiceover", silences=_silences(vo_script, 40)))
+    take = [(s + 0.4, e + 0.4, text) for s, e, text in vo_script]
+    a02 = make_clip("A02", kind="audio", seconds=41, sentences=take, role="voiceover")
+    a02.take_of, a02.same_words = "A01", 0.95
+    clips.append(a02)
+    clips.append(make_clip("V02", seconds=rng.choice([3, 20])))
+    silent = make_clip("V03", seconds=8)
+    silent.media.has_audio = False
+    clips += [silent, make_clip("I01", kind="image"), make_clip("I02", kind="image")]
+    song_len = rng.choice([4.0, 30.0, 120.0])
+    song = make_clip("M01", kind="audio", seconds=song_len, role="music")
+    song.sound_end = rng.choice([None, song_len, song_len - 3.0])
+    song.music_bed = rng.random() < 0.3
+    clips.append(song)
+    for c in clips:
+        if c.media.has_audio and rng.random() < 0.8:
+            c.loudness = rng.uniform(-40, -6)
+            c.loudness_floor = c.loudness - rng.uniform(5, 50)
+            c.peak_db = min(0.0, c.loudness + rng.uniform(5, 20))
+    a = Analysis(clips=clips)
+
+    segs = [s.id for c in clips for s in c.segments]
+    ranges = ["V02@0.5-2.5", "I01@0-3", "I02@0-2", "V03@1-5", "V01@10-13", "A01@2-6"]
+    sections = []
+    for k in range(rng.randint(1, 4)):
+        items = rng.sample(segs, rng.randint(1, min(5, len(segs)))) + rng.sample(ranges, rng.randint(0, 2))
+        rng.shuffle(items)
+        seg_items = [i for i in items if "." in i]
+        broll = []
+        if seg_items and rng.random() < 0.7:
+            over = seg_items[: rng.randint(1, len(seg_items))]
+            for clip_id in rng.sample(["V02", "V03", "I01", "I02", "V01"], rng.randint(1, 3)):
+                broll.append({"clip": clip_id, "over": over, "source_in": rng.choice([-1, 0, 2.5]), "reason": rng.choice(["auto-fill", "cover the jump", "shows \x07 the boat"])})
+        sections.append({"name": f"S{k}", "items": items, "broll": broll})
+    music = []
+    if rng.random() < 0.7:
+        first = rng.randrange(len(sections))
+        music.append({"clip": "M01", "first_section": first, "last_section": rng.randrange(first, len(sections)), "source_in": rng.choice([0, 7.5, 500])})
+    alternates = [{"chosen": rng.choice(segs), "others": rng.sample(segs, 2), "note": "x"}]
+    plan = normalize({"title": "fuzz", "sections": sections, "music": music, "alternates": alternates}, a)
+    if not plan.sections:
+        return
+    style = STYLES[rng.choice(list(STYLES))]
+    kw = dict(
+        style=style,
+        dialogue_level=rng.choice([None, -16.0, -23.0]),
+        fades=rng.random() < 0.8,
+        broll_db=rng.choice([None, -20.0, -10.0]),
+        music_db=rng.choice([-14.0, -20.0]),
+        format_override=rng.choice([None, "1080p@23.98", "vertical@25"]),
+    )
+    tl = build_timeline(plan, a, name="fuzz - Rough Cut", **kw)
+    timelines = [tl]
+    s_plan = heuristic_plan(a)
+    if s_plan.sections:
+        timelines.append(build_timeline(s_plan, a, name="fuzz - Stringout", music_beds=False, **kw))
+    path = tmp / f"fuzz-{seed}.fcpxml"
+    path.write_text(build_fcpxml(timelines, a, event_name="fuzz", alternates=plan.alternates))
+    validate_dtd(path)
+    check_invariants(path)
+
+    fd = tl.frame_duration
+    for t_ in timelines:
+        for sc in t_.spine:
+            length = sc.frames * t_.frame_duration
+            assert sc.fade_in + sc.fade_out <= length
+            if sc.wa is not None and sc.fade_in:
+                assert sc.src_in + sc.fade_in <= Fraction(sc.wa).limit_denominator(1000000), "fade-in reaches a word"
+            if sc.wb is not None and sc.fade_out:
+                assert sc.src_in + length - sc.fade_out >= Fraction(sc.wb).limit_denominator(1000000), "fade-out reaches a word"
+        for cc in t_.connected:
+            assert cc.fade_in + cc.fade_out <= cc.frames * fd
+            frames = [k for k, _ in cc.keyframes]
+            assert frames == sorted(set(frames)) and all(0 <= k <= cc.frames for k in frames)
+    root = ET.parse(path).getroot()
+    for el in root.iter("asset-clip"):
+        adjust = el.find("adjust-volume")
+        if adjust is None:
+            continue
+        start, dur = T(el.get("start", "0s")), T(el.get("duration"))
+        fades = [T(f.get("duration")) for f in adjust.iter() if f.tag in ("fadeIn", "fadeOut")]
+        assert sum(fades, Fraction(0)) <= dur and all((f * 48000).denominator == 1 for f in fades)
+        assert all(start <= T(k.get("time")) <= start + dur for k in adjust.iter("keyframe"))
+
+
+def test_fuzz_audio_and_fcp_details(tmp_path):
+    for seed in range(30):
+        fuzz_one(seed, tmp_path)

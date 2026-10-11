@@ -17,7 +17,7 @@ from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
 from .report import build_report
-from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
+from .timeline import DIALOGUE_LEVEL, STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
 
 
@@ -46,7 +46,7 @@ class Options:
     format: str | None = None
     broll_db: float | None = -20.0
     music_db: float = -14.0
-    dialogue_level: float | None = -16.0  # LUFS speech is matched to; None = clip levels as recorded
+    dialogue_level: float | None = DIALOGUE_LEVEL  # LUFS speech is matched to; None = clip levels as recorded
     fades: bool = True  # de-click fades at audio edits, soft fades on B-roll nat sound
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture

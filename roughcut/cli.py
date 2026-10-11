@@ -35,6 +35,8 @@ def _level(text: str) -> float | None:
 
 
 def _add_render_args(p: argparse.ArgumentParser) -> None:
+    from .timeline import DIALOGUE_LEVEL
+
     g = p.add_argument_group("cut style")
     g.add_argument("--style", choices=["tight", "medium", "loose"], default="medium", help="how aggressively pauses are trimmed (default: medium)")
     g.add_argument("--keep-fillers", action="store_true", help="don't cut um/uh")
@@ -42,7 +44,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
     g.add_argument("--music-db", type=float, default=-14.0, help="music bed level in dB, relative to the dialogue (default: -14)")
     g.add_argument(
-        "--dialogue-level", type=_level, default=-16.0, metavar="LUFS",
+        "--dialogue-level", type=_level, default=DIALOGUE_LEVEL, metavar="LUFS",
         help="match every clip's speech to this loudness, e.g. -16 (default) or -14; 'off' keeps clip levels as recorded",
     )
     g.add_argument("--fades", choices=["on", "off"], default="on", help="short audio fades at edits and on B-roll nat sound (default: on)")
