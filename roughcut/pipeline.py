@@ -186,6 +186,8 @@ def run_settings(opts: Options, provider: Provider | None = None) -> dict:
         "script": opts.script,
         "graphics": opts.graphics,
         "graphics_style": opts.graphics_style,
+        "graphics_logo": opts.graphics_logo,  # absolute paths (the CLI resolves them), for designs a revision adds
+        "graphics_look": list(opts.graphics_look),
         "provider": opts.provider,
         "model": provider.model if provider is not None else opts.model,
         "vision_model": opts.vision_model,
@@ -635,8 +637,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     analysis, saved = _load_saved(out_dir)
     settings = saved.get("settings") or {}
     opts = render_options(opts, settings, overrides)
-    if opts.dialogue_level is not None:  # folders from before level matching: measure now (cached)
-        measure_levels(analysis.clips, Cache(opts.cache_dir or default_cache_dir()), workers=opts.workers, only_missing=True)
+    measure_missing_levels(analysis, opts)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
@@ -686,6 +687,23 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
 
 
 # ------------------------------------------------------------------ revise
+
+
+def measure_missing_levels(analysis: Analysis, opts: Options) -> None:
+    """Folders from before level matching have no loudness saved: measure it now (cached) when levels are on."""
+    if opts.dialogue_level is not None:
+        measure_levels(analysis.clips, Cache(opts.cache_dir or default_cache_dir()), workers=opts.workers, only_missing=True)
+
+
+def _saved_logo(settings: dict, warnings: list[str]) -> str | None:
+    """The build's logo, for graphics a revision designs; None (with a warning) if the file has gone since."""
+    logo = settings.get("graphics_logo")
+    if not logo:
+        return None
+    if not Path(logo).is_file():
+        warnings.append(f"The logo {logo} the build used isn't there any more, so new graphics in this revision were designed without it.")
+        return None
+    return str(logo)
 
 
 def _require_output_folder(out_dir: Path) -> None:
@@ -806,6 +824,7 @@ def revise(
         target_seconds=target_seconds if target_seconds is not None else settings.get("target_seconds"),
         graphics=graphics if graphics is not None else bool(settings.get("graphics")),
         graphics_style=settings.get("graphics_style") or "",
+        graphics_look=tuple(str(page) for page in settings.get("graphics_look") or ()),
         base_url=settings.get("base_url"),
         api_key_env=settings.get("api_key_env"),
         effort=effort or settings.get("effort") or "high",
@@ -825,6 +844,9 @@ def revise(
         problem = gfx.renderer_problem()
         if problem:
             raise RoughcutError(problem)
+    extra_warnings: list[str] = []
+    opts = replace(opts, graphics_logo=_saved_logo(settings, extra_warnings if opts.graphics else []))
+    measure_missing_levels(analysis, opts)
 
     previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
     history = [h for h in saved.get("notes_history") or [] if isinstance(h, dict) and h.get("notes")]
@@ -891,7 +913,7 @@ def revise(
 
     try:
         return _finish_build(
-            opts, out_dir, name, p, analysis, plan, record, False, [p.usage], timings, [], t_start, version,
+            opts, out_dir, name, p, analysis, plan, record, False, [p.usage], timings, extra_warnings, t_start, version,
             command="revise", carry=carry, report_extra=report_extra, entry_extra={"notes": notes.strip(), "revision_of": prev_n},
         )
     except BaseException as e:
