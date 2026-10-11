@@ -211,3 +211,73 @@ def test_a_timed_range_of_talking_footage_loses_its_dead_air():
         plan = normalize({"sections": [{"name": "x", "items": [item], "broll": []}]}, analysis)
         tl = build_timeline(plan, analysis, style=STYLES["medium"], name="t")
         assert len(tl.spine) == 1, item
+
+
+# A quiet word between two pauses: Whisper stretches it over both, so its only sound is the
+# short, quiet island between them, which looks just like a breath. Joining the pauses across
+# it cut the word.
+
+QUIET_AND = (5.0, 5.25)  # the word's sound, 18 dB under the speech
+AND_PAUSES = [(4.5, 5.0), (5.25, 5.7)]
+
+
+def _quiet_and_words(and_start: float) -> list[dict]:
+    head = spread_words(1.0, 4.5, "We drove all the way down to the coast")
+    tail = spread_words(5.72, 8.6, "then we walked the sand for hours.")
+    words = head + [{"start": and_start, "end": 5.72, "text": "and", "prob": 0.9}] + tail
+    for x, y in zip(words, words[1:]):  # Whisper: each word runs up to the next
+        x["end"] = y["start"]
+    return words
+
+
+@pytest.fixture(scope="module")
+def quiet_and(tmp_path_factory):
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("quiet_and")
+    a, b = QUIET_AND
+    expr = f"0.5*sin(2*PI*200*t)*(between(t,1.0,4.5)+between(t,5.7,8.6))+0.063*sin(2*PI*200*t)*between(t,{a},{b})"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30000/1001:duration=10",
+         "-f", "lavfi", "-i", f"aevalsrc=exprs='{expr}':s=48000:d=10",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(root / "cam.mov")],
+        check=True,
+    )
+    return root
+
+
+def _plays(tl, t0: float, t1: float) -> bool:
+    return any(a <= t0 and b >= t1 for a, b in kept_spans(tl))
+
+
+@pytest.mark.parametrize("and_start", [4.5, 4.8, 5.0])  # from the pause before, or right at its sound
+def test_a_quiet_word_between_two_pauses_is_not_a_breath(quiet_and, tmp_path, and_start):
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import build_timeline
+
+    (quiet_and / "cam.json").write_text(json.dumps({"words": _quiet_and_words(and_start)}))
+    analysis = analyze([quiet_and / "cam.mov"], transcriber=None, cache=Cache(tmp_path / "cache"))
+    clip = analysis.clips[0]
+    for got, want in zip(clip.silences[1:3], AND_PAUSES):  # the map hears both pauses
+        assert got == pytest.approx(want, abs=0.03), clip.silences
+    assert clip.breaths == []
+    for style in ("medium", "tight"):
+        tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES[style], name="t")
+        assert _plays(tl, QUIET_AND[0] + 0.02, QUIET_AND[1] - 0.02), (style, kept_spans(tl))
+
+
+def test_a_breath_marked_by_an_older_analysis_never_cuts_a_quiet_word():
+    from roughcut.pauses import breath_candidates
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import build_timeline
+
+    words = [Word(**w) for w in _quiet_and_words(4.5)]
+    clip = make_clip("V01", seconds=10, role="aroll", silences=[(0.0, 1.0), *AND_PAUSES, (8.6, 10.0)])
+    clip.segments = build_segments("V01", words)
+    assert breath_candidates(clip.silences, [(w.start, w.end) for w in words]) == []
+    clip.breaths = [QUIET_AND]  # cached before the word was recognised
+    analysis = Analysis(clips=[clip])
+    for style in ("medium", "tight"):
+        tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES[style], name="t")
+        assert _plays(tl, QUIET_AND[0] + 0.02, QUIET_AND[1] - 0.02), (style, kept_spans(tl))

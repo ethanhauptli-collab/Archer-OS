@@ -409,13 +409,16 @@ def _fades(el) -> tuple[Fraction, Fraction]:
 def test_declick_fades_stay_off_the_words(built):
     from conftest import SPEECH
 
+    from roughcut.timeline import EDGE_DECLICK
+
     validate_dtd(built.fcpxml)
     root = ET.parse(built.fcpxml).getroot()
     origin = T(next(a for a in root.iter("asset") if a.get("name") == "talk").get("start"))
     words = [(w["start"], w["end"]) for s, e, text in SPEECH for w in spread_words(s, e, text)]
     faded = 0
     for project in root.iter("project"):
-        for el in project.find("sequence/spine"):
+        spine = list(project.find("sequence/spine"))
+        for i, el in enumerate(spine):
             if el.get("name") != "talk":
                 continue
             fade_in, fade_out = _fades(el)
@@ -424,16 +427,51 @@ def test_declick_fades_stay_off_the_words(built):
             assert fade_in <= Fraction(15, 1000) and fade_out <= Fraction(15, 1000)
             assert (fade_in * 48000).denominator == 1 and (fade_out * 48000).denominator == 1  # whole samples
             kept = [(ws, we) for ws, we in words if min(we, b) - max(ws, a) > 0.03]  # not a sliver at a frame edge
-            for ws, we in kept:  # no kept word sounds inside a fade (a cut that lands on a word gets none)
-                assert not fade_in or ws >= a + fade_in, f"fade-in at {float(a):.3f} touches a word"
-                assert not fade_out or we <= b - fade_out, f"fade-out at {float(b):.3f} touches a word"
+            for ws, we in kept:
+                # The 15 ms de-click never sounds over a word. An edit that's already on (or inside) a word,
+                # next to a cut um or retake, gets only the few-millisecond one that stops the tick.
+                assert fade_in <= EDGE_DECLICK or ws >= a + fade_in, f"fade-in at {float(a):.3f} touches a word"
+                assert fade_out <= EDGE_DECLICK or we <= b - fade_out, f"fade-out at {float(b):.3f} touches a word"
+                if ws < a + fade_in:
+                    assert ws >= a - Fraction(1, 30) - EDGE_DECLICK, "only an edit at a word's start fades into it"
+                if we > b - fade_out:
+                    assert we <= b + Fraction(1, 30) + EDGE_DECLICK, "only an edit at a word's end fades out of it"
+            # Every edit where the sound jumps gets a fade; continuous speech across an edit gets none.
+            prev, nxt = (spine[i - 1] if i else None), (spine[i + 1] if i + 1 < len(spine) else None)
+            joined_before = prev is not None and prev.get("name") == "talk" and T(prev.get("start")) + T(prev.get("duration")) == T(el.get("start"))
+            joined_after = nxt is not None and nxt.get("name") == "talk" and T(el.get("start")) + T(el.get("duration")) == T(nxt.get("start"))
+            assert bool(fade_in) != joined_before and bool(fade_out) != joined_after, (float(a), float(b))
             faded += bool(fade_in) + bool(fade_out)
-    assert faded >= 6  # most edits got one
+    assert faded >= 6
     # Cutaway nat sound eases in and out; stills never carry audio settings.
     rough = _rough(root)
     cutaway = next(el for el in rough.iter("asset-clip") if el.get("name") == "broll" and el.get("lane"))
     assert _fades(cutaway) == (Fraction(3, 10), Fraction(3, 10))
     assert all(v.find("adjust-volume") is None for v in rough.iter("video"))
+
+
+@pytest.mark.parametrize("kind", ["audio", "video"])
+def test_a_cut_um_right_against_the_words_still_gets_a_declick(kind):
+    """Whisper's word times touch, so cutting an um puts each edit on (or a frame inside) the next word."""
+    from roughcut.plan import heuristic_plan
+    from roughcut.segments import build_segments
+    from roughcut.timeline import DECLICK, EDGE_DECLICK
+    from roughcut.transcribe import Word
+
+    times = [("Tickets", 0.5, 1.0), ("start", 1.0, 1.5), ("at", 1.5, 1.9), ("um", 1.9, 2.23), ("twenty", 2.23, 2.6), ("dollars", 2.6, 3.1),
+             ("and", 3.1, 3.4), ("uh", 3.4, 3.47), ("kids", 3.47, 3.9), ("get", 3.9, 4.2), ("in", 4.2, 4.4), ("free.", 4.4, 4.9)]
+    clip = make_clip("A01" if kind == "audio" else "V01", kind=kind, seconds=6, role="voiceover" if kind == "audio" else "aroll")
+    clip.segments = build_segments(clip.id, [Word(s, e, t) for t, s, e in times])
+    a = Analysis(clips=[clip])
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    fd = tl.frame_duration
+    assert len(tl.spine) == (3 if kind == "audio" else 2)  # every um/uh cut from narration; on camera the 70 ms uh stays
+    first, last = tl.spine[0], tl.spine[-1]
+    assert first.fade_in == DECLICK and last.fade_out == DECLICK  # room before the first word and after the last
+    for p, q in zip(tl.spine, tl.spine[1:]):  # the edits at the cut fillers
+        assert p.fade_out == EDGE_DECLICK and q.fade_in == EDGE_DECLICK, (p, q)
+        assert float(p.src_in + p.frames * fd) <= p.wb + 1e-9 and float(q.src_in) >= q.wa - 1e-9  # on or inside the kept words
+        assert (p.fade_out * 48000).denominator == 1
 
 
 def test_fades_follow_the_edits_and_can_be_turned_off(tmp_path):
@@ -919,21 +957,26 @@ def fuzz_one(seed: int, tmp) -> None:
     validate_dtd(path)
     check_invariants(path)
 
-    from roughcut.timeline import _is_speech, _measured
+    from roughcut.timeline import EDGE_DECLICK, _continuous, _is_speech, _measured
 
     fd = tl.frame_duration
     for t_ in timelines:
-        for sc in t_.spine:
+        for i, sc in enumerate(t_.spine):
             clip = a.clip(sc.clip_id)
             lufs, peak = _measured(clip, _is_speech(sc, clip))
             if sc.volume_db and sc.volume_db > 0:
                 assert sc.volume_db <= 12.0 and (peak is None or peak + sc.volume_db <= -1.0), "a boost clips"
             length = sc.frames * t_.frame_duration
             assert sc.fade_in + sc.fade_out <= length
-            if sc.wa is not None and sc.fade_in:
-                assert sc.src_in + sc.fade_in <= Fraction(sc.wa).limit_denominator(1000000), "fade-in reaches a word"
-            if sc.wb is not None and sc.fade_out:
-                assert sc.src_in + length - sc.fade_out >= Fraction(sc.wb).limit_denominator(1000000), "fade-out reaches a word"
+            # Only the few-millisecond edge de-click may reach a word, and only from an edit already on it.
+            if sc.wa is not None and sc.src_in + sc.fade_in > Fraction(sc.wa).limit_denominator(1000000):
+                assert sc.fade_in <= EDGE_DECLICK and sc.src_in + t_.frame_duration > Fraction(sc.wa).limit_denominator(1000000), "fade-in reaches a word"
+            if sc.wb is not None and sc.src_in + length - sc.fade_out < Fraction(sc.wb).limit_denominator(1000000):
+                assert sc.fade_out <= EDGE_DECLICK and sc.src_in + length - t_.frame_duration < Fraction(sc.wb).limit_denominator(1000000), "fade-out reaches a word"
+            if clip.media.has_audio and clip.media.kind != "image":  # every audio jump gets a fade when they're on
+                head = not _continuous(t_.spine[i - 1] if i else None, sc, t_.frame_duration)
+                tail = not _continuous(sc, t_.spine[i + 1] if i + 1 < len(t_.spine) else None, t_.frame_duration)
+                assert bool(sc.fade_in) == (kw["fades"] and head) and bool(sc.fade_out) == (kw["fades"] and tail)
         for cc in t_.connected:
             assert cc.fade_in + cc.fade_out <= cc.frames * fd
             frames = [k for k, _ in cc.keyframes]

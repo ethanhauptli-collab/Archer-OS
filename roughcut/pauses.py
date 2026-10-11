@@ -150,18 +150,36 @@ def window_levels(path: Path) -> list[float]:
     return levels
 
 
+EDGE = 0.02  # word times and the silence map disagree by about this much
+OUTSIDE = 0.05  # a word sounding less than this outside a pause has no sound of its own there
+
+
+def word_in_pause(words, starts: list[float], s1: float, e1: float, s2: float, e2: float) -> bool:
+    """Is a transcribed word said in the sound between silences (s1, e1) and (s2, e2)?
+
+    Either a word starts in it, or a word over it has no sound outside the
+    two silences. Whisper stretches a quiet word across the pauses either
+    side of its sound, so it starts in the first silence and ends in the
+    second, and that sound is all there is of it. A neighbour stretched over
+    a pause still sounds before or after it.
+    """
+    lo = bisect.bisect_left(starts, s1 - OUTSIDE)  # only words starting near the pause can be in it
+    for ws, we in words[lo : bisect.bisect_left(starts, s2)]:
+        if ws >= e1 - EDGE or (we > e1 - EDGE and we <= e2 + OUTSIDE):
+            return True
+    return False
+
+
 def breath_candidates(silences: list[tuple[float, float]], words: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Short sounds between two silences that hold no transcribed word (its start, or all of it)."""
+    """Short sounds between two silences with no transcribed word in them (see word_in_pause)."""
     spans = sorted(silences)
     words = sorted(words)
     starts = [ws for ws, _ in words]
     out = []
-    for (_, e1), (s2, _) in zip(spans, spans[1:]):
+    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
         if not 0 < s2 - e1 <= BREATH_MAX:
             continue
-        # Only words starting near the island can be in it (a long recording has tens of thousands).
-        near = words[bisect.bisect_left(starts, e1 - 0.02) : bisect.bisect_right(starts, s2 + 0.02)]
-        if any(e1 <= ws < s2 or (e1 - 0.02 <= ws and we <= s2 + 0.02) for ws, we in near):
+        if word_in_pause(words, starts, s1, e1, s2, e2):
             continue
         out.append((e1, s2))
     return out
