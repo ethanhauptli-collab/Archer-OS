@@ -1166,6 +1166,20 @@ def test_a_graphic_renumbered_by_a_revision_reuses_its_clip(paused_footage, tmp_
     assert first.is_file() and again.is_file()  # v1 in Final Cut still uses its clip
 
 
+def test_a_reused_clip_keeps_what_its_render_reported_whatever_its_number(tmp_path):
+    a, plan, tl = small_cut()
+    placed = graphics.place(plan.graphics, tl, a, [])
+    html = {g.id: graphics.with_timing(GRAPHIC_HTML.replace("TEXT", g.spec.text), g.timing(tl.frame_duration)) for g in placed}
+    digests = {g.id: graphics.graphic_digest(g, html[g.id], tl) for g in placed}
+    # The earlier version numbered them the other way round.
+    previous = {"graphics": [
+        {"id": "G02", "rendered": digests["G01"], "notes": ["came out blank: nothing is visible in any frame"]},
+        {"id": "G01", "rendered": "0" * 16, "notes": ["console error: from another design"]},
+    ]}
+    reused = {g.id: tmp_path / f"{g.slug}.mov" for g in placed}
+    assert graphics._old_notes(previous, placed, html, tl, reused) == {"G01": ["came out blank: nothing is visible in any frame"]}
+
+
 def test_a_graphic_shortened_for_one_that_never_arrives_gets_its_length_back(tmp_path, monkeypatch):
     class NoStatDesign(FakeProvider):
         def complete_json(self, system, parts, schema, *, schema_name, **kw):
