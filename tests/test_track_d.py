@@ -4,11 +4,13 @@ the music bed."""
 
 from __future__ import annotations
 
+import json
+import shutil
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 import pytest
-from conftest import NTSC, FakeProvider, make_clip
+from conftest import NTSC, SPEECH, TALK_SECONDS, FakeProvider, ffmpeg, make_clip, spread_words
 from test_end_to_end import check_invariants, validate_dtd
 
 from roughcut import pipeline
@@ -218,3 +220,144 @@ def test_planner_alternates_mark_the_other_take_in_the_browser(built):
     assert c0 <= s and s + d <= c0 + cd
     assert ((s - c0) / NTSC).denominator == 1 and (d / NTSC).denominator == 1  # on the clip's frame grid
     assert abs(float(s - c0) - 1.0) < 0.05
+
+
+# ------------------------------------------------------- T2 level matching
+
+
+LINES = {
+    "loud": [
+        "The ferry leaves the harbor at dawn.", "Gulls follow it out past the breakwater.", "Nobody on deck says much.",
+        "The captain has done this run for thirty years.", "He still checks the weather twice an hour.", "Today it looks calm.",
+    ],
+    "quiet": [
+        "Our bakery opened its doors last spring.", "We start the ovens before four.", "Sourdough sells out first, every single day.",
+        "My sister handles the coffee side of things.", "Regulars know each other by name now.", "That was the whole idea.",
+    ],
+    "noisy": [
+        "This trail climbs nearly two thousand feet.", "Bring more water than you think you need.", "The switchbacks get steep near the top.",
+        "Wildflowers cover the meadow in early June.", "Watch the sky for afternoon storms.", "The view makes it worth it.",
+    ],
+}
+
+
+def talker(root, name: str, amp: float, noise: float = 0.0, created: str = "09:00"):
+    """A 20 s talking clip: voice-like tone bursts where the sidecar's words are, over optional noise."""
+    script = [(s, e, line) for (s, e, _), line in zip(SPEECH, LINES[name])]
+    gates = "+".join(f"between(t,{s},{e})" for s, e, _ in script)
+    voice = f"{amp}*sin(2*PI*220*t)*(0.6+0.4*sin(2*PI*3*t))*({gates})"
+    expr = voice + (f"+{noise}*(2*random(0)-1)" if noise else "")
+    path = root / f"{name}.mov"
+    ffmpeg(
+        "-f", "lavfi", "-i", f"testsrc=size=640x360:rate=30000/1001:duration={TALK_SECONDS}",
+        "-f", "lavfi", "-i", f"aevalsrc=exprs='{expr}':s=48000:d={TALK_SECONDS}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-metadata", f"creation_time=2026-08-12T{created}:00Z", str(path),
+    )
+    words = [w for s, e, text in script for w in spread_words(s, e, text)]
+    (root / f"{name}.json").write_text(json.dumps({"words": words}))
+    return path
+
+
+@pytest.fixture(scope="module")
+def talkers(tmp_path_factory):
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("talkers")
+    talker(root, "loud", 0.6, created="09:00")  # about -9 LUFS
+    talker(root, "quiet", 0.075, created="09:01")  # 18 dB under loud
+    talker(root, "noisy", 0.075, noise=0.0025, created="09:02")  # as quiet, over hiss at about -52 LUFS
+    return root
+
+
+def test_gated_loudness_and_speech_spans():
+    from roughcut.ffmpeg_ops import gated_loudness, level_summary
+
+    assert gated_loudness([-120.0] * 10) is None
+    assert gated_loudness([-20.0] * 10) == -20.0
+    # Quiet blocks (pauses) fall under the relative gate and don't drag speech down.
+    assert gated_loudness([-20.0] * 10 + [-45.0] * 30) == -20.0
+    # 4 s of speech at -20 between pauses of room tone at -50; peaks -6 in speech.
+    m = [-50.0] * 10 + [-20.0] * 40 + [-50.0] * 50
+    peak = [-40.0] * 10 + [-6.0] * 40 + [-30.0] * 50
+    s = level_summary({"step": 0.1, "m": m, "peak": peak}, spans=[(1.2, 5.0)], duration=10.0)
+    assert s["lufs"] == -20.0 and s["floor"] == -50.0 and s["peak"] == -6.0
+    assert 5.0 <= s["end"] <= 5.4  # last block loud enough to count
+    whole = level_summary({"step": 0.1, "m": m, "peak": peak}, duration=10.0)
+    assert whole["lufs"] == -20.0  # gating keeps the integrated value on the speech
+
+
+def test_level_match_limits():
+    from roughcut.timeline import level_match
+
+    clip = make_clip("V01", seconds=10)
+    assert level_match(clip, -16.0) is None  # not measured
+    clip.loudness, clip.loudness_floor, clip.peak_db = -24.0, -70.0, -20.0
+    assert level_match(clip, -16.0) == (8.0, "")
+    clip.loudness = -40.0
+    assert level_match(clip, -16.0) == (12.0, "held to +12 dB")
+    clip.loudness = 0.0
+    assert level_match(clip, -16.0) == (-12.0, "held to -12 dB")
+    # A boost stops where the background would get loud, and never becomes a cut.
+    clip.loudness, clip.loudness_floor = -26.0, -50.0
+    assert level_match(clip, -16.0) == (5.0, "boost limited by background noise")
+    clip.loudness_floor = -40.0
+    assert level_match(clip, -16.0) == (0.0, "boost limited by background noise")
+    # ...or where peaks would clip.
+    clip.loudness_floor, clip.peak_db = -80.0, -4.0
+    assert level_match(clip, -16.0) == (3.0, "boost limited by peaks")
+    # Nat sound sits under the dialogue: base gain plus the correction, and its quiet parts aren't noise.
+    clip.loudness, clip.loudness_floor, clip.peak_db = -26.0, -30.0, -20.0
+    assert level_match(clip, -16.0, -20.0, guard_noise=False) == (-10.0, "")
+
+
+def _spine_volumes(path) -> dict[str, set]:
+    rough = _rough(ET.parse(path).getroot())
+    out: dict[str, set] = {}
+    for el in rough.find("sequence/spine"):
+        vol = el.find("adjust-volume")
+        out.setdefault(el.get("name"), set()).add(float(vol.get("amount").removesuffix("dB")) if vol is not None else 0.0)
+    return out
+
+
+def test_speech_from_different_sources_is_matched(talkers, tmp_path):
+    out = tmp_path / "out"
+    result = pipeline.build(Options(inputs=[talkers], out=out, name="talkers", provider="none", transcriber="none", cache_dir=tmp_path / "cache"))
+    validate_dtd(result.fcpxml)
+    check_invariants(result.fcpxml)
+    analysis = Analysis.load(out / "analysis.json")
+    loud, quiet, noisy = (next(c for c in analysis.clips if c.media.stem == n) for n in ("loud", "quiet", "noisy"))
+    assert abs((loud.loudness - quiet.loudness) - 18.0) < 1.0  # measured over the words
+    assert noisy.loudness_floor > quiet.loudness_floor + 20  # the background is what differs
+
+    vols = _spine_volumes(result.fcpxml)
+    assert len(vols["loud"]) == len(vols["quiet"]) == 1  # one gain per source
+    (v_loud,), (v_quiet,), (v_noisy,) = vols["loud"], vols["quiet"], vols["noisy"]
+    assert abs((v_quiet - v_loud) - 18.0) <= 1.0
+    assert abs(loud.loudness + v_loud - (-16.0)) <= 0.5 and abs(quiet.loudness + v_quiet - (-16.0)) <= 0.5
+    # The noisy clip isn't lifted into its own hiss.
+    assert v_noisy < v_quiet and noisy.loudness_floor + v_noisy <= -45.0 + 0.5
+
+    report = result.report.read_text()
+    levels = report.split("## Levels", 1)[1].split("## ", 1)[0]
+    assert "about -16 LUFS" in levels and "| quiet.mov | dialogue |" in levels
+    assert "boost limited by background noise" in levels
+
+
+def test_dialogue_level_off_and_older_folders(talkers, tmp_path):
+    out = tmp_path / "out"
+    opts = Options(inputs=[talkers], out=out, name="talkers", provider="none", transcriber="none", cache_dir=tmp_path / "cache", dialogue_level=None)
+    result = pipeline.build(opts)
+    assert all(v == {0.0} for v in _spine_volumes(result.fcpxml).values())
+    assert "## Levels" not in result.report.read_text()
+
+    # A folder from before level matching (no loudness saved) is measured at render time.
+    path = out / "analysis.json"
+    data = json.loads(path.read_text())
+    for c in data["clips"]:
+        for key in ("loudness", "loudness_floor", "peak_db", "sound_end"):
+            c.pop(key, None)
+    path.write_text(json.dumps(data))
+    again = pipeline.rerender(out, Options(inputs=[], cache_dir=tmp_path / "cache2"))
+    vols = _spine_volumes(again.fcpxml)
+    assert abs((vols["quiet"].pop() - vols["loud"].pop()) - 18.0) <= 1.0

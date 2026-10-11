@@ -20,13 +20,31 @@ def _read(path: str | None) -> str:
     return Path(path).expanduser().read_text(encoding="utf-8") if path else ""
 
 
+def _level(text: str) -> float | None:
+    """--dialogue-level: LUFS (-16, -16LUFS) or off."""
+    t = text.strip().lower().removesuffix("lufs").strip()
+    if t in ("off", "none", "no"):
+        return None
+    try:
+        value = float(t)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a loudness like -16 or 'off', got {text!r}") from None
+    if not -40.0 <= value <= -5.0:
+        raise argparse.ArgumentTypeError(f"{value:g} LUFS is outside -40 to -5; online video is usually -16 to -14")
+    return value
+
+
 def _add_render_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("cut style")
     g.add_argument("--style", choices=["tight", "medium", "loose"], default="medium", help="how aggressively pauses are trimmed (default: medium)")
     g.add_argument("--keep-fillers", action="store_true", help="don't cut um/uh")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, or WxH@fps (default: from the footage)")
-    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll audio level in dB (default: -20)")
-    g.add_argument("--music-db", type=float, default=-14.0, help="music level in dB (default: -14)")
+    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
+    g.add_argument("--music-db", type=float, default=-14.0, help="music bed level in dB, relative to the dialogue (default: -14)")
+    g.add_argument(
+        "--dialogue-level", type=_level, default=-16.0, metavar="LUFS",
+        help="match every clip's speech to this loudness, e.g. -16 (default) or -14; 'off' keeps clip levels as recorded",
+    )
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
     g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
     p.add_argument("--name", help="project/event name (default: folder name)")
@@ -337,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         format=args.format,
         broll_db=args.broll_db,
         music_db=args.music_db,
+        dialogue_level=args.dialogue_level,
         stringout=not args.no_stringout,
         fill=not args.no_fill,
     )

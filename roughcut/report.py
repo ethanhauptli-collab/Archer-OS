@@ -39,6 +39,32 @@ def collapse_warnings(warnings: list[str]) -> list[str]:
     return out
 
 
+def levels_section(tl: Timeline, analysis: Analysis) -> list[str]:
+    """What level matching measured and the clip volume it set for each source."""
+    if tl.dialogue_level is None:
+        return []
+    L = [
+        "## Levels",
+        "",
+        f"Speech is matched to about {tl.dialogue_level:g} LUFS, B-roll and music sit under it. Volume is each clip's "
+        "Volume in Final Cut's audio inspector; change it there, or set `--dialogue-level` and run `roughcut render`.",
+        "",
+    ]
+    if tl.levels:
+        L += ["| Clip | Used as | Measured | Volume | Note |", "|---|---|---|---|---|"]
+        for r in tl.levels:
+            clip = analysis.clip(r["clip"])
+            measured = f"{r['lufs']:.1f} LUFS" + (" (speech)" if r["use"] in ("dialogue", "narration") else "")
+            volume = f"{r['volume']:+g} dB" if r["volume"] else "as recorded"
+            L.append(f"| {clip.media.name} | {r['use']} | {measured} | {volume} | {r['why']} |")
+    leveled = {r["clip"] for r in tl.levels}
+    used = {c.clip_id for c in tl.spine} | {c.clip_id for c in tl.connected}
+    unmeasured = sorted(c.media.name for c in analysis.clips if c.id in used and c.media.has_audio and c.id not in leveled and c.role != "graphic")
+    if unmeasured:
+        L += ["", "Not measured, so left as recorded: " + ", ".join(unmeasured) + "."]
+    return L + [""]
+
+
 def build_report(
     plan: Plan,
     tl: Timeline,
@@ -148,6 +174,8 @@ def build_report(
             file = f"`graphics/{clip.media.name}`" if clip else "not rendered (see Warnings)"
             L.append(f"| `{_tc(g.start, tl)}` | {g.id} | {g.spec.kind.replace('_', ' ')} | {text.replace('|', '/')} | {file} |")
         L.append("")
+
+    L += levels_section(tl, analysis)
 
     L += ["## Media", "", "| ID | File | Role | Length | Notes |", "|---|---|---|---|---|"]
     for c in analysis.clips:

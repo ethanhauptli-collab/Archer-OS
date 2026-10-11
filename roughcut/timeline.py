@@ -54,6 +54,7 @@ class SpineClip:
     offset: int  # timeline frame
     section: int
     seg_ids: list[str] = field(default_factory=list)
+    volume_db: float | None = None  # clip volume (level matching); None = as recorded
 
     @property
     def end(self) -> int:
@@ -90,6 +91,8 @@ class Timeline:
     seg_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    dialogue_level: float | None = None  # LUFS speech was matched to (None: levels as recorded)
+    levels: list[dict] = field(default_factory=list)  # one row per clip whose volume was set (see _mix)
 
     @property
     def total_frames(self) -> int:
@@ -345,6 +348,7 @@ def build_timeline(
     broll_db: float | None = -20.0,
     music_db: float = -14.0,
     fill: bool = True,
+    dialogue_level: float | None = None,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -427,6 +431,7 @@ def build_timeline(
         _fill_picture(tl, analysis, style, broll_db, lanes)
     _place_music(tl, plan, analysis, music_db, warnings)
     _place_markers(tl, plan, analysis)
+    _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     tl.warnings = warnings
     return tl
 
@@ -734,6 +739,86 @@ def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float,
             warnings.append(f"music {cue.clip_id} has no room; skipped")
             continue
         tl.connected.append(ConnectedClip(cue.clip_id, src_in, frames, start, lane=-1 - sum(1 for c in tl.connected if c.kind == "music"), kind="music", volume_db=volume_db))
+
+
+# ------------------------------------------------------------------- audio
+
+DIALOGUE_LEVEL = -16.0  # LUFS: what speech is matched to (a common level for online video)
+MAX_BOOST = 12.0  # dB
+MAX_CUT = 12.0  # dB
+NOISE_CEILING = -45.0  # LUFS: a boost never lifts a clip's background above this
+PEAK_CEILING = -1.0  # dBFS: a boost never pushes a clip's peaks past this
+SPINE_BROLL_DB = -6.0  # nat sound of B-roll in the main storyline, relative to the dialogue
+
+
+def level_match(clip: Clip, target: float, base: float = 0.0, *, guard_noise: bool = True) -> tuple[float, str] | None:
+    """(clip volume in dB, what limited it) so `clip` plays at `target` + `base` LUFS.
+
+    None when the clip wasn't measured. The correction is held to
+    +/-12 dB, and a boost stops before the clip's background passes
+    NOISE_CEILING (`guard_noise`, for speech: in nat sound and music the
+    quiet parts are the content, and `base` keeps them low anyway) or its
+    peaks pass PEAK_CEILING. A limit never turns a boost into a cut.
+    """
+    if clip.loudness is None:
+        return None
+    want = target - clip.loudness
+    match = max(-MAX_CUT, min(MAX_BOOST, want))
+    why = "" if match == want else f"held to {MAX_BOOST if want > 0 else -MAX_CUT:+g} dB"
+    if match > 0:
+        caps = []
+        if guard_noise and clip.loudness_floor is not None:
+            caps.append((max(0.0, NOISE_CEILING - clip.loudness_floor - base), "boost limited by background noise"))
+        if clip.peak_db is not None:
+            caps.append((max(0.0, PEAK_CEILING - clip.peak_db - base), "boost limited by peaks"))
+        for cap, reason in caps:
+            if cap < match:
+                match, why = cap, reason
+    return base + match, why
+
+
+def _round_db(v: float) -> float:
+    return round(v * 2) / 2 + 0.0  # half-dB steps; + 0.0 turns -0.0 into 0.0
+
+
+def _mix(tl: Timeline, analysis: Analysis, *, dialogue_level: float | None, broll_db: float | None, music_db: float) -> None:
+    """Clip volumes that bring every source to one dialogue level.
+
+    Speech plays at `dialogue_level`, B-roll in the main storyline 6 dB
+    under it, cutaway nat sound at `broll_db` and the music bed at
+    `music_db` relative to it. Unmeasured clips keep the plain gains the
+    placement gave them.
+    """
+    tl.dialogue_level = dialogue_level
+    if dialogue_level is None:
+        return
+    rows: dict[tuple[str, str], dict] = {}
+
+    def row(clip: Clip, use: str, volume: float | None, why: str) -> None:
+        rows.setdefault((clip.id, use), {"clip": clip.id, "use": use, "lufs": clip.loudness, "volume": volume, "why": why})
+
+    for sc in tl.spine:
+        clip = analysis.clip(sc.clip_id)
+        if not clip.media.has_audio:
+            continue
+        speech = clip.role in ("aroll", "voiceover")
+        got = level_match(clip, dialogue_level, 0.0 if speech else SPINE_BROLL_DB, guard_noise=speech)
+        if got is None:
+            continue
+        volume = _round_db(got[0])
+        sc.volume_db = volume if abs(volume) >= 1.0 else None
+        row(clip, {"aroll": "dialogue", "voiceover": "narration"}.get(clip.role, "nat sound"), sc.volume_db, got[1])
+    for cc in tl.connected:
+        clip = analysis.clip(cc.clip_id)
+        base = music_db if cc.kind == "music" else broll_db if cc.kind == "broll" else None
+        if clip is None or not clip.media.has_audio or base is None:
+            continue
+        got = level_match(clip, dialogue_level, base, guard_noise=False)
+        if got is None:
+            continue
+        cc.volume_db = _round_db(got[0])
+        row(clip, "music bed" if cc.kind == "music" else "cutaway nat sound", cc.volume_db, got[1])
+    tl.levels = list(rows.values())
 
 
 def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:

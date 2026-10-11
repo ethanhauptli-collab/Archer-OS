@@ -174,6 +174,18 @@ def _clip_element(
     return el
 
 
+def _volume(el: ET.Element, clip: Clip, volume_db: float | None) -> None:
+    """The clip's <adjust-volume>, written the way Final Cut writes it.
+
+    The DTD puts it after <note> and the video adjustments and before any
+    anchored clip or marker, so call this before attaching children. Stills
+    (<video>) and clips without audio get none.
+    """
+    if el.tag != "asset-clip" or not clip.media.has_audio or volume_db is None:
+        return
+    ET.SubElement(el, "adjust-volume", {"amount": f"{volume_db:g}dB"})
+
+
 def _local(tl: Timeline, sc: SpineClip, clip: Clip, frame: int) -> Fraction:
     """Absolute timeline frame -> time inside spine clip `sc`'s source."""
     return origin(clip.media) + sc.src_in + (frame - sc.offset) * tl.frame_duration
@@ -224,7 +236,8 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             lane=None,
             timebase=tb,
         )
-        # Child order follows the FCPXML DTD: anchored clips, then markers.
+        _volume(el, clip, sc.volume_db)
+        # Child order follows the FCPXML DTD: volume, anchored clips, then markers.
         for cc in sorted(attached[i]["clips"], key=lambda c: (c.start, c.lane)):
             child_clip = analysis.clip(cc.clip_id)
             child = _clip_element(
@@ -239,8 +252,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 use=cc.kind,
                 note=cc.note,
             )
-            if cc.volume_db is not None and child_clip.media.has_audio:
-                ET.SubElement(child, "adjust-volume", {"amount": f"{cc.volume_db:g}dB"})
+            _volume(child, child_clip, cc.volume_db)
         for mk in attached[i]["markers"]:
             attrs = {"start": tc.fcpx_time(_local(tl, sc, clip, mk.frame), tb), "duration": tc.fcpx_time(fd, tb), "value": mk.value}
             if mk.kind == "chapter":

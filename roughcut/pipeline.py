@@ -10,7 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from . import progress
-from .analyze import Analysis, Cache, analyze, default_cache_dir, log
+from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
 from .fcpxml import build_fcpxml
 from .media import require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
@@ -46,6 +46,7 @@ class Options:
     format: str | None = None
     broll_db: float | None = -20.0
     music_db: float = -14.0
+    dialogue_level: float | None = -16.0  # LUFS speech is matched to; None = clip levels as recorded
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
@@ -148,7 +149,8 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
     progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
     rough = build_timeline(
-        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill
+        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
+        dialogue_level=opts.dialogue_level,
     )
     stringout = None
     if opts.stringout:
@@ -162,6 +164,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
                 format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}",
                 broll_db=opts.broll_db,
                 fill=opts.fill,
+                dialogue_level=opts.dialogue_level,
             )
     return rough, stringout
 
@@ -302,6 +305,8 @@ def rerender(out_dir: Path, opts: Options) -> Result:
         raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
     start_log(out_dir, "render")
     analysis = Analysis.load(out_dir / "analysis.json")
+    if opts.dialogue_level is not None:  # folders from before level matching: measure now (cached)
+        measure_levels(analysis.clips, Cache(opts.cache_dir or default_cache_dir()), workers=opts.workers, only_missing=True)
     saved = json.loads((out_dir / "plan.json").read_text())
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
