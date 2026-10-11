@@ -38,6 +38,62 @@ def test_user_fonts_folder_wins_over_the_bundled_copy(monkeypatch, tmp_path):
     brand_fonts._scan.cache_clear()
 
 
+def test_fraunces_ships_with_its_italic_and_your_own_italic_joins_the_bundled_roman(monkeypatch, tmp_path):
+    """The Venture OC look sets pulled quotes in Fraunces italic: a real italic, not slanted roman."""
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    fraunces = brand_fonts.available()["Fraunces"]
+    assert sorted(f.italic for f in fraunces) == [False, True] and {f.path.parent for f in fraunces} == {brand_fonts.BUNDLED_DIR}
+    css = brand_fonts.font_face_css("<p style=\"font:italic 40px 'Fraunces'\">q</p>")
+    assert css.count("@font-face") == 2 and "font-style:italic" in css and "font-style:normal" in css
+
+    # An italic of your own (here, a copy of the bundled one) adds to the bundled roman instead of replacing it.
+    folder = tmp_path / "fonts"
+    folder.mkdir()
+    (folder / "MyFraunces-Italic.ttf").write_bytes((brand_fonts.BUNDLED_DIR / "Fraunces-Italic.ttf").read_bytes())
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(folder))
+    brand_fonts._scan.cache_clear()
+    fraunces = brand_fonts.available()["Fraunces"]
+    assert sorted((f.italic, f.path.parent == folder) for f in fraunces) == [(False, False), (True, True)]
+    brand_fonts._scan.cache_clear()
+
+
+def test_fonts_go_into_a_page_without_a_head_after_its_doctype():
+    page = "<!doctype html><html><style>.t{font:700 60px Jost}</style><body><p class=t>Venture</p></body></html>"
+    out = brand_fonts.embed(page)
+    assert out.startswith("<!doctype html><html><style data-roughcut-fonts>") and out.endswith(page[len("<!doctype html><html>") :])
+    bare = "<!DOCTYPE html><style>.t{font:700 60px Jost}</style><p class=t>Venture</p>"
+    assert brand_fonts.embed(bare).startswith("<!DOCTYPE html><style data-roughcut-fonts>")
+    # A <header> isn't the head.
+    headed = "<!doctype html><html><body><header style=\"font-family:Jost\">x</header></body></html>"
+    assert brand_fonts.embed(headed).startswith("<!doctype html><html><style data-roughcut-fonts>")
+
+
+@pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
+def test_embedded_fonts_keep_standards_mode_and_draw_a_real_italic(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    from playwright.sync_api import sync_playwright
+
+    page_html = (
+        "<!doctype html><html><style>span{font:80px 'Fraunces',monospace}</style><body>"
+        "<span id=a>The best part is the families</span><br><span id=b style='font-style:italic'>The best part is the families</span></body></html>"
+    )
+    with sync_playwright() as p:
+        browser = graphics.launch_browser(p)
+        page = browser.new_page()
+        page.route("**/*", lambda route: route.abort())
+        page.set_content(brand_fonts.embed(page_html))
+        page.evaluate("document.fonts.ready")
+        mode = page.evaluate("document.compatMode")
+        italic = page.evaluate("document.fonts.check('italic 80px Fraunces')")
+        widths = page.evaluate("[a.getBoundingClientRect().width, b.getBoundingClientRect().width]")
+        browser.close()
+    assert mode == "CSS1Compat"  # not quirks mode
+    # Slanted roman keeps the roman's widths; Fraunces Italic has its own letterforms and spacing.
+    assert italic and abs(widths[0] - widths[1]) > 10, widths
+
+
 @pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
 def test_embedded_font_is_what_the_browser_draws(monkeypatch, tmp_path):
     """Offline, with the network blocked, text set in Jost must not fall back."""
