@@ -108,14 +108,17 @@ def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None
     """(video role, audio role) for one use of a clip, so Timeline Index > Roles
     can mute the music bed, solo the planned B-roll or hide the auto-fill.
 
-    `use` is "spine", "broll" (connected cutaway), "music", "graphic" or
-    "browser". None leaves Final Cut's default.
+    `use` is "speech" (a story line in the main storyline, whatever the clip
+    was classified as), "spine", "broll" (connected cutaway), "music",
+    "graphic" or "browser". None leaves Final Cut's default.
     """
     m = clip.media
     if use == "graphic" or clip.role == "graphic":
         return "titles.Graphics", None
     if use == "music":
         return None, "music.Music Bed"
+    if use == "speech":
+        return None, "dialogue.Narration" if clip.role == "voiceover" else "dialogue"
     if use == "broll":
         video = "B-Roll.Auto-fill" if note == AUTO_FILL else "B-Roll.Planned"
         return video, "effects.Nat Sound" if m.has_audio else None
@@ -263,6 +266,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             duration=tc.fcpx_time(sc.frames * fd, tb),
             lane=None,
             timebase=tb,
+            use="speech" if sc.seg_ids else "spine",
         )
         _volume(el, clip, sc.volume_db, sc.fade_in, sc.fade_out)
         # Child order follows the FCPXML DTD: volume, anchored clips, then markers.

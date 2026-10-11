@@ -45,9 +45,12 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--music-db", type=float, default=-14.0, help="music bed level in dB, relative to the dialogue (default: -14)")
     g.add_argument(
         "--dialogue-level", type=_level, default=DIALOGUE_LEVEL, metavar="LUFS",
-        help="match every clip's speech to this loudness, e.g. -16 (default) or -14; 'off' keeps clip levels as recorded",
+        help="match every clip's speech to this loudness in LUFS, e.g. -16 (default), -14 or -14LUFS; 'off' keeps clip levels as recorded",
     )
-    g.add_argument("--fades", choices=["on", "off"], default="on", help="short audio fades at edits and on B-roll nat sound (default: on)")
+    g.add_argument(
+        "--fades", choices=["on", "off"], default="on",
+        help="short de-click fades at audio edits and soft fades on B-roll nat sound (default: on); the music bed fades in and out either way",
+    )
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
     g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
     p.add_argument("--name", help="project/event name (default: folder name)")
@@ -333,8 +336,22 @@ def _log_end(line: str) -> None:
     log_to(None)
 
 
+def _glue_levels(argv: list[str]) -> list[str]:
+    """argparse takes `-14LUFS` after `--dialogue-level` for another option
+    (only bare numbers like -14 pass), so join it as `--dialogue-level=-14LUFS`."""
+    out: list[str] = []
+    it = iter(argv)
+    for a in it:
+        if a == "--dialogue-level":
+            value = next(it, None)
+            out.append(a if value is None else f"{a}={value}")
+        else:
+            out.append(a)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(_glue_levels(sys.argv[1:] if argv is None else list(argv)))
     if args.command == "key":
         # Works on the real environment: what the shell exports vs the Keychain.
         return _key_command(args.action, args.openai)

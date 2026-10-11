@@ -209,7 +209,7 @@ def probe(path: Path) -> MediaInfo:
         a = tc.parse_rate(v.get("avg_frame_rate"))
         if r and a and abs(float(r) - float(a)) / float(r) > 0.01:
             info.vfr = True
-            warnings.append(f"variable frame rate (avg {float(a):.2f} fps); treated as {info.rate}")
+            warnings.append(f"{VFR_WARNING} (avg {float(a):.2f} fps); treated as {info.rate}")
 
         tc_str = (v.get("tags") or {}).get("timecode") or fmt_tags.get("timecode")
         if not tc_str:
@@ -260,9 +260,27 @@ def probe(path: Path) -> MediaInfo:
     return info
 
 
-def _names(infos: list[MediaInfo], limit: int = 6) -> str:
-    names = sorted({i.name for i in infos})
+VFR_WARNING = "variable frame rate"  # the probe's per-clip warning starts with this
+
+
+def _names(infos: list[MediaInfo], limit: int = 6, detail=None) -> str:
+    by_name = {i.name: i for i in infos}
+    names = [detail(by_name[n]) if detail else n for n in sorted(by_name)]
     return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def _avg_rate(m: MediaInfo) -> str:
+    """'phone.mov (avg 29.62 fps)', from the probe's warning when it has one."""
+    for w in m.warnings:
+        if w.startswith(f"{VFR_WARNING} (avg "):
+            return f"{m.name} ({w[len(VFR_WARNING) + 2:].split(')', 1)[0]})"
+    return m.name
+
+
+def vfr_warning_covered(warning: str, used: list[MediaInfo]) -> bool:
+    """True for a probe's per-clip VFR warning ('phone.mov: variable frame rate ...')
+    about a clip in the cut, which `frame_rate_warnings` already reports."""
+    return any(m.vfr and warning.startswith(f"{m.name}: {VFR_WARNING}") for m in used)
 
 
 def frame_rate_warnings(project_fd: Fraction, used: list[MediaInfo]) -> list[str]:
@@ -297,7 +315,7 @@ def frame_rate_warnings(project_fd: Fraction, used: list[MediaInfo]) -> list[str
     vfr = [m for m in video if m.vfr]
     if vfr:
         out.append(
-            f"Variable frame rate (typical of phone and screen recordings) in this cut: {_names(vfr)}. Final Cut treats "
+            f"Variable frame rate (typical of phone and screen recordings) in this cut: {_names(vfr, detail=_avg_rate)}. Final Cut treats "
             "each as its nominal rate; if a long take drifts out of lip sync, convert it to a constant frame rate "
             "(for example with HandBrake) and cut from that."
         )

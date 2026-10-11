@@ -241,12 +241,13 @@ LINES = {
 }
 
 
-def talker(root, name: str, amp: float, noise: float = 0.0, created: str = "09:00"):
-    """A 20 s talking clip: voice-like tone bursts where the sidecar's words are, over optional noise."""
-    script = [(s, e, line) for (s, e, _), line in zip(SPEECH, LINES[name])]
+def talker(root, name: str, amp: float, noise: float = 0.0, created: str = "09:00", *, lines=None, script=None, bed: str = ""):
+    """A 20 s talking clip: voice-like tone bursts where the sidecar's words are, over
+    optional noise and an optional continuous `bed` (an aevalsrc expression)."""
+    script = script or [(s, e, line) for (s, e, _), line in zip(SPEECH, lines or LINES[name])]
     gates = "+".join(f"between(t,{s},{e})" for s, e, _ in script)
     voice = f"{amp}*sin(2*PI*220*t)*(0.6+0.4*sin(2*PI*3*t))*({gates})"
-    expr = voice + (f"+{noise}*(2*random(0)-1)" if noise else "")
+    expr = voice + (f"+{noise}*(2*random(0)-1)" if noise else "") + (f"+{bed}" if bed else "")
     path = root / f"{name}.mov"
     ffmpeg(
         "-f", "lavfi", "-i", f"testsrc=size=640x360:rate=30000/1001:duration={TALK_SECONDS}",
@@ -281,10 +282,21 @@ def test_gated_loudness_and_speech_spans():
     m = [-50.0] * 10 + [-20.0] * 40 + [-50.0] * 50
     peak = [-40.0] * 10 + [-6.0] * 40 + [-30.0] * 50
     s = level_summary({"step": 0.1, "m": m, "peak": peak}, spans=[(1.2, 5.0)], duration=10.0)
-    assert s["lufs"] == -20.0 and s["floor"] == -50.0 and s["peak"] == -6.0
+    assert s["speech"] == -20.0 and s["floor"] == -50.0 and s["speech_peak"] == -6.0
     assert 5.0 <= s["end"] <= 5.4  # last block loud enough to count
     whole = level_summary({"step": 0.1, "m": m, "peak": peak}, duration=10.0)
     assert whole["lufs"] == -20.0  # gating keeps the integrated value on the speech
+    assert whole["speech"] is None and whole["speech_peak"] is None
+
+    # One 2 s line in 30 s of loud ambience (an action-cam clip): the whole clip
+    # (what its nat sound plays at) and the words (what its dialogue plays at) differ.
+    m = [-35.0] * 100 + [-20.0] * 20 + [-35.0] * 180
+    peak = [-25.0] * 100 + [-8.0] * 20 + [-25.0] * 180
+    s = level_summary({"step": 0.1, "m": m, "peak": peak}, spans=[(10.2, 12.0)], duration=30.0)
+    assert s["speech"] == -20.0 and s["speech_peak"] == -8.0
+    assert -31.0 < s["lufs"] < -30.0 and s["peak"] == -8.0
+    # Under half a second of words is too little to measure.
+    assert level_summary({"step": 0.1, "m": m, "peak": peak}, spans=[(10.2, 10.5)])["speech"] is None
 
 
 def test_level_match_limits():
@@ -298,17 +310,30 @@ def test_level_match_limits():
     assert level_match(clip, -16.0) == (12.0, "held to +12 dB")
     clip.loudness = 0.0
     assert level_match(clip, -16.0) == (-12.0, "held to -12 dB")
-    # A boost stops where the background would get loud, and never becomes a cut.
-    clip.loudness, clip.loudness_floor = -26.0, -50.0
-    assert level_match(clip, -16.0) == (5.0, "boost limited by background noise")
-    clip.loudness_floor = -40.0
-    assert level_match(clip, -16.0) == (0.0, "boost limited by background noise")
-    # ...or where peaks would clip.
-    clip.loudness_floor, clip.peak_db = -80.0, -4.0
-    assert level_match(clip, -16.0) == (3.0, "boost limited by peaks")
-    # Nat sound sits under the dialogue: base gain plus the correction, and its quiet parts aren't noise.
+
+    # Speech is matched by its words, not the whole clip (falling back to it when the words weren't measured).
+    clip.loudness, clip.loudness_floor, clip.peak_db = -34.0, -60.0, -14.0
+    assert level_match(clip, -16.0, speech=True) == (12.0, "held to +12 dB")
+    clip.speech_loudness, clip.speech_peak = -26.0, -20.0
+    assert level_match(clip, -16.0, speech=True) == (10.0, "")
+    # A loud background (a promo's music bed, a busy cafe) doesn't hold the words under the
+    # dialogue level: the clip keeps its own balance and the note says the background comes up.
+    for floor in (-40.0, -33.0):
+        clip.loudness_floor = floor
+        volume, why = level_match(clip, -16.0, speech=True)
+        assert volume == 10.0 and f"its background, {-26 - floor:.0f} dB under the words, comes up too" == why
+    # A boost stops where the peaks would clip (in half-dB steps, never past -1 dBFS) and
+    # says how far under the dialogue level that leaves it; it never becomes a cut.
+    clip.loudness_floor, clip.speech_peak = -70.0, -3.8
+    volume, why = level_match(clip, -16.0, speech=True)
+    assert volume == 2.5 and why.startswith("peaks would clip, so it plays 8 dB under the dialogue level") and "Limiter" in why
+    clip.speech_peak = 2.0
+    assert level_match(clip, -16.0, speech=True)[0] == 0.0
+    # Nat sound sits under the dialogue: base gain plus the correction of the whole clip.
     clip.loudness, clip.loudness_floor, clip.peak_db = -26.0, -30.0, -20.0
-    assert level_match(clip, -16.0, -20.0, guard_noise=False) == (-10.0, "")
+    assert level_match(clip, -16.0, -20.0) == (-10.0, "")
+    clip.peak_db = -4.0
+    assert level_match(clip, -16.0, -6.0) == (3.0, "boost limited by peaks")
 
 
 def _spine_volumes(path) -> dict[str, set]:
@@ -327,21 +352,20 @@ def test_speech_from_different_sources_is_matched(talkers, tmp_path):
     check_invariants(result.fcpxml)
     analysis = Analysis.load(out / "analysis.json")
     loud, quiet, noisy = (next(c for c in analysis.clips if c.media.stem == n) for n in ("loud", "quiet", "noisy"))
-    assert abs((loud.loudness - quiet.loudness) - 18.0) < 1.0  # measured over the words
+    assert abs((loud.speech_loudness - quiet.speech_loudness) - 18.0) < 1.0  # measured over the words
     assert noisy.loudness_floor > quiet.loudness_floor + 20  # the background is what differs
 
     vols = _spine_volumes(result.fcpxml)
     assert len(vols["loud"]) == len(vols["quiet"]) == 1  # one gain per source
     (v_loud,), (v_quiet,), (v_noisy,) = vols["loud"], vols["quiet"], vols["noisy"]
     assert abs((v_quiet - v_loud) - 18.0) <= 1.0
-    assert abs(loud.loudness + v_loud - (-16.0)) <= 0.5 and abs(quiet.loudness + v_quiet - (-16.0)) <= 0.5
-    # The noisy clip isn't lifted into its own hiss.
-    assert v_noisy < v_quiet and noisy.loudness_floor + v_noisy <= -45.0 + 0.5
-
+    for clip, v in ((loud, v_loud), (quiet, v_quiet), (noisy, v_noisy)):
+        assert abs(clip.speech_loudness + v - (-16.0)) <= 0.5
+    # Its hiss sits far enough under the words to need no note.
     report = result.report.read_text()
     levels = report.split("## Levels", 1)[1].split("## ", 1)[0]
     assert "about -16 LUFS" in levels and "| quiet.mov | dialogue |" in levels
-    assert "boost limited by background noise" in levels
+    assert "background" not in levels.split("| noisy.mov |", 1)[1].split("\n", 1)[0]
 
 
 def test_dialogue_level_off_and_older_folders(talkers, tmp_path):
@@ -355,7 +379,7 @@ def test_dialogue_level_off_and_older_folders(talkers, tmp_path):
     path = out / "analysis.json"
     data = json.loads(path.read_text())
     for c in data["clips"]:
-        for key in ("loudness", "loudness_floor", "peak_db", "sound_end"):
+        for key in ("loudness", "loudness_floor", "peak_db", "sound_end", "speech_loudness", "speech_peak"):
             c.pop(key, None)
     path.write_text(json.dumps(data))
     again = pipeline.rerender(out, Options(inputs=[], cache_dir=tmp_path / "cache2"))
@@ -585,6 +609,191 @@ def test_music_flag_end_to_end(footage, tmp_path):
     assert main(["build", str(footage), "-o", str(tmp_path / "o2"), "--provider", "none", "--music", str(footage / "photo.png")]) == 1
 
 
+# --------------------------------------------- level matching on real-world shapes
+
+
+@pytest.fixture(scope="module")
+def busy(tmp_path_factory):
+    """Speech over the backgrounds real shoots have: a finished promo's music bed,
+    a cafe's room noise, and an action-cam clip with one line in its ambience
+    (too little speech to count as talking footage)."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("busy")
+    talker(root, "clean", 0.6, created="09:00", lines=LINES["loud"])
+    chord = "0.03*(sin(2*PI*330*t)+sin(2*PI*415*t))*(0.8+0.2*sin(2*PI*2*t))"
+    talker(root, "promo", 0.12, created="09:01", lines=LINES["quiet"], bed=chord)
+    talker(root, "cafe", 0.08, noise=0.007, created="09:02", lines=LINES["noisy"])
+    talker(root, "cam", 0.1, noise=0.008, created="09:03", script=[(8.0, 10.4, "Look at that, it actually floats.")])
+    return root
+
+
+BUSY_PLAN = {
+    "title": "Busy",
+    "sections": [{"name": "Open", "items": ["V01.S001", "V04.S001", "V02.S001", "V03.S001", "V01.S004"]}],
+}
+
+
+def test_speech_over_a_bed_or_a_busy_room_reaches_the_dialogue_level(busy, tmp_path):
+    provider = FakeProvider(BUSY_PLAN)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+        result = pipeline.build(Options(inputs=[busy], out=tmp_path / "out", name="busy", transcriber="none", cache_dir=tmp_path / "cache"))
+    validate_dtd(result.fcpxml)
+    check_invariants(result.fcpxml)
+    analysis = Analysis.load(tmp_path / "out" / "analysis.json")
+    clips = {c.media.stem: c for c in analysis.clips}
+    assert [clips[n].id for n in ("clean", "promo", "cafe", "cam")] == ["V01", "V02", "V03", "V04"]
+    promo, cafe, cam = clips["promo"], clips["cafe"], clips["cam"]
+    assert promo.speech_loudness - promo.loudness_floor < 12  # the bed is part of the mix
+    # A noisy room: the old fixed -45 LUFS noise ceiling allowed it no boost at all.
+    assert cafe.loudness_floor > -45 and cafe.speech_loudness - cafe.loudness_floor < 20
+    # The cam line is measured on its words, well above its ambience.
+    assert cam.role == "broll" and cam.speech_loudness > cam.loudness + 3
+
+    vols = _spine_volumes(result.fcpxml)
+    for name in ("clean", "promo", "cafe", "cam"):
+        (v,) = vols[name]
+        assert abs(clips[name].speech_loudness + v - (-16.0)) <= 0.75, name
+
+    rough = _rough(ET.parse(result.fcpxml).getroot())
+    (cam_el,) = [el for el in rough.find("sequence/spine") if el.get("name") == "cam"]
+    assert cam_el.get("audioRole") == "dialogue" and cam_el.get("videoRole") is None
+
+    levels = result.report.read_text().split("## Levels", 1)[1].split("## ", 1)[0]
+    rows = {line.split("|")[1].strip(): line for line in levels.splitlines() if line.startswith("| ") and ".mov" in line}
+    assert "| dialogue |" in rows["cam.mov"]
+    assert "under the words, comes up too" in rows["promo.mov"] and "under the words, comes up too" in rows["cafe.mov"]
+    assert "noise" not in levels and "as recorded" not in levels
+
+
+def test_a_line_from_a_broll_clip_plays_as_dialogue(tmp_path):
+    talk = make_clip("V01", seconds=30, sentences=[(1.0, 5.0, "We built the first boat in this garage."), (9.0, 13.0, "It took us three whole winters to finish.")])
+    talk.loudness = talk.speech_loudness = -20.0
+    talk.loudness_floor, talk.peak_db, talk.speech_peak = -60.0, -8.0, -8.0
+    cam = make_clip("V02", seconds=40, sentences=[(10.0, 12.4, "Look at that, it actually floats.")], role="broll")
+    cam.loudness, cam.loudness_floor, cam.peak_db = -34.0, -40.0, -14.0
+    cam.speech_loudness, cam.speech_peak = -24.0, -14.0
+    a = Analysis(clips=[talk, cam])
+    raw = {
+        "title": "t",
+        "sections": [{"name": "A", "items": ["V01.S001", "V02.S001", "V01.S002"], "broll": [{"clip": "V02", "over": ["V01.S002"], "source_in": 20, "reason": "the boat in the water"}]}],
+    }
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t - Rough Cut", dialogue_level=-16.0, broll_db=-20.0)
+    (line,) = [sc for sc in tl.spine if sc.clip_id == "V02"]
+    assert line.volume_db == 8.0  # its words to -16, not nat sound 6 dB under
+    (cutaway,) = [cc for cc in tl.connected if cc.clip_id == "V02"]
+    assert cutaway.volume_db == -8.0  # as a cutaway its whole clip is the nat sound: -20 + 12 (held)
+    rows = {(r["clip"], r["use"]): r for r in tl.levels}
+    assert rows[("V02", "dialogue")]["lufs"] == -24.0 and rows[("V02", "dialogue")]["words"]
+    assert rows[("V02", "cutaway nat sound")]["lufs"] == -34.0
+    assert line.fade_in <= Fraction(15, 1000) and line.fade_out <= Fraction(15, 1000)  # de-clicked like speech
+
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    check_invariants(path)
+    spine = list(_rough(ET.parse(path).getroot()).find("sequence/spine"))
+    v02 = next(el for el in spine if el.get("name") == "V02")
+    assert v02.get("audioRole") == "dialogue" and v02.get("videoRole") is None
+    child = next(el for el in spine[-1] if el.get("name") == "V02")
+    assert child.get("audioRole") == "effects.Nat Sound" and child.get("videoRole") == "B-Roll.Planned"
+
+
+def _montage(song_loudness: float = -9.5):
+    photos = [make_clip(f"I0{i}", kind="image") for i in (1, 2, 3)]
+    song = make_clip("A01", kind="audio", seconds=60, role="music")
+    song.loudness, song.loudness_floor, song.peak_db, song.sound_end = song_loudness, -30.0, -0.5, 55.0
+    raw = {
+        "title": "t",
+        "sections": [{"name": "A", "items": ["I01@0-4", "I02@0-4", "I03@0-4"]}],
+        "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 0}],
+    }
+    a = Analysis(clips=photos + [song])
+    return normalize(raw, a), a
+
+
+def test_a_cut_nobody_speaks_in_plays_the_song_at_the_dialogue_level(tmp_path):
+    plan, a = _montage()
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", dialogue_level=-16.0, music_db=-14.0)
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.volume_db == -6.5 and cc.keyframes == []  # -9.5 LUFS to -16: the song is the programme
+    (row,) = tl.levels
+    assert row["volume"] == -6.5 and "nobody speaks" in row["why"]
+    assert cc.fade_in == 1  # still fades in
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    check_invariants(path)
+    music = next(el for el in ET.parse(path).getroot().iter("asset-clip") if el.get("lane") == "-1")
+    assert music.find("adjust-volume").get("amount") == "-6.5dB" and music.find(".//keyframe") is None
+
+    # Levels off: the song plays as recorded, not 14 dB under a dialogue that isn't there.
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", dialogue_level=None, music_db=-14.0)
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.volume_db is None and cc.keyframes == []
+
+
+def test_music_never_comes_up_past_the_dialogue_level():
+    a = _music_project()
+    song = a.clip("A01")
+    song.loudness, song.loudness_floor, song.peak_db = -9.5, -30.0, -0.5
+    plan = normalize(RAW_WITH_MUSIC, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", dialogue_level=-16.0, music_db=-4.0)
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.volume_db == -10.5  # 4 dB under the dialogue while people talk
+    assert max(v for _, v in cc.keyframes) == -6.5  # and up to the dialogue level between, not +8 dB past it
+    row = next(r for r in tl.levels if r["use"] == "music bed")
+    assert "comes up 4 dB" in row["why"]
+    # With the default bed level it still comes up the full 8 dB.
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", dialogue_level=-16.0, music_db=-14.0)
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert max(v for _, v in cc.keyframes) == cc.volume_db + 8
+
+
+def test_fades_off_keeps_the_music_fades():
+    a = _music_project()
+    raw = {
+        "title": "t",
+        "sections": [{"name": "A", "items": ["V01.S001", "I01@0-4"]}, {"name": "B", "items": ["V01.S002"]}],
+        "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 3}],
+    }
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t", fades=False)
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.fade_in == 1 and cc.fade_out > 0  # the bed still fades in, and out where it's cut off
+    assert all(sc.fade_in == sc.fade_out == 0 for sc in tl.spine)  # the edits get none
+
+
+def test_dialogue_level_takes_lufs_after_a_space(tmp_path):
+    from roughcut.cli import _glue_levels, build_parser, main
+
+    for value, want in (("-14LUFS", -14.0), ("-14", -14.0), ("off", None), ("-16 LUFS", -16.0)):
+        args = build_parser().parse_args(_glue_levels(["render", "out", "--dialogue-level", value]))
+        assert args.dialogue_level == want
+    assert build_parser().parse_args(_glue_levels(["render", "out", "--dialogue-level=-14LUFS"])).dialogue_level == -14.0
+    # Through main the option parses (and the missing folder is the only complaint).
+    assert main(["render", str(tmp_path / "missing"), "--dialogue-level", "-14LUFS"]) == 1
+    with pytest.raises(SystemExit):
+        main(["render", str(tmp_path / "missing"), "--dialogue-level", "-60LUFS"])
+
+
+def test_a_vfr_clip_in_the_cut_is_warned_about_once():
+    from roughcut.report import build_report
+
+    phone = make_clip("V01", seconds=30, sentences=[(1.0, 5.0, "We built the first boat in this garage."), (9.0, 13.0, "It took us three whole winters.")])
+    other = make_clip("V02", seconds=10)
+    for clip in (phone, other):
+        clip.media.vfr = True
+        clip.media.warnings = ["variable frame rate (avg 29.62 fps); treated as 29.97"]
+    a = Analysis(clips=[phone, other])
+    a.warnings = [f"{c.media.name}: {c.media.warnings[0]}" for c in (phone, other)]
+    plan = normalize({"title": "t", "sections": [{"name": "A", "items": ["V01.S001", "V01.S002"]}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    warnings = build_report(plan, tl, a).split("## Warnings", 1)[1]
+    mentions = [line for line in warnings.splitlines() if "V01.mov" in line]
+    assert len(mentions) == 1 and "V01.mov (avg 29.62 fps)" in mentions[0]
+    # A VFR clip that isn't in the cut keeps its own line.
+    assert "V02.mov: variable frame rate (avg 29.62 fps)" in warnings
+
+
 # ------------------------------------------------------------------- fuzzing
 
 
@@ -629,6 +838,8 @@ def fuzz_one(seed: int, tmp) -> None:
     a02.take_of, a02.same_words = "A01", 0.95
     clips.append(a02)
     clips.append(make_clip("V02", seconds=rng.choice([3, 20])))
+    # A B-roll clip with one spoken line, which the plan may use as a story item.
+    clips.append(make_clip("V04", seconds=20, sentences=[(6.0, 8.4, "look at that boat go")], role="broll"))
     silent = make_clip("V03", seconds=8)
     silent.media.has_audio = False
     clips += [silent, make_clip("I01", kind="image"), make_clip("I02", kind="image")]
@@ -642,6 +853,9 @@ def fuzz_one(seed: int, tmp) -> None:
             c.loudness = rng.uniform(-40, -6)
             c.loudness_floor = c.loudness - rng.uniform(5, 50)
             c.peak_db = min(0.0, c.loudness + rng.uniform(5, 20))
+            if c.segments and rng.random() < 0.8:
+                c.speech_loudness = c.loudness + rng.uniform(0, 12)
+                c.speech_peak = min(0.0, c.speech_loudness + rng.uniform(5, 25))
     a = Analysis(clips=clips)
 
     segs = [s.id for c in clips for s in c.segments]
@@ -684,9 +898,15 @@ def fuzz_one(seed: int, tmp) -> None:
     validate_dtd(path)
     check_invariants(path)
 
+    from roughcut.timeline import _is_speech, _measured
+
     fd = tl.frame_duration
     for t_ in timelines:
         for sc in t_.spine:
+            clip = a.clip(sc.clip_id)
+            lufs, peak = _measured(clip, _is_speech(sc, clip))
+            if sc.volume_db and sc.volume_db > 0:
+                assert sc.volume_db <= 12.0 and (peak is None or peak + sc.volume_db <= -1.0), "a boost clips"
             length = sc.frames * t_.frame_duration
             assert sc.fade_in + sc.fade_out <= length
             if sc.wa is not None and sc.fade_in:

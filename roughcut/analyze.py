@@ -96,10 +96,13 @@ class Clip:
     same_words: float = 0.0  # word overlap with take_of
     silence_db: float | None = None  # level the silence map was detected at
     background_db: float | None = None  # this clip's measured background (peak dBFS)
-    # Loudness (EBU R128): of the words for talking footage, of the whole clip otherwise.
-    loudness: float | None = None  # integrated LUFS
+    # Loudness (EBU R128). The whole clip is what its nat sound or music plays
+    # at; speech is measured over the transcribed words only.
+    loudness: float | None = None  # integrated LUFS of the whole clip
     loudness_floor: float | None = None  # background, momentary LUFS
-    peak_db: float | None = None  # sample peak dBFS (inside the words for talking footage)
+    peak_db: float | None = None  # sample peak dBFS of the whole clip
+    speech_loudness: float | None = None  # integrated LUFS of the words (None: no words, or under 0.5 s)
+    speech_peak: float | None = None  # sample peak dBFS inside the words
     sound_end: float | None = None  # seconds: where the last sound fades out
     music_bed: bool = False  # given with --music: not transcribed, always the cut's music
 
@@ -137,6 +140,8 @@ class Clip:
             "loudness": self.loudness,
             "loudness_floor": self.loudness_floor,
             "peak_db": self.peak_db,
+            "speech_loudness": self.speech_loudness,
+            "speech_peak": self.speech_peak,
             "sound_end": self.sound_end,
             "music_bed": self.music_bed,
         }
@@ -160,6 +165,8 @@ class Clip:
             loudness=d.get("loudness"),
             loudness_floor=d.get("loudness_floor"),
             peak_db=d.get("peak_db"),
+            speech_loudness=d.get("speech_loudness"),
+            speech_peak=d.get("speech_peak"),
             sound_end=d.get("sound_end"),
             music_bed=bool(d.get("music_bed", False)),
         )
@@ -254,23 +261,29 @@ def _loudness_blocks(m: MediaInfo, cache: Cache) -> dict | None:
 
 
 def speech_spans(clip: Clip) -> list[tuple[float, float]] | None:
-    """Where talking footage has words (or sound, without a transcript); None for everything else."""
-    if clip.role not in ("aroll", "voiceover"):
+    """Where a clip has words: any clip with a transcript, since a B-roll clip's
+    one spoken line can be a story item too. Talking footage without word
+    times falls back to its sentences (or sound regions); None otherwise."""
+    if clip.music_bed:
         return None
     spans = [(w.start, w.end) for s in clip.segments for w in s.words]
-    return spans or [(s.start, s.end) for s in clip.segments] or None
+    if spans:
+        return spans
+    if clip.role in ("aroll", "voiceover"):
+        return [(s.start, s.end) for s in clip.segments] or None
+    return None
 
 
 def measure_levels(clips: list[Clip], cache: Cache, *, workers: int = 4, only_missing: bool = False) -> None:
     """Set each audible clip's loudness, background, peak and last sound.
 
-    Talking footage is measured over its words, so pauses and room tone
-    don't drag the number down; everything else over the whole clip.
+    Speech is measured over the words as well as the whole clip, so pauses
+    and room tone don't drag the dialogue number down.
     """
     todo = [
         c
         for c in clips
-        if c.media.has_audio and c.role != "graphic" and not (only_missing and c.loudness is not None)
+        if c.media.has_audio and c.role != "graphic" and not (only_missing and c.loudness is not None and (c.speech_loudness is not None or not c.segments))
     ]
 
     def one(clip: Clip) -> None:
@@ -279,6 +292,7 @@ def measure_levels(clips: list[Clip], cache: Cache, *, workers: int = 4, only_mi
             return
         s = ffmpeg_ops.level_summary(blocks, speech_spans(clip), clip.duration)
         clip.loudness, clip.loudness_floor, clip.peak_db, clip.sound_end = s["lufs"], s["floor"], s["peak"], s["end"]
+        clip.speech_loudness, clip.speech_peak = s["speech"], s["speech_peak"]
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         list(pool.map(one, todo))

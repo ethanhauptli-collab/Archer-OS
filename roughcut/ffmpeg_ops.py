@@ -145,18 +145,26 @@ def _percentile(values: list[float], q: float) -> float:
 def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, duration: float | None = None) -> dict:
     """Loudness facts for one clip from its `loudness_blocks`.
 
-    lufs: integrated loudness inside `spans` (the words, for talking
-    footage) or over the whole clip. floor: its background (10th percentile
-    of the momentary loudness). peak: sample peak inside the spans (99.5th
-    percentile of 100 ms blocks, so one bump doesn't count). end: where the
-    last sound fades out (for back-timing music).
+    lufs: integrated loudness of the whole clip (what its nat sound or music
+    plays at). speech: the same inside `spans` (the words), None when they
+    cover under half a second. floor: the background (10th percentile of the
+    momentary loudness). peak / speech_peak: sample peak of the clip / of
+    the words (99.5th percentile of 100 ms blocks, so one bump doesn't
+    count). end: where the last sound fades out (for back-timing music).
     """
     step = blocks.get("step", LOUDNESS_STEP)
     m, peaks = blocks.get("m") or [], blocks.get("peak") or []
-    out = {"lufs": None, "floor": None, "peak": None, "end": None}
+    out = {"lufs": None, "floor": None, "peak": None, "end": None, "speech": None, "speech_peak": None}
     if not m:
         return out
-    chosen = list(range(len(m)))
+
+    def peak_of(idx: list[int]) -> float | None:
+        values = [peaks[i] for i in idx if i < len(peaks)]
+        return round(_percentile(values, 0.995), 1) if values else None
+
+    out["lufs"] = gated_loudness(m)
+    out["floor"] = round(_percentile(m, 0.10), 1)
+    out["peak"] = peak_of(list(range(len(m))))
     if spans:
         # A momentary block covers the 400 ms before its frame ends: centre = (i + 1) * step - 0.2.
         spans = sorted(spans)
@@ -168,11 +176,8 @@ def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, 
             if j < len(spans) and spans[j][0] <= centre:
                 inside.append(i)
         if len(inside) >= 5:  # half a second of speech or more
-            chosen = inside
-    out["lufs"] = gated_loudness([m[i] for i in chosen])
-    out["floor"] = round(_percentile(m, 0.10), 1)
-    if peaks:
-        out["peak"] = round(_percentile([peaks[i] for i in chosen if i < len(peaks)] or peaks, 0.995), 1)
+            out["speech"] = gated_loudness([m[i] for i in inside])
+            out["speech_peak"] = peak_of(inside)
     if out["lufs"] is not None:
         loud_enough = max(ABSOLUTE_GATE, out["lufs"] - 30.0)
         last = max((i for i, v in enumerate(m) if v > loud_enough), default=None)

@@ -447,6 +447,7 @@ def build_timeline(
     _place_markers(tl, plan, analysis)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
+    _music_fades(tl, analysis)
     if fades:
         _fades(tl, analysis)
     tl.warnings = warnings
@@ -810,35 +811,47 @@ def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float,
 DIALOGUE_LEVEL = -16.0  # LUFS: what speech is matched to (a common level for online video)
 MAX_BOOST = 12.0  # dB
 MAX_CUT = 12.0  # dB
-NOISE_CEILING = -45.0  # LUFS: a boost never lifts a clip's background above this
 PEAK_CEILING = -1.0  # dBFS: a boost never pushes a clip's peaks past this
 SPINE_BROLL_DB = -6.0  # nat sound of B-roll in the main storyline, relative to the dialogue
+BUSY_BACKGROUND = 20.0  # dB: a boosted talker whose background is closer than this under the words gets a note
 
 
-def level_match(clip: Clip, target: float, base: float = 0.0, *, guard_noise: bool = True) -> tuple[float, str] | None:
-    """(clip volume in dB, what limited it) so `clip` plays at `target` + `base` LUFS.
+def _measured(clip: Clip, speech: bool) -> tuple[float | None, float | None]:
+    """(loudness, peak) to match: the words when `speech` and they were measured, else the whole clip."""
+    if speech and clip.speech_loudness is not None:
+        return clip.speech_loudness, clip.speech_peak
+    return clip.loudness, clip.peak_db
 
-    None when the clip wasn't measured. The correction is held to
-    +/-12 dB, and a boost stops before the clip's background passes
-    NOISE_CEILING (`guard_noise`, for speech: in nat sound and music the
-    quiet parts are the content, and `base` keeps them low anyway) or its
-    peaks pass PEAK_CEILING. A limit never turns a boost into a cut.
+
+def level_match(clip: Clip, target: float, base: float = 0.0, *, speech: bool = False) -> tuple[float, str] | None:
+    """(clip volume in dB, a note on it) so `clip` plays at `target` + `base` LUFS.
+
+    None when the clip wasn't measured. Speech is matched by the loudness of
+    its words, everything else by the whole clip. The correction is held to
+    +/-12 dB, and a boost stops before the peaks pass PEAK_CEILING (a limit
+    never turns a boost into a cut). A talker's background comes up with
+    the words, so the clip keeps its own balance, whether that is a music
+    bed under a finished promo or a busy room; the note says so when the
+    background sits close under the words.
     """
-    if clip.loudness is None:
+    lufs, peak = _measured(clip, speech)
+    if lufs is None:
         return None
-    want = target - clip.loudness
+    want = target - lufs
     match = max(-MAX_CUT, min(MAX_BOOST, want))
-    why = "" if match == want else f"held to {MAX_BOOST if want > 0 else -MAX_CUT:+g} dB"
-    if match > 0:
-        caps = []
-        if guard_noise and clip.loudness_floor is not None:
-            caps.append((max(0.0, NOISE_CEILING - clip.loudness_floor - base), "boost limited by background noise"))
-        if clip.peak_db is not None:
-            caps.append((max(0.0, PEAK_CEILING - clip.peak_db - base), "boost limited by peaks"))
-        for cap, reason in caps:
-            if cap < match:
-                match, why = cap, reason
-    return base + match, why
+    notes = [] if match == want else [f"held to {MAX_BOOST if want > 0 else -MAX_CUT:+g} dB"]
+    if match > 0 and peak is not None:
+        cap = max(0.0, math.floor((PEAK_CEILING - peak - base) * 2) / 2)  # in the half-dB steps volumes use
+        if cap < match:
+            match = cap
+            notes = [
+                f"peaks would clip, so it plays {want - cap:.0f} dB under the dialogue level; a Limiter effect on it lets it come up"
+                if speech
+                else "boost limited by peaks"
+            ]
+    if speech and match >= 3.0 and clip.loudness_floor is not None and lufs - clip.loudness_floor < BUSY_BACKGROUND:
+        notes.append(f"its background, {lufs - clip.loudness_floor:.0f} dB under the words, comes up too")
+    return base + match, "; ".join(notes)
 
 
 def _round_db(v: float) -> float:
@@ -858,30 +871,34 @@ def _mix(tl: Timeline, analysis: Analysis, *, dialogue_level: float | None, brol
         return
     rows: dict[tuple[str, str], dict] = {}
 
-    def row(clip: Clip, use: str, volume: float | None, why: str) -> None:
-        rows.setdefault((clip.id, use), {"clip": clip.id, "use": use, "lufs": clip.loudness, "volume": volume, "why": why})
+    def row(clip: Clip, use: str, speech: bool, volume: float | None, why: str) -> None:
+        lufs = _measured(clip, speech)[0]
+        words = speech and clip.speech_loudness is not None
+        rows.setdefault((clip.id, use), {"clip": clip.id, "use": use, "lufs": lufs, "words": words, "volume": volume, "why": why})
 
     for sc in tl.spine:
         clip = analysis.clip(sc.clip_id)
         if not clip.media.has_audio:
             continue
-        speech = clip.role in ("aroll", "voiceover")
-        got = level_match(clip, dialogue_level, 0.0 if speech else SPINE_BROLL_DB, guard_noise=speech)
+        # A line from a clip classified as B-roll is still dialogue when the plan uses it as one.
+        speech = _is_speech(sc, clip)
+        got = level_match(clip, dialogue_level, 0.0 if speech else SPINE_BROLL_DB, speech=speech)
         if got is None:
             continue
         volume = _round_db(got[0])
         sc.volume_db = volume if abs(volume) >= 1.0 else None
-        row(clip, {"aroll": "dialogue", "voiceover": "narration"}.get(clip.role, "nat sound"), sc.volume_db, got[1])
+        use = ("narration" if clip.role == "voiceover" else "dialogue") if speech else "nat sound"
+        row(clip, use, speech, sc.volume_db, got[1])
     for cc in tl.connected:
         clip = analysis.clip(cc.clip_id)
         base = music_db if cc.kind == "music" else broll_db if cc.kind == "broll" else None
         if clip is None or not clip.media.has_audio or base is None:
             continue
-        got = level_match(clip, dialogue_level, base, guard_noise=False)
+        got = level_match(clip, dialogue_level, base)
         if got is None:
             continue
         cc.volume_db = _round_db(got[0])
-        row(clip, "music bed" if cc.kind == "music" else "cutaway nat sound", cc.volume_db, got[1])
+        row(clip, "music bed" if cc.kind == "music" else "cutaway nat sound", False, cc.volume_db, got[1])
     tl.levels = list(rows.values())
 
 
@@ -897,7 +914,9 @@ def _is_speech(sc: SpineClip, clip: Clip) -> bool:
 def _duck_music(tl: Timeline, analysis: Analysis) -> None:
     """Music sits at its bed level under speech and comes up DUCK_LIFT dB in
     stretches of DUCK_GAP or more where nobody speaks (B-roll montages,
-    stills, the open and close), as volume keyframes in the music clip."""
+    stills, the open and close), as volume keyframes in the music clip,
+    never above the dialogue level. In a cut where nobody speaks at all the
+    song is the programme: it plays at the dialogue level, without keyframes."""
     fd = tl.frame_duration
     speech: list[list[int]] = []
     for sc in tl.spine:
@@ -908,11 +927,33 @@ def _duck_music(tl: Timeline, analysis: Analysis) -> None:
                 speech.append([sc.offset, sc.end])
     min_gap = tc.ceil_frames(DUCK_GAP, fd)
     ramp = max(1, tc.round_frames(DUCK_RAMP, fd))
+
+    def level_row(cc: ConnectedClip) -> dict:
+        return next((r for r in tl.levels if r["clip"] == cc.clip_id and r["use"] == "music bed"), {})
+
     for cc in tl.connected:
         if cc.kind != "music":
             continue
+        clip = analysis.clip(cc.clip_id)
+        # The volume at which the song plays as loud as the dialogue.
+        full = level_match(clip, tl.dialogue_level) if tl.dialogue_level is not None else None
+        if not speech:
+            cc.keyframes = []
+            cc.volume_db = _round_db(full[0]) if full else None
+            if cc.volume_db is not None and abs(cc.volume_db) < 1.0:
+                cc.volume_db = None
+            row = level_row(cc)
+            if row:
+                row["volume"] = cc.volume_db
+                row["why"] = "; ".join(filter(None, ["nobody speaks in this cut, so it plays at the dialogue level", full[1] if full else ""]))
+            continue
         low = cc.volume_db if cc.volume_db is not None else 0.0
         high = low + DUCK_LIFT
+        if full is not None:
+            high = min(high, _round_db(full[0]))
+        if high - low < 1.0:
+            cc.keyframes = []
+            continue
         gaps, cursor = [], cc.start
         for s0, s1 in speech:
             if s1 <= cursor or s0 >= cc.end:
@@ -931,10 +972,9 @@ def _duck_music(tl: Timeline, analysis: Analysis) -> None:
             if g1 < cc.end:
                 points += [(g1 - r, high), (g1, low)]  # back down by the time the voice comes in
         cc.keyframes = [(f - cc.start, v) for f, v in points]
-        if points:
-            for row in tl.levels:
-                if row["clip"] == cc.clip_id and row["use"] == "music bed":
-                    row["why"] = "; ".join(filter(None, [row["why"], f"comes up {DUCK_LIFT:g} dB where nobody speaks"]))
+        row = level_row(cc)
+        if points and row:
+            row["why"] = "; ".join(filter(None, [row["why"], f"comes up {high - low:g} dB where nobody speaks"]))
 
 
 MUSIC_FADE_IN = Fraction(1)  # seconds
@@ -980,18 +1020,26 @@ def _fades(tl: Timeline, analysis: Analysis) -> None:
         sc.fade_out = _samples(min(fade_out, length / 2)) if tail else Fraction(0)
     for cc in tl.connected:
         clip = analysis.clip(cc.clip_id)
-        if clip is None or not clip.media.has_audio:
+        if cc.kind == "broll" and clip is not None and clip.media.has_audio:
+            cc.fade_in = cc.fade_out = _samples(min(CUTAWAY_FADE, cc.frames * fd / 4))
+
+
+def _music_fades(tl: Timeline, analysis: Analysis) -> None:
+    """The music bed fades in over a second and out over two, unless it plays
+    through its own ending. Part of the bed, like the ducking, so `--fades
+    off` (which is about edits) leaves it."""
+    fd = tl.frame_duration
+    for cc in tl.connected:
+        clip = analysis.clip(cc.clip_id)
+        if cc.kind != "music" or clip is None or not clip.media.has_audio:
             continue
         quarter = cc.frames * fd / 4
-        if cc.kind == "broll":
-            cc.fade_in = cc.fade_out = _samples(min(CUTAWAY_FADE, quarter))
-        elif cc.kind == "music":
-            cc.fade_in = _samples(min(MUSIC_FADE_IN, quarter))
-            # A song that plays through its own ending (sound dying away before the
-            # file ends) needs no fade-out; one cut off mid-song, or a file that stops dead, does.
-            last = _last_sound(clip)
-            ends_itself = cc.src_in + (cc.frames + 1) * fd >= last and last <= clip.media.duration - Fraction(1, 4)
-            cc.fade_out = Fraction(0) if ends_itself else _samples(min(MUSIC_FADE_OUT, quarter))
+        cc.fade_in = _samples(min(MUSIC_FADE_IN, quarter))
+        # A song that plays through its own ending (sound dying away before the
+        # file ends) needs no fade-out; one cut off mid-song, or a file that stops dead, does.
+        last = _last_sound(clip)
+        ends_itself = cc.src_in + (cc.frames + 1) * fd >= last and last <= clip.media.duration - Fraction(1, 4)
+        cc.fade_out = Fraction(0) if ends_itself else _samples(min(MUSIC_FADE_OUT, quarter))
 
 
 def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:
