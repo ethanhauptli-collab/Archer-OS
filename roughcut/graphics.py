@@ -19,11 +19,13 @@ The HTML is saved next to each rendered clip. Edit it and run
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import re
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -42,14 +44,16 @@ from .timeline import ConnectedClip, Timeline
 LEAD = 0.12  # a graphic starts animating in just before its words
 MANIFEST = "graphics.json"
 
-# ProRes 4444 with alpha, which Final Cut layers above the footage.
-ENCODER = ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]
+# ProRes 4444 with alpha, which Final Cut layers above the footage. A fixed quantizer encodes
+# about 5x faster than the default rate control at ~80 dB PSNR; alpha is lossless either way.
+ENCODER = ["-c:v", "prores_ks", "-profile:v", "4444", "-qscale:v", "4", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]
 
 # Every browser step has a deadline, so a design that freezes is left out instead of hanging the run.
 FRAME_TIMEOUT = 15.0  # seconds one frame's seek may take
 STEP_TIMEOUT = 30.0  # loading the design, drawing a frame
 BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BUDGET_PER_FRAME x frames) seconds
 PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
+REFERENCE_CHARS = 40_000  # longest finished design sent along as the reference for the other batches
 _SEEK_JS = "t => { document.getAnimations().forEach(a => { a.pause(); a.currentTime = t * 1000; }); if (typeof window.seek === 'function') window.seek(t); }"
 
 
@@ -227,7 +231,10 @@ def canvas(width: int, height: int) -> tuple[int, int, float]:
     return round(width / scale), round(height / scale), scale
 
 
-def _design_request(placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int, house_style: str = "") -> str:
+def _design_request(
+    placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
+    house_style: str = "", reference: tuple[str, str, str] | None = None,
+) -> str:
     cw, ch, _ = canvas(width, height)
     items = []
     for g in placed:
@@ -251,41 +258,85 @@ def _design_request(placed: list[PlacedGraphic], analysis: Analysis, fd: Fractio
     ]
     if house_style:
         parts.append("<design_system>\nAlready established for this video; match it exactly:\n" + house_style + "\n</design_system>")
+    if reference:
+        rid, kind, page = reference
+        parts.append(
+            f'<reference_design id="{rid}" kind="{kind}">\nA finished graphic from this video. Reuse its type, colors, plates, '
+            f"easing and timing so the set looks like one system.\n{page[:REFERENCE_CHARS]}\n</reference_design>"
+        )
     parts.append("<graphics>\n" + json.dumps(items, indent=1) + "\n</graphics>")
     parts.append(f"Design these {len(items)} graphics: {', '.join(g.id for g in placed)}.")
     return "\n\n".join(parts)
 
 
-def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int, warnings: list[str], batch: int = 8) -> dict[str, str]:
+def design(
+    provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
+    warnings: list[str], batch: int = 4, workers: int = 3,
+) -> dict[str, str]:
+    """HTML for each graphic, by ID.
+
+    The first batch is designed on its own and sets the look; the other batches are then
+    designed in parallel, each given that house style and one finished design to match.
+    """
     from .providers import ProviderAuthError, ProviderError, TextPart
 
     html: dict[str, str] = {}
-    house = ""
+    if not placed:
+        return html
+    groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()
-    batches = (len(placed) + batch - 1) // batch
-    log(f"designing {len(placed)} graphics in {batches} request(s)")
-    for n in range(0, len(placed), batch):
-        group = placed[n : n + batch]
-        ids = _ids(group)
-        progress.stage("graphics", f"Designing {len(placed)} graphics", current=n, total=len(placed))
-        request = _design_request(group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house)
+    tried = 0
+    log(f"designing {len(placed)} graphics in {len(groups)} request(s)")
+    progress.stage("graphics", f"Designing {len(placed)} graphics", current=0, total=len(placed))
+
+    def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None):
+        request = _design_request(group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference)
         t0 = time.monotonic()
         try:
             raw = provider.complete_json(DESIGN_SYSTEM, [TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
         except ProviderAuthError:
             raise
         except ProviderError as e:
-            warnings.append(f"graphics design failed for {', '.join(g.id for g in group)}: {e}")
-            log(f"designing {ids} failed after {_took(time.monotonic() - t0)}: {e}")
-            continue
-        house = house or str(raw.get("style") or "")
+            return group, None, str(e), time.monotonic() - t0
+        return group, raw, None, time.monotonic() - t0
+
+    def take(group: list[PlacedGraphic], raw: dict | None, error: str | None, seconds: float) -> dict[str, str]:
+        nonlocal tried
+        tried += len(group)
+        progress.stage("graphics", f"Designing {len(placed)} graphics", current=tried, total=len(placed))
+        if raw is None:
+            warnings.append(f"graphics design failed for {', '.join(g.id for g in group)}: {error}")
+            log(f"designing {_ids(group)} failed after {_took(seconds)}: {error}")
+            return {}
+        wanted = {g.id for g in group}
+        got = {}
         for entry in raw.get("graphics") or []:
-            if isinstance(entry, dict) and "<" in str(entry.get("html", "")):
-                html[str(entry.get("id", "")).upper()] = str(entry["html"])[:300_000]
-        missing = [g.id for g in group if g.id not in html]
+            gid = str(entry.get("id", "")).upper() if isinstance(entry, dict) else ""
+            if gid in wanted and "<" in str(entry.get("html", "")):
+                got[gid] = str(entry["html"])[:300_000]
+        html.update(got)
+        missing = [g.id for g in group if g.id not in got]
         if missing:
             warnings.append(f"no design came back for {', '.join(missing)}; skipped")
-        log(f"designed {ids} in {_took(time.monotonic() - t0)}" + (f" ({', '.join(missing)} missing)" if missing else ""))
+        log(f"designed {_ids(group)} in {_took(seconds)}" + (f" ({', '.join(missing)} missing)" if missing else ""))
+        return got
+
+    # The look is set by the first batch that comes back; then the rest go out together.
+    house, reference = "", None
+    pending = list(groups)
+    while pending:
+        group = pending.pop(0)
+        answer = ask(group, "", None)
+        got = take(*answer)
+        if got:
+            house = str(answer[1].get("style") or "")
+            first = next((g for g in group if g.id in got and g.spec.kind != "title_card"), None) or next(g for g in group if g.id in got)
+            reference = (first.id, first.spec.kind, got[first.id])
+            break
+    if pending:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pending)))) as pool:
+            for future in as_completed([pool.submit(ask, group, house, reference) for group in pending]):
+                take(*future.result())
     log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
     return html
 
@@ -411,6 +462,24 @@ async def _evaluate(cdp, expression: str, seconds: float, what: str):
     return (reply.get("result") or {}).get("value")
 
 
+async def _frame_png(page, cdp, canvas_: tuple[int, int, float], fast: bool, what: str) -> bytes:
+    """One frame as a transparent PNG at the sequence size.
+
+    The fast path asks Chrome directly (about twice as quick as page.screenshot, same pixels);
+    `scale` makes it capture device pixels rather than CSS pixels.
+    """
+    cw, ch, scale = canvas_
+    if fast:
+        clip = {"x": 0, "y": 0, "width": cw, "height": ch, "scale": scale}
+        reply = await _bounded(cdp.send("Page.captureScreenshot", {"format": "png", "optimizeForSpeed": True, "clip": clip}), STEP_TIMEOUT, what)
+        return base64.b64decode(reply["data"])
+    return await _bounded(page.screenshot(omit_background=True, type="png", caret="hide"), STEP_TIMEOUT + 5, what)
+
+
+def _png_size(png: bytes) -> tuple[int, int]:
+    return struct.unpack(">II", png[16:24]) if png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) >= 24 else (0, 0)
+
+
 async def _block(route) -> None:
     await route.abort()  # designs may not fetch anything
 
@@ -425,7 +494,7 @@ async def _render_async(job: dict) -> dict:
     frame_timeout = job.get("frame_timeout") or FRAME_TIMEOUT
     budget = job.get("budget") or max(BUDGET_MIN, BUDGET_PER_FRAME * frames)
     notes: list[str] = []  # script errors from the page, deduplicated
-    result = {"id": gid, "error": None, "notes": notes, "seconds": 0.0}
+    result = {"id": gid, "error": None, "notes": notes, "seconds": 0.0, "fast": True}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "image2pipe", "-framerate", job["rate"], "-i", "-", *ENCODER, "-r", job["rate"], str(tmp)]
     t0 = time.monotonic()
     ff = None
@@ -441,7 +510,11 @@ async def _render_async(job: dict) -> dict:
                     page.on("pageerror", lambda e: _note(notes, f"script error: {e}"))
                     page.on("console", lambda m: m.type == "error" and _note(notes, f"console error: {m.text}"))
                     cdp = await page.context.new_cdp_session(page)
+                    # Transparent page background, set once (page.screenshot sets and resets it every frame).
+                    await _bounded(cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}}), STEP_TIMEOUT, "didn't start")
                     await _bounded(page.set_content(job["html"], wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
+                    size = tuple(job.get("size") or (round(cw * scale), round(ch * scale)))
+                    fast = True
                     ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=ff_err)
                     last_note = t0
                     for frame in range(frames):
@@ -454,7 +527,11 @@ async def _render_async(job: dict) -> dict:
                             log(f"{job.get('slug', gid)}: frame {frame} of {frames} ({_took(now - t0)})")
                             last_note = now
                         await _evaluate(cdp, f"({_SEEK_JS})({frame / fps!r})", frame_timeout, f"froze at frame {frame} (window.seek never returned)")
-                        png = await _bounded(page.screenshot(omit_background=True, type="png", caret="hide"), STEP_TIMEOUT + 5, f"froze at frame {frame} (the page stopped drawing)")
+                        drawing = f"froze at frame {frame} (the page stopped drawing)"
+                        png = await _frame_png(page, cdp, (cw, ch, scale), fast, drawing)
+                        if fast and frame == 0 and _png_size(png) != size:
+                            fast = result["fast"] = False  # the quick capture came out the wrong size: use Playwright's screenshot
+                            png = await _frame_png(page, cdp, (cw, ch, scale), fast, drawing)
                         try:
                             ff.stdin.write(png)
                         except (BrokenPipeError, OSError):
@@ -503,7 +580,9 @@ def _render_one(job: dict) -> dict:
 
 
 def _digest(html: str, frames: int, rate: str, width: int, height: int) -> str:
-    return hashlib.sha256(f"{frames}|{rate}|{width}x{height}|{html}".encode()).hexdigest()[:16]
+    """Identifies a render: the design, its length and size, and how it's rendered and encoded."""
+    how = " ".join(ENCODER) + "|" + _SEEK_JS
+    return hashlib.sha256(f"{frames}|{rate}|{width}x{height}|{how}|{html}".encode()).hexdigest()[:16]
 
 
 def _rendered_digest(entry: dict | None) -> str | None:
@@ -556,7 +635,7 @@ def render(
         notes[gid] = [str(n) for n in old.get(gid, {}).get("notes") or []]
     jobs = [
         {"id": g.id, "slug": g.slug, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
-         "canvas": canvas(tl.width, tl.height), "out": str(folder / f"{g.slug}.mov")}
+         "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "out": str(folder / f"{g.slug}.mov")}
         for g in placed
         if g.id in html and g.id not in done
     ]

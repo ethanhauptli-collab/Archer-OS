@@ -219,3 +219,90 @@ def test_a_failed_design_batch_is_logged(tmp_path, monkeypatch):
 def _probe(path):
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,pix_fmt,width,height", "-of", "json", str(path)], capture_output=True, text=True)
     return json.loads(probe.stdout)["streams"][0]
+
+
+# ------------------------------------------------------------------ T12: render and design faster
+
+
+@needs_renderer
+def test_fast_frame_capture_matches_playwrights_screenshot():
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    def rgba(png: bytes) -> bytes:
+        return subprocess.run(["ffmpeg", "-v", "error", "-i", "-", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], input=png, capture_output=True, check=True).stdout
+
+    async def both(width, height):
+        cw, ch, scale = graphics.canvas(width, height)
+        async with async_playwright() as p:
+            browser = await graphics._launch_browser_async(p)
+            page = await browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
+            cdp = await page.context.new_cdp_session(page)
+            await cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
+            await page.set_content(GRAPHIC_HTML.replace("TEXT", "Match"), wait_until="load")
+            await graphics._evaluate(cdp, f"({graphics._SEEK_JS})(1.0)", 5, "seek")
+            fast = await graphics._frame_png(page, cdp, (cw, ch, scale), True, "fast")
+            slow = await graphics._frame_png(page, cdp, (cw, ch, scale), False, "slow")
+            await browser.close()
+            return fast, slow
+
+    for size in ((640, 360), (360, 640)):
+        fast, slow = asyncio.run(both(*size))
+        assert graphics._png_size(fast) == size == graphics._png_size(slow)
+        a, b = rgba(fast), rgba(slow)
+        assert a == b and min(a[3::4]) == 0 and max(a[3::4]) == 255  # same pixels, transparent background, opaque plate
+
+
+@needs_renderer
+def test_renders_are_full_size_prores_4444_at_a_fixed_quality(tmp_path):
+    result = graphics._render_one(job_for(tmp_path, GRAPHIC_HTML, size=(320, 180)))
+    assert result["error"] is None and result["fast"] is True
+    stream = _probe(tmp_path / "G01-test.mov")
+    assert stream["codec_name"] == "prores" and stream["pix_fmt"].startswith("yuva") and (stream["width"], stream["height"]) == (320, 180)
+    assert "-qscale:v" in graphics.ENCODER
+
+    # If the quick capture ever comes out the wrong size, frames come from Playwright's screenshot instead.
+    result = graphics._render_one(job_for(tmp_path, GRAPHIC_HTML, gid="G02", size=(999, 999)))
+    assert result["error"] is None and result["fast"] is False
+    stream = _probe(tmp_path / "G02-test.mov")
+    assert (stream["width"], stream["height"]) == (320, 180)
+
+
+def test_how_a_graphic_is_encoded_is_part_of_its_digest(monkeypatch):
+    before = graphics._digest("<html>", 90, "30000/1001", 1920, 1080)
+    monkeypatch.setattr(graphics, "ENCODER", [*graphics.ENCODER[:-2], "-vendor", "other"])
+    assert graphics._digest("<html>", 90, "30000/1001", 1920, 1080) != before
+    monkeypatch.undo()
+    monkeypatch.setattr(graphics, "_SEEK_JS", graphics._SEEK_JS + " ")
+    assert graphics._digest("<html>", 90, "30000/1001", 1920, 1080) != before
+
+
+def test_first_design_batch_sets_the_look_and_the_rest_run_in_parallel():
+    from roughcut.graphics import PlacedGraphic
+    from roughcut.plan import GraphicSpec
+
+    a, _, tl = small_cut([])
+    kinds = ["title_card", "lower_third"] + ["stat"] * 8
+    placed = [
+        PlacedGraphic(id=f"G{n + 1:02d}", spec=GraphicSpec(kind=k, segment="V01.S003", words="", text=f"Graphic {n + 1}"), index=n, start=n * 40, frames=30)
+        for n, k in enumerate(kinds)
+    ]
+    provider = DesignsBy(delay=0.4)
+    warnings: list[str] = []
+    html = graphics.design(provider, placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings)
+    assert sorted(html) == [g.id for g in placed] and not warnings
+
+    requests = [c["parts"][-1].text for c in provider.calls if c["schema_name"] == "graphics"]
+    assert len(requests) == 3
+    assert "<design_system>" not in requests[0] and "<reference_design" not in requests[0]
+    later = sorted(requests[1:], key=lambda r: "G05" not in r)
+    assert "Design these 4 graphics: G05, G06, G07, G08." in later[0] and "Design these 2 graphics: G09, G10." in later[1]
+    for r in later:
+        # The house style from batch 1, and its first design that isn't a title card (G02) as the reference.
+        assert "<design_system>\nAlready established for this video; match it exactly:\ntest plate" in r
+        assert '<reference_design id="G02" kind="lower_third">' in r and "G02 <span" in r
+
+    first, second, third = sorted(provider.spans)
+    assert first[1] <= second[0] and first[1] <= third[0]  # batch 1 finished before the others started
+    assert second[0] < third[1] and third[0] < second[1]  # the others overlapped
