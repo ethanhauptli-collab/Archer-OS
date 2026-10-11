@@ -16,7 +16,9 @@ final class ProgressEventTests: XCTestCase {
         for stage in events.compactMap(\.stageValue) where stages.last != stage {
             stages.append(stage)
         }
-        XCTAssertEqual(stages, Stage.allCases)
+        // Stages arrive in pipeline order; the sample run had motion graphics off.
+        XCTAssertEqual(stages, stages.sorted { $0.order < $1.order })
+        XCTAssertEqual(Set(Stage.allCases).subtracting(stages), stages.contains(.graphics) ? [] : [.graphics])
 
         let transcribe = try XCTUnwrap(events.last { $0.stageValue == .transcribe })
         XCTAssertEqual(transcribe.current, transcribe.total)
