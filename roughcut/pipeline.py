@@ -217,9 +217,14 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
     )
 
 
+def media_part(analysis: Analysis) -> TextPart:
+    """The footage inventory, a prompt-cache breakpoint: build and revise send it byte for byte the same."""
+    return TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True)
+
+
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
     parts = [
-        TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True),
+        media_part(analysis),
         TextPart(render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)),
     ]
     # Thinking counts against max_tokens; a long narration plan needs the room.
@@ -441,10 +446,15 @@ def build(opts: Options) -> Result:
         raise
 
 
-def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version) -> Result:
+def _finish_build(
+    opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
+    *, command: str = "build", carry: dict | None = None, report_extra=None, entry_extra: dict | None = None,
+) -> Result:
+    """Cut, make graphics, write the version. `carry` (revise): earlier graphic designs to reuse."""
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
-    entry = {"style": opts.style, "planner": planner_label(plan.source)}
+    entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
+    extra = report_extra(rough) if report_extra else {}
     placed, with_graphics = [], analysis
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
@@ -453,13 +463,19 @@ def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_ba
             # A complete cut without graphics first: if rendering stops, there's still a cut to open.
             pending = ["Motion graphics were still being made when this cut was written; if the run stopped there, this cut has none. `roughcut render` adds any whose designs were saved."]
             write_outputs(
-                out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending),
-                version=version, entry=entry, quiet=True,
+                out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
+                version=version, command=command, entry=entry, quiet=True,
             )
             t = time.monotonic()
-            g_clips, placed, g_warnings = graphics.make(
-                provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
-            )
+            if carry is not None:
+                saved_html = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
+                g_clips, placed, g_warnings = graphics.make(
+                    None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers, saved_html=saved_html
+                )
+            else:
+                g_clips, placed, g_warnings = graphics.make(
+                    provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers
+                )
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
             timings["graphics"] = time.monotonic() - t
@@ -476,8 +492,9 @@ def _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_ba
         with_graphics,
         rough,
         stringout,
-        dict(usage=usage, timings=timings, extra_warnings=extra_warnings, graphics=placed),
+        dict(usage=usage, timings=timings, extra_warnings=extra_warnings, graphics=placed, **extra),
         version=version,
+        command=command,
         entry=entry,
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
@@ -493,17 +510,9 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     Cut settings (style, format, fillers, levels...) come from the saved run
     unless `overrides` (or, without it, a non-default value in `opts`) says otherwise.
     """
-    if not (out_dir / "analysis.json").is_file() or not (out_dir / "plan.json").is_file():
-        raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
+    _require_output_folder(out_dir)
     start_log(out_dir, "render")
-    analysis = Analysis.load(out_dir / "analysis.json")
-    saved = json.loads((out_dir / "plan.json").read_text())
-    digest = saved.get("analysis_digest")
-    if digest and digest != analysis_digest(analysis):
-        raise RoughcutError(
-            "plan.json was made for a different set of clips than analysis.json (the footage changed since it was planned), "
-            "so its segment IDs would point at the wrong clips. Run `roughcut build` again."
-        )
+    analysis, saved = _load_saved(out_dir)
     settings = saved.get("settings") or {}
     opts = render_options(opts, settings, overrides)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
@@ -539,3 +548,190 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
         version=version, project=rough.name, event=event_name(name),
     )
+
+
+# ------------------------------------------------------------------ revise
+
+
+def _require_output_folder(out_dir: Path) -> None:
+    if not (out_dir / "analysis.json").is_file() or not (out_dir / "plan.json").is_file():
+        raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
+
+
+def _load_saved(out_dir: Path) -> tuple[Analysis, dict]:
+    """The saved analysis and plan, refusing a plan whose segment IDs belong to other clips."""
+    analysis = Analysis.load(out_dir / "analysis.json")
+    saved = json.loads((out_dir / "plan.json").read_text())
+    digest = saved.get("analysis_digest")
+    if digest and digest != analysis_digest(analysis):
+        raise RoughcutError(
+            "plan.json was made for a different set of clips than analysis.json (the footage changed since it was planned), "
+            "so its segment IDs would point at the wrong clips. Run `roughcut build` again."
+        )
+    return analysis, saved
+
+
+def _spec_key(spec) -> tuple:
+    return (spec.kind, spec.segment, " ".join(spec.words.lower().split()), spec.text.strip())
+
+
+def _carry_designs(provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str]) -> dict[int, str]:
+    """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look."""
+    from . import graphics
+
+    saved_html = {i: carry[_spec_key(spec)] for i, spec in enumerate(specs) if _spec_key(spec) in carry}
+    placed = graphics.place(specs, rough, analysis, [])  # make() places again and reports what didn't fit
+    new = [g for g in placed if g.index not in saved_html]
+    if new and provider is not None:
+        style = opts.graphics_style
+        if carry:
+            sample = next(iter(carry.values()))
+            style = (style + "\n\n" if style else "") + (
+                "Match the graphics already made for this video exactly (type, colors, plates, corner radii, motion). One of them:\n" + sample[:8000]
+            )
+        designed = graphics.design(
+            provider, new, analysis, rough.frame_duration, brief=opts.context, style=style, width=rough.width, height=rough.height, warnings=warnings
+        )
+        for g in new:
+            if g.id in designed:
+                saved_html[g.index] = designed[g.id]
+    log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new)} new")
+    return saved_html
+
+
+def _pick_provider(settings: dict, source: str, provider: str | None, model: str | None) -> tuple[str, str | None]:
+    """The revision uses the run's own planner unless told otherwise."""
+    saved_name = settings.get("provider")
+    from_source = source.split(":", 1)[0] if ":" in source else None
+    name = provider or (saved_name if saved_name and saved_name != "none" else None) or from_source or "anthropic"
+    if model:
+        return name, model
+    if saved_name == name and settings.get("model"):
+        return name, settings["model"]
+    if from_source == name:
+        return name, source.split(":", 1)[1]
+    return name, None
+
+
+def revise(
+    out_dir: Path,
+    notes: str,
+    opts: Options,
+    *,
+    keep: list[str] | None = None,
+    avoid: list[str] | None = None,
+    overrides: set[str] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    target_seconds: float | None = None,
+    graphics: bool | None = None,
+) -> Result:
+    """Re-plan the latest version from the editor's notes, as a new version. No re-transcription.
+
+    The planner sees the build's system prompt and media block (prompt-cached),
+    the previous plan and the notes. Arguments left as None come from the saved run.
+    """
+    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids
+
+    t_start = time.monotonic()
+    out_dir = out_dir.expanduser().resolve()
+    _require_output_folder(out_dir)
+    start_log(out_dir, "revise")
+    analysis, saved = _load_saved(out_dir)
+    settings = dict(saved.get("settings") or {})
+    if "context" not in settings and (out_dir / "prompt.md").is_file():
+        # A folder from before settings were saved: the brief is in the prompt it sent.
+        for k, v in recover_brief((out_dir / "prompt.md").read_text(encoding="utf-8")).items():
+            settings.setdefault(k, v)
+    opts = render_options(opts, settings, overrides)
+    opts = replace(
+        opts,
+        stringout=False,  # one new Rough Cut; the stringout doesn't change with notes
+        context=settings.get("context") or "",
+        script=settings.get("script"),
+        target_seconds=target_seconds if target_seconds is not None else settings.get("target_seconds"),
+        graphics=graphics if graphics is not None else bool(settings.get("graphics")),
+        graphics_style=settings.get("graphics_style") or "",
+        base_url=settings.get("base_url"),
+        api_key_env=settings.get("api_key_env"),
+        effort=effort or settings.get("effort") or "high",
+    )
+    name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
+    source = saved["plan"].get("source", "")
+    provider_name, model_name = _pick_provider(settings, source, provider, model)
+    opts = replace(opts, provider=provider_name, model=model_name)
+    p = make_provider(provider_name, model=model_name, base_url=opts.base_url, api_key_env=opts.api_key_env, effort=opts.effort)
+    if p is None:
+        raise RoughcutError("Revising re-plans the cut with a model, so it needs a provider (not --provider none).")
+    log(f"checking {p.name} access ({p.model})")
+    p.verify()
+    if opts.graphics:
+        from . import graphics as gfx
+
+        problem = gfx.renderer_problem()
+        if problem:
+            raise RoughcutError(problem)
+
+    previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    history = [h for h in saved.get("notes_history") or [] if isinstance(h, dict) and h.get("notes")]
+    keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
+    request = revision_request(
+        previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
+        graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=avoid_ids,
+    )
+    prev_entry = versions.current(out_dir) or {}
+    prev_n = prev_entry.get("n")
+    t = time.monotonic()
+    progress.stage("plan", f"Revising the edit with {p.model}")
+    log(f"revising the edit with {p.name}:{p.model}: {notes.strip()[:200]}")
+    try:
+        raw = p.complete_json(
+            PLANNER_SYSTEM, [media_part(analysis), TextPart(request)], plan_schema(opts.graphics),
+            schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
+        )
+    except ProviderAuthError:
+        raise
+    except ProviderError as e:
+        raise ProviderError(f"{e} Nothing changed: " + (f"v{prev_n} is still the latest cut." if prev_n else "the previous cut is still there.")) from e
+    timings = {"revision": time.monotonic() - t}
+    plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
+    enforced = enforce(plan, analysis, keep=keep_ids, avoid=avoid_ids, previous=previous)
+    plan.warnings += enforced.warnings
+    if not plan.sections:
+        raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")
+
+    carry = None
+    if opts.graphics:
+        from . import graphics as gfx
+
+        specs, html, _ = gfx.saved_designs(out_dir)
+        carry = {_spec_key(specs[i]): h for i, h in html.items() if i < len(specs) and specs[i].text}
+
+    before_seconds = prev_entry.get("rough_seconds")
+    if before_seconds is None:
+        before_seconds = build_timeline(previous, analysis, style=style_for(opts), name="previous", format_override=opts.format, fill=opts.fill).seconds
+
+    version = versions.next_number(out_dir)
+    versions.snapshot(out_dir, before=version)
+    new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True)}
+    record = plan_record(name, plan, raw, analysis, new_settings)
+    record["notes_history"] = history + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
+    if prev_n:
+        record["revision_of"] = prev_n
+    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n" + request
+    save_checkpoint(out_dir, analysis, prompt, record)
+    (out_dir / "graphics.json").unlink(missing_ok=True)  # the new version makes its own (reusing designs) or none
+
+    def report_extra(rough: Timeline) -> dict:
+        changes = describe_changes(previous, plan, analysis, before_seconds=before_seconds, after_seconds=rough.seconds, previous_version=prev_n)
+        return {"revision": report_block(notes, [h["notes"] for h in history], changes, enforced.missing_keeps)}
+
+    try:
+        return _finish_build(
+            opts, out_dir, name, p, analysis, plan, record, False, [p.usage], timings, [], t_start, version,
+            command="revise", carry=carry, report_extra=report_extra, entry_extra={"notes": notes.strip(), "revision_of": prev_n},
+        )
+    except BaseException as e:
+        _mark_plan_saved(e, out_dir)
+        raise

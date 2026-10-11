@@ -48,6 +48,7 @@ def build_report(
     timings: dict[str, float] | None = None,
     extra_warnings: list[str] | None = None,
     graphics: list | None = None,
+    revision: list[str] | None = None,
 ) -> str:
     raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role != "graphic")
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
@@ -56,6 +57,8 @@ def build_report(
     if failures:
         L += ["> **The AI didn't plan this cut.** It's the stringout: all speech in recording order with dead air removed, no B-roll.", ">"]
         L += [f"> {w}" for w in failures] + [""]
+    if revision:  # `roughcut revise`: the notes and what they changed, before anything else
+        L += list(revision)
     if plan.logline:
         L += [f"_{plan.logline}_", ""]
     L += [

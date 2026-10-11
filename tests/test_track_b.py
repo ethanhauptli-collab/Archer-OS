@@ -388,3 +388,159 @@ def test_cancel_from_the_app_stops_claude_and_logs_it(footage, tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert (out / "roughcut.log").read_text().rstrip().endswith("STOPPED: cancelled")
+
+
+# ---------------------------------------------------------------- N6: revise from notes
+
+
+def _revised_plan() -> dict:
+    """The canned plan minus 'It's going to be a long day.', plus an unknown ID the model invented."""
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["sections"][1]["items"].remove("V01.S004")
+    plan["sections"][1]["broll"][0]["over"] = ["V01.S003"]
+    plan["sections"][2]["items"].append("V07.S001")
+    plan["cut_notes"] = "Dropped the long-day line."
+    return plan
+
+
+def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", context="Family trip", target_seconds=60))
+    build_call = next(c for c in fake.calls if c["purpose"] == "edit plan")
+    fake.plan = _revised_plan()
+
+    result = pipeline.revise(out, "Drop the long-day line.", Options(inputs=[]))
+    call = fake.calls[-1]
+    assert call["purpose"] == "revision" and call["schema_name"] == "edit_plan"
+    # Same system prompt and byte-identical cached media block: the revision pays only for the new part.
+    assert call["system"] == build_call["system"]
+    assert call["parts"][0].text == build_call["parts"][0].text and call["parts"][0].cache is True
+    request = call["parts"][1].text
+    assert not call["parts"][1].cache
+    assert "<editor_notes>\nDrop the long-day line.\n</editor_notes>" in request
+    assert "<previous_plan>" in request and 'V01.S004 "It\'s going to be a long day."' in request
+    assert "Family trip" in request and "1:00" in request  # the build's brief still applies
+
+    assert result.version == 2 and result.project == "footage - Rough Cut v2 (medium, fake-model)"
+    assert result.stringout is None  # one new Rough Cut; the stringout didn't change
+    assert _top_fcpxml(out) == ["footage v2.fcpxml"]
+    validate_dtd(result.fcpxml)
+    assert set(check_invariants(result.fcpxml)) == {"footage - Rough Cut v2 (medium, fake-model)"}
+    assert "V01.S004" not in [i.seg_id for s in result.plan.sections for i in s.items]
+    assert any("V07.S001" in w for w in result.warnings)  # still checked by normalize()
+
+    report = result.report.read_text()
+    assert report.index("## Revision notes") < report.index("## Paper edit")
+    assert "> Drop the long-day line." in report and 'Removed **V01.S004** "It\'s going to be a long day."' in report
+    assert "Changes from v1:" in report and "- Length: 0:15 → 0:" in report
+    saved = json.loads((out / "plan.json").read_text())
+    assert saved["notes_history"] == [{"version": 2, "notes": "Drop the long-day line.", "keep": [], "avoid": []}]
+    assert saved["settings"]["context"] == "Family trip" and saved["revision_of"] == 1
+
+
+def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
+    pipeline.revise(out, "More B-roll in the wrap.", Options(inputs=[]))
+    request = fake.calls[-1]["parts"][1].text
+    assert "<earlier_notes>\n- Tighter hook.\n</earlier_notes>" in request and "More B-roll in the wrap." in request
+    assert "Earlier notes, still applied:" in (out / "edit_report.md").read_text()
+    assert _top_fcpxml(out) == ["footage v3.fcpxml"]
+
+
+def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    code = main(["revise", str(out), "Less of the photo.", "--avoid", "V01.S003,V02", "--avoid", "V03@0-2", "--keep", "V01.S002"])
+    assert code == 0
+    plan = json.loads((out / "plan.json").read_text())["plan"]
+    items = [i for s in plan["sections"] for i in s["items"]]
+    assert "V01.S003" not in items and not any(i.startswith("V03@") for i in items)
+    assert not any(b["clip"] == "V02" for s in plan["sections"] for b in s["broll"])
+    assert {"ref": "V01.S005", "note": "You asked to keep V01.S002 (--keep), but the revision left it out."} in plan["flags"]  # marked on the next line kept
+    report = (out / "edit_report.md").read_text()
+    assert "**You asked to keep V01.S002, but the revision left it out.**" in report
+    xml = next(out.glob("*.fcpxml")).read_text()
+    assert "You asked to keep V01.S002" in xml  # a to-do marker in Final Cut
+    validate_dtd(next(out.glob("*.fcpxml")))
+
+
+def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", context="Family trip to the lake", target_seconds=90))
+    saved = json.loads((out / "plan.json").read_text())
+    (out / "plan.json").write_text(json.dumps({"name": saved["name"], "plan": saved["plan"], "raw": saved["raw"]}))
+    (out / "versions.json").unlink()
+    (out / "footage v1.fcpxml").rename(out / "footage.fcpxml")
+
+    result = pipeline.revise(out, "Tighter.", Options(inputs=[]))
+    request = fake.calls[-1]["parts"][1].text
+    assert "Family trip to the lake" in request and "1:30" in request  # recovered from prompt.md
+    assert result.version == 2 and _top_fcpxml(out) == ["footage v2.fcpxml"]
+    validate_dtd(result.fcpxml)
+    check_invariants(result.fcpxml)
+
+
+def test_a_failed_revision_changes_nothing(footage, tmp_path, monkeypatch, fake):
+    from roughcut.providers import ProviderError
+
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
+
+    def overloaded(*a, **k):
+        raise ProviderError("Anthropic API error 529: overloaded")
+
+    monkeypatch.setattr(fake, "complete_json", overloaded)
+    with pytest.raises(ProviderError, match="Nothing changed: v1 is still the latest cut"):
+        pipeline.revise(out, "Tighter.", Options(inputs=[]))
+    after = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
+    assert after == before
+
+
+def test_revise_progress_stream_for_the_app(footage, tmp_path, fake, capsys):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    capsys.readouterr()
+    assert main(["revise", str(out), "Tighter hook.", "--progress-json"]) == 0
+    events = _events(capsys.readouterr().out)
+    assert [e["stage"] for e in events if e["event"] == "stage"] == ["plan", "cut", "write"]
+    done = events[-1]["result"]
+    assert done["version"] == 2 and done["stringout_seconds"] is None and done["project"].startswith("footage - Rough Cut v2")
+
+
+def test_revise_needs_notes(tmp_path, capsys):
+    assert main(["revise", str(tmp_path)]) == 1
+    assert "Say what to change" in capsys.readouterr().err
+
+
+def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp_path, monkeypatch):
+    plan = _graphics_plan()
+    plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "for weeks", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
+    provider = FakeProvider(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    # The designs are what's under test: skip the browser, keep everything else.
+    monkeypatch.setattr(graphics, "_render_one", lambda job: {"id": job["id"], "error": "not rendered in this test", "console": []})
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", graphics=True))
+    manifest = json.loads((out / "graphics.json").read_text())
+    title = next(g for g in manifest["graphics"] if g["kind"] == "title_card")
+    (out / title["html"]).write_text((out / title["html"]).read_text() + "<!-- hand edit -->")
+
+    revised = json.loads(json.dumps(plan))
+    revised["graphics"][1]["text"] = "Three Weeks"  # changed: needs a new design
+    provider.plan = revised
+    designs_before = sum(1 for c in provider.calls if c["schema_name"] == "graphics")
+    pipeline.revise(out, "Say three weeks.", Options(inputs=[]))
+
+    design_calls = [c for c in provider.calls if c["schema_name"] == "graphics"][designs_before:]
+    assert len(design_calls) == 1
+    request = design_calls[0]["parts"][-1].text
+    assert "Three Weeks" in request and "Heading Out" not in request.split("<graphics>")[-1]
+    assert "Match the graphics already made for this video" in request
+    after = json.loads((out / "graphics.json").read_text())
+    kept = next(g for g in after["graphics"] if g["kind"] == "title_card")
+    assert "<!-- hand edit -->" in (out / kept["html"]).read_text()  # the saved (hand-edited) design, not a new one
+    assert (next((out / "history").glob("v1 *")) / title["html"]).is_file()  # v1's designs are kept in history

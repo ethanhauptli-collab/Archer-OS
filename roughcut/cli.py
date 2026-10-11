@@ -77,6 +77,20 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("out_dir", help="a folder written by `roughcut build`")
     _add_render_args(r)
 
+    rv = sub.add_parser("revise", help="re-plan the latest cut from your notes, as a new version (no re-transcription)")
+    rv.add_argument("out_dir", help="a folder written by `roughcut build`")
+    rv.add_argument("notes", nargs="?", default="", help='what to change, e.g. "tighter hook, drop the second Roy Choi line, more drone over the intro"')
+    rv.add_argument("--notes-file", help="read the notes from a text file")
+    rv.add_argument("--keep", action="append", default=[], metavar="IDS", help="segment or clip IDs the new cut must keep (comma-separated or repeated)")
+    rv.add_argument("--avoid", action="append", default=[], metavar="IDS", help="segment IDs, clip IDs or CLIP@start-end ranges to leave out")
+    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30 (default: the build's)")
+    rv.add_argument("--provider", choices=[p for p in PROVIDERS if p != "none"], help="who re-plans (default: the one that planned this cut)")
+    rv.add_argument("--model", help="model for the revision (default: the one that planned this cut)")
+    rv.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="reasoning effort (default: the build's)")
+    rv.add_argument("--graphics", action=argparse.BooleanOptionalAction, help="motion graphics (default: as in the build; unchanged ones are reused, not redesigned)")
+    rv.add_argument("--workers", type=int, default=4)
+    _add_render_args(rv)
+
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
     d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic")
@@ -372,6 +386,30 @@ def _run(args, json_mode: bool) -> int:
     try:
         if args.command == "render":
             result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common), overrides=set(given))
+        elif args.command == "revise":
+            from .pipeline import revise
+
+            notes = "\n\n".join(t.strip() for t in (args.notes, _read(args.notes_file)) if t.strip())
+            if not (notes or args.keep or args.avoid or args.target):
+                raise ValueError('Say what to change, e.g.  roughcut revise <folder> "tighter hook, more drone over the intro"')
+            model = args.model
+            if model and args.provider in (None, "anthropic", "claude-code"):
+                from .providers.anthropic_provider import resolve_model
+
+                model = resolve_model(model)
+            result = revise(
+                Path(args.out_dir),
+                notes,
+                Options(inputs=[], workers=args.workers, **common),
+                keep=args.keep,
+                avoid=args.avoid,
+                overrides=set(given),
+                provider=args.provider,
+                model=model,
+                effort=args.effort,
+                target_seconds=parse_duration(args.target) if args.target else None,
+                graphics=args.graphics,
+            )
         else:
             if args.provider in ("anthropic", "claude-code"):
                 from .providers.anthropic_provider import resolve_model
