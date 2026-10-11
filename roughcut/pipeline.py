@@ -12,7 +12,7 @@ from pathlib import Path
 from . import progress
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
 from .fcpxml import build_fcpxml
-from .media import require_tools, scan
+from .media import AUDIO_EXTS, require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
@@ -52,6 +52,7 @@ class Options:
     fill: bool = True  # cover narration the plan left without picture
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
     graphics_style: str = ""  # look and brand for them: colors, fonts, mood
+    music: list[Path] = field(default_factory=list)  # --music: songs to lay under the cut (not transcribed)
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -113,7 +114,10 @@ def style_for(opts: Options) -> Style:
 def run_analysis(opts: Options, out_dir: Path) -> Analysis:
     require_tools()
     progress.stage("scan", "Finding media")
-    files = scan(opts.inputs, exclude=[out_dir])
+    for song in opts.music:
+        if not song.expanduser().is_file() or song.suffix.lower() not in AUDIO_EXTS:
+            raise RoughcutError(f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})")
+    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir])
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -130,7 +134,8 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
         w, h, _ = parse_format(opts.format)
         prefer_vertical = h > w
     return analyze(
-        files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical
+        files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical,
+        music=opts.music,
     )
 
 
@@ -167,6 +172,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
                 fill=opts.fill,
                 dialogue_level=opts.dialogue_level,
                 fades=opts.fades,
+                music_beds=False,  # the stringout is for reading the speech
             )
     return rough, stringout
 

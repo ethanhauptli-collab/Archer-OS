@@ -76,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
     ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
+    b.add_argument(
+        "--music", action="append", default=[], metavar="FILE",
+        help="a song to lay under the cut (from anywhere, e.g. Downloads): not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more",
+    )
     gfx = b.add_argument_group("motion graphics")
     gfx.add_argument("--graphics", action="store_true", help="have Claude design animated graphics (lower thirds, stats, kinetic captions...) from the transcript, rendered to ProRes 4444 above the footage")
     gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'orange #F26B21, Gotham, bold and minimal'")
@@ -395,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 graphics=args.graphics,
                 graphics_style=args.graphics_style,
+                music=[Path(p).expanduser() for p in args.music],
                 **common,
             )
             result = build(opts)

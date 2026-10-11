@@ -177,10 +177,20 @@ def _clip_element(
 FADE_SHAPE = "easeIn"  # what Final Cut writes for its default (+3 dB) fade handles, in and out
 
 
-def _volume(el: ET.Element, clip: Clip, volume_db: float | None, fade_in: Fraction = Fraction(0), fade_out: Fraction = Fraction(0)) -> None:
+def _volume(
+    el: ET.Element,
+    clip: Clip,
+    volume_db: float | None,
+    fade_in: Fraction = Fraction(0),
+    fade_out: Fraction = Fraction(0),
+    keyframes: list[tuple[Fraction, float]] | None = None,
+    timebase: int | None = None,
+) -> None:
     """The clip's <adjust-volume>, written the way Final Cut writes it:
-    `amount` for the level, and fade handles as <fadeIn>/<fadeOut> inside
-    <param name="amount">.
+    `amount` for a fixed level; fade handles as <fadeIn>/<fadeOut> inside
+    <param name="amount">; volume automation as a <keyframeAnimation> there
+    (times in the clip's own source time, like its `start`), which replaces
+    `amount`.
 
     The DTD puts it after <note> and the video adjustments and before any
     anchored clip or marker, so call this before attaching children. Stills
@@ -188,15 +198,20 @@ def _volume(el: ET.Element, clip: Clip, volume_db: float | None, fade_in: Fracti
     """
     if el.tag != "asset-clip" or not clip.media.has_audio:
         return
-    if volume_db is None and not fade_in and not fade_out:
+    if volume_db is None and not fade_in and not fade_out and not keyframes:
         return
-    adjust = ET.SubElement(el, "adjust-volume", {"amount": f"{volume_db:g}dB"} if volume_db is not None else {})
-    if fade_in or fade_out:
+    attrs = {"amount": f"{volume_db:g}dB"} if volume_db is not None and not keyframes else {}
+    adjust = ET.SubElement(el, "adjust-volume", attrs)
+    if fade_in or fade_out or keyframes:
         param = ET.SubElement(adjust, "param", {"name": "amount"})
         if fade_in:
             ET.SubElement(param, "fadeIn", {"type": FADE_SHAPE, "duration": tc.fcpx_time(fade_in, 48000)})
         if fade_out:
             ET.SubElement(param, "fadeOut", {"type": FADE_SHAPE, "duration": tc.fcpx_time(fade_out, 48000)})
+        if keyframes:
+            animation = ET.SubElement(param, "keyframeAnimation")
+            for t, db in keyframes:
+                ET.SubElement(animation, "keyframe", {"time": tc.fcpx_time(t, timebase), "value": f"{db:g}dB"})
 
 
 def _local(tl: Timeline, sc: SpineClip, clip: Clip, frame: int) -> Fraction:
@@ -265,7 +280,9 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 use=cc.kind,
                 note=cc.note,
             )
-            _volume(child, child_clip, cc.volume_db, cc.fade_in, cc.fade_out)
+            child_start = origin(child_clip.media) + cc.src_in
+            keyframes = [(child_start + k * fd, db) for k, db in cc.keyframes]
+            _volume(child, child_clip, cc.volume_db, cc.fade_in, cc.fade_out, keyframes, tb)
         for mk in attached[i]["markers"]:
             attrs = {"start": tc.fcpx_time(_local(tl, sc, clip, mk.frame), tb), "duration": tc.fcpx_time(fd, tb), "value": mk.value}
             if mk.kind == "chapter":

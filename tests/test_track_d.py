@@ -437,3 +437,149 @@ def test_cli_fades_off(footage, tmp_path):
     validate_dtd(fcpxml)
     root = ET.parse(fcpxml).getroot()
     assert root.find(".//fadeIn") is None and root.find(".//adjust-volume") is not None  # levels still matched
+
+
+# --------------------------------------------------------------- T24 music bed
+
+
+def _level_at(cc, frame: int) -> float:
+    """The music clip's volume at a timeline frame, interpolating its keyframes like Final Cut."""
+    pts = [(cc.start + k, v) for k, v in cc.keyframes]
+    if not pts:
+        return cc.volume_db or 0.0
+    if frame <= pts[0][0]:
+        return pts[0][1]
+    for (f0, v0), (f1, v1) in zip(pts, pts[1:]):
+        if f0 <= frame <= f1:
+            return v0 + (v1 - v0) * (frame - f0) / (f1 - f0)
+    return pts[-1][1]
+
+
+def _music_project(song_seconds: float = 60.0, sound_end: float | None = 55.0):
+    talk = make_clip("V01", seconds=30, sentences=[(1.0, 5.0, "We built the first boat in this garage."), (9.0, 13.0, "It took us three whole winters to finish.")])
+    photo = make_clip("I01", kind="image")
+    song = make_clip("A01", kind="audio", seconds=song_seconds, role="music")
+    song.sound_end = sound_end
+    return Analysis(clips=[talk, photo, song])
+
+
+RAW_WITH_MUSIC = {
+    "title": "t",
+    "sections": [{"name": "A", "items": ["V01.S001", "I01@0-4", "V01.S002"]}],
+    "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 3}],
+}
+
+
+def test_music_ducks_under_speech_and_comes_up_between(tmp_path):
+    a = _music_project()
+    tl = build_timeline(normalize(RAW_WITH_MUSIC, a), a, style=STYLES["medium"], name="t", music_db=-14.0)
+    fd = tl.frame_duration
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    talk1, still, talk2 = tl.spine
+    assert _level_at(cc, (talk1.offset + talk1.end) // 2) == -14.0
+    assert _level_at(cc, (talk2.offset + talk2.end) // 2) == -14.0
+    assert _level_at(cc, (still.offset + still.end) // 2) == -6.0  # 4 s with nobody speaking: up 8 dB
+    assert _level_at(cc, talk2.offset) == -14.0  # back down by the time the voice comes in
+    assert all(0 <= k < cc.frames for k, _ in cc.keyframes)
+
+    # Back-timed: the song's ending (55 s) lands on the cut's last frame, so no fade-out.
+    end = cc.src_in + cc.frames * fd
+    assert cc.start == 0 and cc.frames == tl.total_frames
+    assert Fraction(55) - fd < end <= Fraction(55)
+    assert cc.fade_in == Fraction(1) and cc.fade_out == 0
+    assert any("back-timed" in n for n in tl.notes)
+
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    check_invariants(path)
+    music = next(el for el in ET.parse(path).getroot().iter("asset-clip") if el.get("lane") == "-1")
+    start, dur = T(music.get("start")), T(music.get("duration"))
+    adjust = music.find("adjust-volume")
+    assert adjust.get("amount") is None  # the keyframes carry the level
+    times = [T(k.get("time")) for k in adjust.iter("keyframe")]
+    assert times and times == sorted(times) and all(start <= t < start + dur for t in times)
+    assert [k.get("value") for k in adjust.iter("keyframe")][:2] == ["-14dB", "-6dB"]
+    assert adjust.find("param/fadeIn").get("duration") == "1s" and adjust.find("param/fadeOut") is None
+
+
+def test_music_cut_off_mid_song_fades_out_and_short_songs_warn():
+    # A cue that ends mid-song (not the last one) keeps its source_in and fades out over 2 s.
+    a = _music_project()
+    raw = {
+        "title": "t",
+        "sections": [{"name": "A", "items": ["V01.S001", "I01@0-4"]}, {"name": "B", "items": ["V01.S002"]}],
+        "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 3}],
+    }
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.src_in == tc_floor(Fraction(3), tl.frame_duration)
+    assert cc.end < tl.total_frames and cc.fade_out == min(Fraction(2), _samples_of(cc.frames * tl.frame_duration / 4))
+
+    # A song shorter than the cut starts at its top and says it ends early.
+    short = _music_project(song_seconds=6.0, sound_end=5.5)
+    tl = build_timeline(normalize(RAW_WITH_MUSIC, short), short, style=STYLES["medium"], name="t")
+    (cc,) = [c for c in tl.connected if c.kind == "music"]
+    assert cc.src_in == 0 and cc.end < tl.total_frames
+    assert any("shorter than" in w for w in tl.warnings)
+
+
+def tc_floor(t: Fraction, fd: Fraction) -> Fraction:
+    from roughcut import timecode as tc
+
+    return tc.floor_frames(t, fd) * fd
+
+
+def _samples_of(t: Fraction) -> Fraction:
+    from roughcut.timeline import _samples
+
+    return _samples(t)
+
+
+def test_music_flag_bed_replaces_the_plans_choice():
+    from roughcut.timeline import _music_cues
+
+    a = _music_project()
+    bed = make_clip("A02", kind="audio", seconds=90, role="music")
+    bed.music_bed = True
+    a.clips.append(bed)
+    plan = normalize(RAW_WITH_MUSIC, a)
+    notes: list[str] = []
+    (cue,) = _music_cues(plan, a, True, notes)
+    assert (cue.clip_id, cue.first_section, cue.last_section) == ("A02", 0, 0)
+    assert "A02.wav (--music) runs under the whole cut instead of the plan's choice (A01.wav)" in notes[0]
+    # When the plan uses the --music song, its cues stand; the stringout gets no bed at all.
+    raw = dict(RAW_WITH_MUSIC, music=[{"clip": "A02", "first_section": 0, "last_section": 0, "source_in": 10}])
+    assert [c.clip_id for c in _music_cues(normalize(raw, a), a, True, [])] == ["A02"]
+    assert _music_cues(normalize({"title": "t", "sections": RAW_WITH_MUSIC["sections"]}, a), a, False, []) == []
+
+
+def test_music_flag_end_to_end(footage, tmp_path):
+    from roughcut.cli import main
+
+    song = tmp_path / "Downloads" / "Sunrise Theme.m4a"
+    song.parent.mkdir()
+    # 40 s: a tone that dies away at 36 s, then silence (a song with a real ending).
+    ffmpeg("-f", "lavfi", "-i", "aevalsrc=exprs='0.3*sin(2*PI*330*t)*between(t,0,36)*min(1,(36-t)/3)':s=48000:d=40", "-ac", "2", "-c:a", "aac", str(song))
+    out = tmp_path / "out"
+    code = main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--music", str(song), "--name", "footage"])
+    assert code == 0
+    analysis = Analysis.load(out / "analysis.json")
+    bed = next(c for c in analysis.clips if c.media.name == "Sunrise Theme.m4a")
+    assert bed.music_bed and bed.role == "music" and bed.transcript_source == "music" and not bed.segments
+    assert 35.5 < bed.sound_end < 37.5
+
+    fcpxml = out / "footage.fcpxml"
+    validate_dtd(fcpxml)
+    check_invariants(fcpxml)
+    root = ET.parse(fcpxml).getroot()
+    rough = _rough(root)
+    (music,) = [el for el in rough.iter("asset-clip") if el.get("lane") == "-1"]
+    assert music.get("name") == "Sunrise Theme" and music.get("audioRole") == "music.Music Bed"
+    end = T(music.get("start")) + T(music.get("duration"))
+    assert abs(float(end) - bed.sound_end) < 0.05  # back-timed onto the song's ending
+    stringout = next(p for p in root.iter("project") if p.get("name").endswith("Stringout"))
+    assert not [el for el in stringout.iter("asset-clip") if el.get("lane") == "-1"]
+    report = (out / "edit_report.md").read_text()
+    assert "Sunrise Theme.m4a (--music) runs under the whole cut" in report
+
+    assert main(["build", str(footage), "-o", str(tmp_path / "o2"), "--provider", "none", "--music", str(footage / "photo.png")]) == 1

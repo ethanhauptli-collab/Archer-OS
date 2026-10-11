@@ -16,7 +16,7 @@ from fractions import Fraction
 
 from . import timecode as tc
 from .analyze import Analysis, Clip
-from .plan import Plan
+from .plan import MusicCue, Plan
 from .segments import Segment
 
 
@@ -79,6 +79,8 @@ class ConnectedClip:
     note: str = ""
     fade_in: Fraction = Fraction(0)
     fade_out: Fraction = Fraction(0)
+    # Volume automation: (frames into this clip, dB). Empty: volume_db throughout.
+    keyframes: list[tuple[int, float]] = field(default_factory=list)
 
     @property
     def end(self) -> int:
@@ -358,6 +360,7 @@ def build_timeline(
     fill: bool = True,
     dialogue_level: float | None = None,
     fades: bool = True,
+    music_beds: bool = True,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -440,9 +443,10 @@ def build_timeline(
     _place_broll(tl, plan, analysis, style, broll_db, warnings, lanes)
     if fill:
         _fill_picture(tl, analysis, style, broll_db, lanes)
-    _place_music(tl, plan, analysis, music_db, warnings)
+    _place_music(tl, plan, analysis, music_db, warnings, beds=music_beds)
     _place_markers(tl, plan, analysis)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
+    _duck_music(tl, analysis)
     if fades:
         _fades(tl, analysis)
     tl.warnings = warnings
@@ -731,10 +735,41 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
         )
 
 
-def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float, warnings: list[str]) -> None:
+def _music_cues(plan: Plan, analysis: Analysis, beds: bool, notes: list[str]) -> list[MusicCue]:
+    """The plan's music cues, or the --music song under the whole cut when the plan didn't use it."""
+    songs = [c for c in analysis.clips if c.music_bed] if beds else []
+    if not songs or not plan.sections or any(analysis.clip(cue.clip_id).music_bed for cue in plan.music):
+        return list(plan.music)
+    song = songs[0]
+    dropped = sorted({analysis.clip(cue.clip_id).media.name for cue in plan.music})
+    notes.append(
+        f"Music: {song.media.name} (--music) runs under the whole cut"
+        + (f" instead of the plan's choice ({', '.join(dropped)})" if dropped else "")
+        + (f"; {', '.join(c.media.name for c in songs[1:])} not used" if len(songs) > 1 else "")
+        + "."
+    )
+    return [MusicCue(song.id, 0, len(plan.sections) - 1, 0.0)]
+
+
+def _last_sound(clip: Clip) -> Fraction:
+    """Where the song really ends (its last audible moment), for back-timing."""
+    if clip.sound_end is not None:
+        end = Fraction(clip.sound_end).limit_denominator(1000)
+    else:
+        from .ffmpeg_ops import sound_regions
+
+        regions = sound_regions(clip.silences, clip.duration)
+        end = Fraction(regions[-1][1]).limit_denominator(1000) if regions else clip.media.duration
+    return min(end, clip.media.duration)
+
+
+def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float, warnings: list[str], *, beds: bool = True) -> None:
+    """Music cues under their sections. The cue that runs to the end of the cut is
+    back-timed: it starts wherever it must so the song's own ending lands on the
+    cut's last frame."""
     fd = tl.frame_duration
     placed = sorted(tl.section_frames.items())
-    for cue in plan.music:
+    for cue in _music_cues(plan, analysis, beds, tl.notes):
         inside = [f for i, f in placed if cue.first_section <= i <= cue.last_section]
         if not inside:
             warnings.append(f"music {cue.clip_id}: sections {cue.first_section + 1}-{cue.last_section + 1} aren't on the timeline; skipped")
@@ -742,11 +777,27 @@ def _place_music(tl: Timeline, plan: Plan, analysis: Analysis, volume_db: float,
         start = min(inside)
         after = [f for i, f in placed if i > cue.last_section]
         end = min(after) if after else tl.total_frames
-        m = analysis.clip(cue.clip_id).media
+        clip = analysis.clip(cue.clip_id)
+        m = clip.media
         src_in = Fraction(cue.source_in).limit_denominator(1000)
         src_in = tc.floor_frames(src_in, fd) * fd
         if src_in >= m.duration:
             src_in = Fraction(0)
+        if end == tl.total_frames and end > start:
+            last = _last_sound(clip)
+            lead = last - (end - start) * fd
+            if lead >= 0:
+                src_in = tc.floor_frames(lead, fd) * fd
+                tl.notes.append(
+                    f"Music: {m.name} is back-timed so its ending lands on the last frame; it starts "
+                    f"{tc.seconds_to_clock(float(src_in))} into the track."
+                )
+            else:
+                src_in = Fraction(0)
+                warnings.append(
+                    f"music {m.name} ({tc.seconds_to_clock(float(last))}) is shorter than the "
+                    f"{tc.seconds_to_clock(float((end - start) * fd))} it covers, so it ends before the cut does"
+                )
         frames = min(end - start, tc.floor_frames(m.duration - src_in, fd))
         if frames < 1:
             warnings.append(f"music {cue.clip_id} has no room; skipped")
@@ -834,6 +885,60 @@ def _mix(tl: Timeline, analysis: Analysis, *, dialogue_level: float | None, brol
     tl.levels = list(rows.values())
 
 
+DUCK_LIFT = 8.0  # dB the music bed comes up where nobody speaks
+DUCK_GAP = Fraction(3, 2)  # seconds without speech before it does
+DUCK_RAMP = Fraction(1, 2)  # seconds to come up or go back down
+
+
+def _is_speech(sc: SpineClip, clip: Clip) -> bool:
+    return clip.media.has_audio and (clip.role in ("aroll", "voiceover") or bool(sc.seg_ids))
+
+
+def _duck_music(tl: Timeline, analysis: Analysis) -> None:
+    """Music sits at its bed level under speech and comes up DUCK_LIFT dB in
+    stretches of DUCK_GAP or more where nobody speaks (B-roll montages,
+    stills, the open and close), as volume keyframes in the music clip."""
+    fd = tl.frame_duration
+    speech: list[list[int]] = []
+    for sc in tl.spine:
+        if _is_speech(sc, analysis.clip(sc.clip_id)):
+            if speech and sc.offset <= speech[-1][1]:
+                speech[-1][1] = max(speech[-1][1], sc.end)
+            else:
+                speech.append([sc.offset, sc.end])
+    min_gap = tc.ceil_frames(DUCK_GAP, fd)
+    ramp = max(1, tc.round_frames(DUCK_RAMP, fd))
+    for cc in tl.connected:
+        if cc.kind != "music":
+            continue
+        low = cc.volume_db if cc.volume_db is not None else 0.0
+        high = low + DUCK_LIFT
+        gaps, cursor = [], cc.start
+        for s0, s1 in speech:
+            if s1 <= cursor or s0 >= cc.end:
+                continue
+            if s0 > cursor:
+                gaps.append((cursor, s0))
+            cursor = max(cursor, s1)
+        if cursor < cc.end:
+            gaps.append((cursor, cc.end))
+        points: list[tuple[int, float]] = []
+        for g0, g1 in gaps:
+            if g1 - g0 < min_gap:
+                continue
+            r = max(1, min(ramp, (g1 - g0) // 4))
+            points += [(g0, high)] if g0 == cc.start else [(g0, low), (g0 + r, high)]
+            if g1 < cc.end:
+                points += [(g1 - r, high), (g1, low)]  # back down by the time the voice comes in
+        cc.keyframes = [(f - cc.start, v) for f, v in points]
+        if points:
+            for row in tl.levels:
+                if row["clip"] == cc.clip_id and row["use"] == "music bed":
+                    row["why"] = "; ".join(filter(None, [row["why"], f"comes up {DUCK_LIFT:g} dB where nobody speaks"]))
+
+
+MUSIC_FADE_IN = Fraction(1)  # seconds
+MUSIC_FADE_OUT = Fraction(2)
 DECLICK = Fraction(15, 1000)  # seconds: fade at a speech edit, too short to hear, long enough to stop a tick
 SPINE_BROLL_FADE = 6  # frames of fade on B-roll nat sound in the main storyline...
 CUTAWAY_FADE = Fraction(3, 10)  # ...and seconds on connected B-roll; both at most a quarter of the clip
@@ -875,8 +980,18 @@ def _fades(tl: Timeline, analysis: Analysis) -> None:
         sc.fade_out = _samples(min(fade_out, length / 2)) if tail else Fraction(0)
     for cc in tl.connected:
         clip = analysis.clip(cc.clip_id)
-        if cc.kind == "broll" and clip is not None and clip.media.has_audio:
-            cc.fade_in = cc.fade_out = _samples(min(CUTAWAY_FADE, cc.frames * fd / 4))
+        if clip is None or not clip.media.has_audio:
+            continue
+        quarter = cc.frames * fd / 4
+        if cc.kind == "broll":
+            cc.fade_in = cc.fade_out = _samples(min(CUTAWAY_FADE, quarter))
+        elif cc.kind == "music":
+            cc.fade_in = _samples(min(MUSIC_FADE_IN, quarter))
+            # A song that plays through its own ending (sound dying away before the
+            # file ends) needs no fade-out; one cut off mid-song, or a file that stops dead, does.
+            last = _last_sound(clip)
+            ends_itself = cc.src_in + (cc.frames + 1) * fd >= last and last <= clip.media.duration - Fraction(1, 4)
+            cc.fade_out = Fraction(0) if ends_itself else _samples(min(MUSIC_FADE_OUT, quarter))
 
 
 def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:

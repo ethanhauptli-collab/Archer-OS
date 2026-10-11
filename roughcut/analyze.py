@@ -101,6 +101,7 @@ class Clip:
     loudness_floor: float | None = None  # background, momentary LUFS
     peak_db: float | None = None  # sample peak dBFS (inside the words for talking footage)
     sound_end: float | None = None  # seconds: where the last sound fades out
+    music_bed: bool = False  # given with --music: not transcribed, always the cut's music
 
     @property
     def hidden(self) -> bool:
@@ -137,6 +138,7 @@ class Clip:
             "loudness_floor": self.loudness_floor,
             "peak_db": self.peak_db,
             "sound_end": self.sound_end,
+            "music_bed": self.music_bed,
         }
 
     @classmethod
@@ -159,6 +161,7 @@ class Clip:
             loudness_floor=d.get("loudness_floor"),
             peak_db=d.get("peak_db"),
             sound_end=d.get("sound_end"),
+            music_bed=bool(d.get("music_bed", False)),
         )
 
 
@@ -312,9 +315,12 @@ def analyze(
     workers: int = 4,
     noise_db: float | None = None,
     prefer_vertical: bool = False,
+    music: list[Path] | None = None,
 ) -> Analysis:
+    """`music`: files given with --music. They aren't transcribed and become the cut's music bed."""
     t0 = time.monotonic()
     warnings: list[str] = []
+    music_paths = {str(Path(p).expanduser().resolve()) for p in music or []}
     progress.stage("probe", f"Reading {len(paths)} files")
 
     def _probe(p: Path) -> MediaInfo | None:
@@ -344,6 +350,12 @@ def analyze(
     log(f"probed {len(infos)} files in {time.monotonic() - t0:.1f}s")
 
     clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos)]
+    for clip in clips:
+        if str(Path(clip.media.path).resolve()) in music_paths:
+            if clip.media.kind == "audio":
+                clip.music_bed = True
+            else:
+                warnings.append(f"{clip.media.name}: --music takes an audio file; this one has pictures, so it's used as an ordinary clip")
 
     default_maps: dict[str, list[tuple[float, float]]] = {}
 
@@ -386,7 +398,10 @@ def analyze(
     log(f"mapped silence and loudness in {time.monotonic() - t1:.1f}s")
 
     t2 = time.monotonic()
-    audible = [c for c in clips if c.media.has_audio]
+    for clip in clips:
+        if clip.music_bed:  # a song's lyrics aren't lines to cut
+            clip.transcript_source = "music"
+    audible = [c for c in clips if c.media.has_audio and not c.music_bed]
     for n, clip in enumerate(audible, 1):
         m = clip.media
         # current = files finished, so the bar never reads full while work remains.
@@ -424,7 +439,7 @@ def analyze(
         log(f"transcripts ready in {time.monotonic() - t2:.1f}s")
 
     for clip in clips:
-        clip.role = classify(clip)
+        clip.role = "music" if clip.music_bed else classify(clip)
     measure_levels(clips, cache, workers=workers)
 
     from .duplicates import mark_duplicates
