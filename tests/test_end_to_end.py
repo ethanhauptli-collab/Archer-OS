@@ -55,7 +55,69 @@ def check_invariants(path: Path) -> dict:
             pos += dur
         assert T(seq.get("duration")) == pos
         report[project.get("name")] = {"seconds": float(pos), "spine": clips}
+    assert format_problems(root, primary_audio_may_name_format=True) == []
     return report
+
+
+RATE_UNDEFINED = "FFVideoFormatRateUndefined"
+STORY = {"asset-clip", "clip", "video", "audio", "title", "gap", "sync-clip", "ref-clip", "mc-clip", "audition", "spine", "caption"}
+
+
+def effective_formats(root: ET.Element):
+    """Yield (asset-clip, format it would inherit, sequence frame duration or None, in the primary storyline)."""
+    formats = {f.get("id"): f for f in root.iter("format")}
+
+    def walk(el, inherited, seq_fd, primary):
+        for child in el:
+            if child.tag not in STORY:
+                continue
+            if child.tag == "asset-clip":
+                yield child, inherited, seq_fd, primary
+            # A <video> or <title> can't name a format, so what's anchored to it inherits the one above.
+            yield from walk(child, child.get("format") or inherited, seq_fd, child.tag == "spine" and primary)
+
+    for event in root.iter("event"):
+        for child in event:
+            if child.tag == "asset-clip":
+                yield child, None, None, False
+    for seq in root.iter("sequence"):
+        yield from walk(seq, seq.get("format"), T(formats[seq.get("format")].get("frameDuration")), True)
+
+
+def format_problems(root: ET.Element, *, primary_audio_may_name_format: bool) -> list[str]:
+    """Final Cut's rule for an asset-clip's `format`, which every clip in its real exports
+    follows (tests/fixtures/fcp_exports, checked in test_fcp_exports.py):
+
+    - it names the clip's own format (its asset's) exactly when that differs from
+      the one it would inherit: the sequence's in the primary storyline, its parent
+      clip's when connected (DTD: "default is same as parent"); browser clips have
+      nothing to inherit, so they always name it;
+    - a connected or browser audio-only clip carries FFVideoFormatRateUndefined. In
+      the primary storyline Final Cut leaves it off; roughcut keeps it, which Final
+      Cut has imported;
+    - a clip whose frame rate differs from the sequence's carries <conform-rate>.
+    """
+    formats = {f.get("id"): f for f in root.iter("format")}
+    assets = {a.get("id"): a for a in root.iter("asset")}
+    problems = []
+    for clip, inherited, seq_fd, primary in effective_formats(root):
+        own, written, name = assets[clip.get("ref")].get("format"), clip.get("format"), clip.get("name")
+        if own is None:  # audio-only media
+            if written is not None and formats[written].get("name") != RATE_UNDEFINED:
+                problems.append(f"{name}: audio-only clip with a video format")
+            if written is None and not primary:
+                problems.append(f"{name}: audio-only clip without {RATE_UNDEFINED}")
+            if written is not None and primary and not primary_audio_may_name_format:
+                problems.append(f"{name}: Final Cut leaves the format off audio in the primary storyline")
+            continue
+        expected = None if own == inherited else own
+        if written != expected:
+            problems.append(f"{name}: format={written!r}, Final Cut would write {expected!r} (asset {own}, inherits {inherited})")
+        if seq_fd is not None:
+            rate_differs = T(formats[own].get("frameDuration")) != seq_fd
+            if rate_differs != (clip.find("conform-rate") is not None):
+                problems.append(f"{name}: frame rate {'differs' if rate_differs else 'matches'} but conform-rate is {'missing' if rate_differs else 'there'}")
+    return problems
 
 
 def _check_source_range(el, assets):

@@ -1,0 +1,101 @@
+Final Cut Pro exports used as test fixtures
+============================================
+
+Every .fcpxml file in this folder was written by Final Cut Pro itself
+(10.7 and 11, so FCPXML 1.11 and 1.13; each carries Final Cut's uids,
+modDate, library location and media bookmarks), published by the authors
+below as test data under the MIT License, and copied here unchanged (one
+renamed). tests/test_fcp_exports.py checks roughcut's FCPXML conventions
+against them.
+
+From orchetect/swift-fcpxml (https://github.com/orchetect/swift-fcpxml),
+commit 00bcacf213cca9b99ced1efd3aad7529396719c7,
+Tests/SwiftFCPXMLTests/TestResource/FCPXML Exports/:
+    Complex.fcpxml, Annotations.fcpxml, AudioOnly.fcpxml, Occlusion3.fcpxml,
+    24With25Media.fcpxml
+
+From TheAcharya/pipeline-neo, now OpenFCPXMLKit (https://github.com/TheAcharya/pipeline-neo),
+commit 7f55583a3a5b4fecf336ca2ae4b77fb11f8db46d, Tests/FCPXML Samples/FCPXML/:
+    TimelineWithSecondaryStorylineWithAudioKeyframes.fcpxml, ImageSample.fcpxml
+
+From andrewarrow/cutlass (https://github.com/andrewarrow/cutlass),
+commit 4dbe20dea4152b9de7d9c6ba8cf70e04bda9feb7, samples/:
+    short.fcpxml, saved here as VerticalShort.fcpxml
+
+
+------------------------------------------------------------------------
+https://github.com/orchetect/swift-fcpxml
+
+MIT License
+
+Copyright (c) 2026 Steffan Andrews - https://github.com/orchetect
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+------------------------------------------------------------------------
+https://github.com/TheAcharya/pipeline-neo
+
+MIT License
+
+Copyright (c) 2026 The Acharya
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------
+https://github.com/andrewarrow/cutlass
+
+MIT License
+
+Copyright (c) 2025 Andrew Arrow
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+

@@ -146,8 +146,16 @@ def _clip_element(
     timebase: int,
     use: str = "spine",
     note: str = "",
+    inherited: str | None = None,
+    seq_fd: Fraction | None = None,
 ) -> ET.Element:
-    """A story element referencing a clip's asset: <video> for stills, <asset-clip> otherwise."""
+    """A story element referencing a clip's asset: <video> for stills, <asset-clip> otherwise.
+
+    `inherited` is the format the clip would take without its own `format`
+    (the sequence's in the primary storyline, the parent clip's when connected,
+    none in the browser); `seq_fd` is the sequence's frame duration (None in
+    the browser).
+    """
     m = clip.media
     tag = "video" if m.kind == "image" else "asset-clip"
     attrs = {"ref": res.asset(clip)}
@@ -156,9 +164,14 @@ def _clip_element(
     if offset is not None:
         attrs["offset"] = offset
     attrs.update(name=m.stem, start=tc.fcpx_time(start, timebase), duration=duration)
-    if m.kind == "audio":
-        # Final Cut writes audio-only clips with a rate-undefined format.
-        attrs["format"] = res.still_format()
+    own = _own_format(clip, res)
+    if own is not None and (m.kind == "audio" or own != inherited):
+        # A clip without `format` takes its parent's ("default is same as parent"), so
+        # Final Cut names the clip's own whenever it differs: a 16:9 clip in a vertical
+        # cut, a 25p clip in a 29.97 one, B-roll over narration (whose format is
+        # rate-undefined), and every browser clip. Audio-only clips always carry the
+        # rate-undefined format.
+        attrs["format"] = own
     if m.kind == "video":
         attrs["tcFormat"] = "DF" if m.timecode and ";" in m.timecode else "NDF"
     video_role, audio_role = _roles(clip, use, note)
@@ -174,7 +187,29 @@ def _clip_element(
     if note and note != AUTO_FILL:
         # The DTD puts <note> first in an asset-clip, and before everything but params in a <video>.
         ET.SubElement(el, "note").text = note
+    if seq_fd is not None and m.kind == "video" and m.frame_duration and m.frame_duration != seq_fd:
+        # Another frame rate plays at its own speed: every cut was timed on the source's
+        # clock. This is how Final Cut writes a clip it doesn't speed-conform.
+        conform = {"scaleEnabled": "0"}
+        label = tc.rate_label(m.frame_duration)
+        if label in CONFORM_RATES:
+            conform["srcFrameRate"] = label
+        ET.SubElement(el, "conform-rate", conform)
     return el
+
+
+CONFORM_RATES = {"23.98", "24", "25", "29.97", "30", "47.95", "48", "50", "59.94", "60"}  # the DTD's srcFrameRate values
+
+
+def _own_format(clip: Clip, res: "_Resources") -> str | None:
+    """The format a clip of this media has: its asset's, rate-undefined for audio-only
+    media, None for stills (a <video> carries no format)."""
+    m = clip.media
+    if m.kind == "audio":
+        return res.still_format()
+    if m.kind == "video":
+        return res.video_format(m.width, m.height, m.frame_duration)
+    return None
 
 
 FADE_SHAPE = "easeIn"  # what Final Cut writes for its default (+3 dB) fade handles, in and out
@@ -267,7 +302,10 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             lane=None,
             timebase=tb,
             use="speech" if sc.seg_ids else "spine",
+            inherited=fmt,
+            seq_fd=fd,
         )
+        parent_format = el.get("format") or fmt  # what its connected clips inherit
         _volume(el, clip, sc.volume_db, sc.fade_in, sc.fade_out)
         # Child order follows the FCPXML DTD: volume, anchored clips, then markers.
         for cc in sorted(attached[i]["clips"], key=lambda c: (c.start, c.lane)):
@@ -283,6 +321,8 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 timebase=tb,
                 use=cc.kind,
                 note=cc.note,
+                inherited=parent_format,
+                seq_fd=fd,
             )
             child_start = origin(child_clip.media) + cc.src_in
             keyframes = [(child_start + k * fd, db) for k, db in cc.keyframes]
