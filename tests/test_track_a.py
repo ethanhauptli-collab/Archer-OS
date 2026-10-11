@@ -163,22 +163,38 @@ def test_roughcut_render_finishes_designs_a_stopped_run_left(tmp_path, monkeypat
     assert all(g["rendered"] == g["digest"] and (out / g["file"]).is_file() for g in manifest["graphics"])
 
 
-@needs_renderer
-def test_unchanged_renders_are_reused_and_an_old_manifest_still_counts(tmp_path):
+def test_unchanged_renders_are_reused_and_an_older_folder_re_renders_once(tmp_path, monkeypatch):
+    import hashlib
+
+    rendered: list = []
+    fake_renderer(monkeypatch, rendered)
     a, plan, tl = small_cut()
     out = tmp_path / "out"
     graphics.make(FakeProvider(), plan.graphics, tl, a, out, brief="", style="", workers=2)
-    mov = out / "graphics" / "G01-lower-third.mov"
-    stamp = mov.stat().st_mtime_ns
-    # A manifest from before designs were saved ahead of rendering: "digest" + "file", no "rendered".
+    assert sorted(gid for gid, _ in rendered) == ["G01", "G02"]
+
+    def rerender():
+        rendered.clear()
+        specs, html, style = graphics.saved_designs(out)
+        graphics.make(None, specs, small_cut()[2], a, out, brief="", style=style, workers=2, saved_html=html)
+        return sorted(gid for gid, _ in rendered)
+
+    assert rerender() == []  # nothing changed
+
+    # graphics.json as written before this change: "digest" (an older formula) + "file", no "rendered".
     manifest = json.loads((out / "graphics.json").read_text())
     for g in manifest["graphics"]:
         g.pop("rendered")
+        page = (out / g["html"]).read_text()
+        g["digest"] = hashlib.sha256(f"{g['frames']}|30000/1001|640x360|{page}".encode()).hexdigest()[:16]
     (out / "graphics.json").write_text(json.dumps(manifest))
-    specs, html, style = graphics.saved_designs(out)
-    _, _, tl2 = small_cut()
-    graphics.make(None, specs, tl2, a, out, brief="", style=style, workers=2, saved_html=html)
-    assert mov.stat().st_mtime_ns == stamp
+    assert rerender() == ["G01", "G02"]  # rendered with the new encoder and seek once...
+    assert rerender() == []  # ...then reused
+    # A clip at another graphic's name is never taken for this one's.
+    manifest = json.loads((out / "graphics.json").read_text())
+    manifest["graphics"][0]["file"] = "graphics/G01-quote.mov"
+    (out / "graphics.json").write_text(json.dumps(manifest))
+    assert rerender() == ["G01"]
 
 
 # ------------------------------------------------------------------ T5 (graphics part): say what a long run is doing
@@ -306,6 +322,57 @@ def test_first_design_batch_sets_the_look_and_the_rest_run_in_parallel():
     first, second, third = sorted(provider.spans)
     assert first[1] <= second[0] and first[1] <= third[0]  # batch 1 finished before the others started
     assert second[0] < third[1] and third[0] < second[1]  # the others overlapped
+
+
+def test_ctrl_c_while_designing_stops_without_waiting_for_requests_in_flight():
+    import _thread
+    import threading
+
+    from roughcut.graphics import PlacedGraphic
+    from roughcut.plan import GraphicSpec
+
+    a, _, tl = small_cut([])
+    placed = [
+        PlacedGraphic(id=f"G{n + 1:02d}", spec=GraphicSpec(kind="stat", segment="V01.S003", words="", text=f"Graphic {n + 1}"), index=n, start=n * 40, frames=30)
+        for n in range(8)
+    ]
+    release = threading.Event()
+
+    class SlowAfterTheFirstBatch(FakeProvider):
+        def complete_json(self, system, parts, schema, *, schema_name, **kw):
+            reply = super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+            if "<design_system>" in parts[-1].text:  # batches 2+: a long, paid request
+                release.wait(30)
+            return reply
+
+    timer = threading.Timer(1.0, _thread.interrupt_main)  # Ctrl-C a second in
+    t0 = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            graphics.design(SlowAfterTheFirstBatch(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=[])
+        stopped = time.monotonic() - t0
+    finally:
+        timer.cancel()
+        release.set()
+    assert stopped < 3
+
+
+def test_a_rejected_key_while_designing_later_batches_still_stops_the_run():
+    from roughcut.graphics import PlacedGraphic
+    from roughcut.plan import GraphicSpec
+    from roughcut.providers import ProviderAuthError
+
+    class KeyRevoked(FakeProvider):
+        def complete_json(self, system, parts, schema, *, schema_name, **kw):
+            if "<design_system>" in parts[-1].text:
+                raise ProviderAuthError("invalid x-api-key")
+            return super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+
+    a, _, tl = small_cut([])
+    placed = [PlacedGraphic(id=f"G{n + 1:02d}", spec=GraphicSpec(kind="stat", segment="V01.S003", words="", text="x"), index=n, start=n * 40, frames=30) for n in range(6)]
+    with pytest.raises(ProviderAuthError):
+        graphics.design(KeyRevoked(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=[])
 
 
 # ------------------------------------------------------------------ T1: seek-started animations, script errors, fonts, QC
@@ -656,3 +723,163 @@ def test_build_points_to_the_preview_page(footage, tmp_path, monkeypatch, capsys
     assert f"Graphics:  {out / 'graphics' / 'preview.html'}" in printed
     assert "`graphics/preview.html`" in (out / "edit_report.md").read_text()
     assert (out / "graphics" / "previews" / "G01.mp4").is_file()
+
+
+# ------------------------------------------------------------------ review fixes: saved designs, stopping, stale files
+
+
+def fake_renderer(monkeypatch, rendered: list, *, slow: dict | None = None):
+    """Stand-in for the browser: records (id, html) and writes a blank ProRes clip of the right length.
+
+    `slow` maps a graphic ID to a function run before that graphic "renders".
+    """
+    from pathlib import Path
+
+    def render_one(job):
+        if slow and job["id"] in slow:
+            slow[job["id"]]()
+        rendered.append((job["id"], job["html"]))
+        w, h = job.get("size") or (640, 360)
+        _transparent_mov(Path(job["out"]), job["frames"], f"{w}x{h}")
+        return {"id": job["id"], "error": None, "notes": [], "seconds": 0.0}
+
+    monkeypatch.setattr(graphics, "_render_one", render_one)
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+
+
+def _manifest(out) -> list[dict]:
+    return json.loads((out / "graphics.json").read_text())["graphics"]
+
+
+def _placed(out) -> dict[str, str]:
+    return {g["id"]: g["text"] for g in _manifest(out)}
+
+
+def _html_files(out) -> dict[str, str]:
+    return {g["id"]: g["html"].removeprefix("graphics/") for g in _manifest(out)}
+
+
+def test_roughcut_render_keeps_each_design_with_its_graphic_when_the_plan_lists_them_out_of_order(footage, tmp_path, monkeypatch):
+    from test_end_to_end import check_invariants, validate_dtd
+
+    from roughcut import pipeline
+
+    rendered: list[tuple[str, str]] = []
+    fake_renderer(monkeypatch, rendered)
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    # Listed in a different order from where they land on the timeline (the cold open plays S005 first).
+    plan["graphics"] = [
+        spec("quote", "V01.S006", "I needed it too", "C wrap", 2),
+        spec("lower_third", "V01.S003", "heading up the mountain", "A heading", 2),
+        spec("stat", "V01.S005", "asking about this trip", "B asking", 2),
+    ]
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(plan))
+    out = tmp_path / "out"
+    opts = pipeline.Options(inputs=[footage], out=out, transcriber="none", cache_dir=tmp_path / "cache", format="640x360", graphics=True)
+    pipeline.build(opts)
+    texts = _placed(out)
+    assert sorted(texts.values()) == ["A heading", "B asking", "C wrap"]
+    assert [g["index"] for g in _manifest(out)] != [0, 1, 2]  # really out of order
+    designs = {gid: (out / "graphics" / name).read_text() for gid, name in _html_files(out).items()}
+    assert all(f"{gid} <span" in page for gid, page in designs.items())  # each designed for its own ID
+
+    # Hand-edit one design, then re-render twice: every graphic stays, with its own (edited) design.
+    b_id = next(gid for gid, text in texts.items() if text == "B asking")
+    edited = designs[b_id].replace("<body>", "<body><!-- edited by hand -->")
+    (out / "graphics" / _html_files(out)[b_id]).write_text(edited)
+    for n in range(2):
+        rendered.clear()
+        result = pipeline.rerender(out, opts)
+        assert sorted(c.clip_id for c in result.timeline.connected if c.kind == "graphic") == sorted(texts)
+        assert not [w for w in result.warnings if w.startswith("graphic")]
+        assert _placed(out) == texts  # same graphics, same IDs
+        pages = {gid: (out / "graphics" / name).read_text() for gid, name in _html_files(out).items()}
+        assert pages[b_id] == edited and all(pages[gid] == designs[gid] for gid in texts if gid != b_id)
+        # Only the edited design re-renders, once, from its edited HTML.
+        assert rendered == ([(b_id, edited)] if n == 0 else [])
+        validate_dtd(result.fcpxml)
+        check_invariants(result.fcpxml)
+
+
+def test_a_stopped_render_keeps_the_graphics_that_finished(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+
+    def stop_once_g01_is_saved():
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if any(g["id"] == "G01" and g.get("rendered") for g in _manifest(out)):
+                raise KeyboardInterrupt  # Ctrl-C while G02 is still rendering
+            time.sleep(0.05)
+        raise AssertionError("G01 was never recorded as rendered")
+
+    rendered: list = []
+    fake_renderer(monkeypatch, rendered, slow={"G02": stop_once_g01_is_saved})
+    a, plan, tl = small_cut()
+    with pytest.raises(KeyboardInterrupt):
+        graphics.make(FakeProvider(), plan.graphics, tl, a, out, brief="", style="", workers=2)
+    entries = {g["id"]: g for g in _manifest(out)}
+    assert entries["G01"]["rendered"] == entries["G01"]["digest"] and entries["G01"]["file"] == "graphics/G01-lower-third.mov"
+    assert "rendered" not in entries["G02"] and "file" not in entries["G02"]
+
+    # `roughcut render` then renders only what's missing.
+    rendered.clear()
+    monkeypatch.setattr(graphics, "_render_one", graphics._render_one)
+    fake_renderer(monkeypatch, rendered)
+    specs, html, style = graphics.saved_designs(out)
+    clips, _, _ = graphics.make(None, specs, small_cut()[2], a, out, brief="", style=style, workers=2, saved_html=html)
+    assert [gid for gid, _ in rendered] == ["G02"] and [c.id for c in clips] == ["G01", "G02"]
+
+
+def test_renumbered_graphics_keep_their_designs_and_old_names_are_put_aside(tmp_path, monkeypatch):
+    rendered: list = []
+    fake_renderer(monkeypatch, rendered)
+    a, plan, tl = small_cut([spec("stat", "V01.S005", "asking", "Later", 2), spec("lower_third", "V01.S003", "Today", "Earlier", 2)])
+    out = tmp_path / "out"
+    folder = out / "graphics"
+    folder.mkdir(parents=True)
+    # A folder from before graphics were numbered in timeline order: G01 is the plan's first graphic.
+    entries = []
+    for n, g in enumerate(plan.graphics):
+        slug = f"G{n + 1:02d}-{g.kind.replace('_', '-')}"
+        (folder / f"{slug}.html").write_text(GRAPHIC_HTML.replace("TEXT", f"{g.text} (edited by hand)"))
+        _transparent_mov(folder / f"{slug}.mov", 30)
+        entries.append({"id": f"G{n + 1:02d}", "index": n, **g.__dict__, "html": f"graphics/{slug}.html", "file": f"graphics/{slug}.mov", "digest": "0" * 16})
+    (out / "graphics.json").write_text(json.dumps({"style": "", "graphics": entries}))
+    (folder / "preview.html").write_text("contact sheet")
+    (folder / "old").mkdir()
+    (folder / "old" / "G01-stat.html").write_text("put aside by an earlier run")
+
+    specs, html, style = graphics.saved_designs(out)
+    clips, placed, _ = graphics.make(None, specs, tl, a, out, brief="", style=style, workers=2, saved_html=html)
+    assert [(g.slug, g.spec.text) for g in placed] == [("G01-lower-third", "Earlier"), ("G02-stat", "Later")]
+    # Each graphic kept its own (hand-edited) design under its new name...
+    assert "Earlier (edited by hand)" in (folder / "G01-lower-third.html").read_text()
+    assert "Later (edited by hand)" in (folder / "G02-stat.html").read_text()
+    # ...and the old names, which no graphic uses now, moved to graphics/old/ (nothing overwritten there).
+    assert sorted(p.name for p in folder.glob("*.html")) == ["G01-lower-third.html", "G02-stat.html", "preview.html"]
+    assert (folder / "old" / "G01-stat.html").read_text() == "put aside by an earlier run"
+    assert "Later (edited by hand)" in (folder / "old" / "G01-stat (2).html").read_text()
+    assert "Earlier (edited by hand)" in (folder / "old" / "G02-lower-third.html").read_text()
+    # Rendered clips stay put: a project already imported into Final Cut may use them.
+    assert (folder / "G01-stat.mov").is_file() and (folder / "G02-lower-third.mov").is_file()
+
+
+def test_saved_designs_are_read_by_plan_position_in_any_order(tmp_path):
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    entries = []
+    for gid, index, text in (("G01", 2, "two"), ("G02", 0, "zero"), ("G03", 3, "three")):  # index 1 was dropped by a re-cut
+        (out / "graphics" / f"{gid}-quote.html").write_text(f"<p>{text}</p>")
+        entries.append({"id": gid, "index": index, "kind": "quote", "segment": "V01.S003", "words": "", "text": text, "html": f"graphics/{gid}-quote.html"})
+    (out / "graphics.json").write_text(json.dumps({"style": "s", "graphics": entries}))
+    specs, html, style = graphics.saved_designs(out)
+    assert [s.text for s in specs] == ["zero", "", "two", "three"]
+    assert html == {0: "<p>zero</p>", 2: "<p>two</p>", 3: "<p>three</p>"} and style == "s"
+
+
+def test_a_graphic_without_a_saved_design_is_reported_not_dropped_silently(tmp_path, monkeypatch):
+    a, plan, tl = small_cut()
+    fake_renderer(monkeypatch, [])
+    clips, placed, warnings = graphics.make(None, plan.graphics, tl, a, tmp_path / "out", brief="", style="", workers=2, saved_html={0: GRAPHIC_HTML})
+    assert [c.id for c in clips] == ["G01"]
+    assert "graphic G02 'Weeks of asking' has no saved design; left out" in warnings

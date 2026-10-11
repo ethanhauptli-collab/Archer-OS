@@ -18,10 +18,13 @@ of hanging the run. Each render is checked (script errors, missing fonts,
 blank, never animating off, outside the safe area) and composited over
 its shot in graphics/preview.html (graphics_preview.py).
 
-The designs and graphics.json are saved before rendering starts, so
-`roughcut render` can finish a run that stopped there without asking the
-model again. Edit a design's HTML and run `roughcut render` to re-render
-only what changed.
+The designs and graphics.json are saved before rendering starts, and each
+render is recorded as it finishes, so `roughcut render` can finish a run
+that stopped there without asking the model again. Edit a design's HTML
+and run `roughcut render` to re-render only what changed. Designs are
+matched to graphics by their position in the plan ("index"), never by ID:
+IDs follow timeline order and can change with the cut. Designs no graphic
+uses any more move to graphics/old/.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import struct
@@ -512,16 +516,57 @@ def design(
             first = next((g for g in group if g.id in got and g.spec.kind != "title_card"), None) or next(g for g in group if g.id in got)
             reference = (first.id, first.spec.kind, got[first.id])
             break
-    if pending:
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pending)))) as pool:
-            for future in as_completed([pool.submit(ask, group, house, reference) for group in pending]):
-                take(*future.result())
+    for answer in _in_background(lambda group: ask(group, house, reference), pending, workers):
+        take(*answer)
     log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
     return html
 
 
 def _ids(group: list[PlacedGraphic]) -> str:
     return group[0].id if len(group) == 1 else f"{group[0].id}-{group[-1].id}"
+
+
+def _in_background(fn, items: list, workers: int):
+    """Yield fn(item) for each item as it finishes, running at most `workers` at once in daemon threads.
+
+    For model requests that take minutes: Ctrl-C stops the wait at once, and the process can
+    exit without finishing (and paying for) the requests still in flight, where a
+    ThreadPoolExecutor would wait for them. An exception from fn is raised here.
+    """
+    if not items:
+        return
+    todo: queue.SimpleQueue = queue.SimpleQueue()
+    for item in items:
+        todo.put(item)
+    finished: queue.SimpleQueue = queue.SimpleQueue()
+    stop = threading.Event()
+
+    def work() -> None:
+        while not stop.is_set():
+            try:
+                item = todo.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                finished.put((True, fn(item)))
+            except BaseException as e:  # noqa: BLE001 - raised in the caller's thread
+                finished.put((False, e))
+
+    for _ in range(max(1, min(workers, len(items)))):
+        threading.Thread(target=work, name="roughcut-design", daemon=True).start()
+    try:
+        for _ in items:
+            while True:
+                try:
+                    ok, value = finished.get(timeout=0.2)  # wake often, so Ctrl-C is handled at once
+                    break
+                except queue.Empty:
+                    continue
+            if not ok:
+                raise value
+            yield value
+    finally:
+        stop.set()  # stopped or failed: start no more requests
 
 
 # ------------------------------------------------------------------ rendering
@@ -781,24 +826,26 @@ def _digest(html: str, frames: int, rate: str, width: int, height: int) -> str:
     return hashlib.sha256(f"{frames}|{rate}|{width}x{height}|{how}|{html}".encode()).hexdigest()[:16]
 
 
-def _rendered_digest(entry: dict | None) -> str | None:
-    """Digest of the design a manifest entry's .mov was rendered from (None if it wasn't)."""
-    if not entry:
-        return None
-    if "rendered" in entry:
-        return entry["rendered"]
-    return entry.get("digest") if entry.get("file") else None  # manifests written only after rendering
-
-
 def unchanged(placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, previous: dict) -> dict[str, Path]:
-    """Rendered clips that still match their design and length, by graphic ID."""
+    """Rendered clips that still match their design and length, by graphic ID.
+
+    A clip counts when the previous manifest says this very file was rendered ("rendered") from
+    the same digest. Manifests from before "rendered" existed used another digest, so their
+    graphics re-render once.
+    """
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
     old = {g.get("id"): g for g in previous.get("graphics", []) if isinstance(g, dict)}
     found = {}
     for g in placed:
         out = folder / f"{g.slug}.mov"
-        if g.id in html and out.exists() and _rendered_digest(old.get(g.id)) == _digest(html[g.id], g.frames, rate, tl.width, tl.height):
+        entry = old.get(g.id) or {}
+        if (
+            g.id in html
+            and out.exists()
+            and entry.get("file") == f"graphics/{out.name}"
+            and entry.get("rendered") == _digest(html[g.id], g.frames, rate, tl.width, tl.height)
+        ):
             found[g.id] = out
     return found
 
@@ -810,14 +857,47 @@ def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path
             (folder / f"{g.slug}.html").write_text(html[g.id], encoding="utf-8")
 
 
+_DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")
+
+
+def _put_aside_old_designs(folder: Path, placed: list[PlacedGraphic], html: dict[str, str]) -> None:
+    """Move designs this run doesn't use into graphics/old/, so the folder only holds the live ones.
+
+    Graphics are numbered in timeline order, so a re-cut (or an older folder) can leave
+    G01-quote.html beside the live G02-quote.html; editing it would do nothing. Their content is
+    kept (it may hold hand edits). Rendered .mov files stay where they are: a project already
+    imported into Final Cut may still use them.
+    """
+    live = {f"{g.slug}.html" for g in placed if g.id in html}
+    stale = [p for p in folder.glob("G*.html") if _DESIGN_FILE.fullmatch(p.name) and p.name not in live]
+    if not stale:
+        return
+    old = folder / "old"
+    moved = 0
+    try:  # tidying up; never worth failing the run over
+        old.mkdir(exist_ok=True)
+        for p in stale:
+            target, n = old / p.name, 2
+            while target.exists():
+                target, n = old / f"{p.stem} ({n}).html", n + 1
+            p.replace(target)
+            moved += 1
+    except OSError:
+        pass
+    if moved:
+        log(f"moved {moved} design(s) no graphic uses any more to {old}")
+
+
 def render(
     placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, *, workers: int, warnings: list[str],
     previous: dict | None = None, notes: dict[str, list[str]] | None = None, keep_out: dict[str, float] | None = None,
+    on_rendered=None,
 ) -> dict[str, Path]:
     """Render what's new or changed; reuse clips whose design and length are the same.
 
     `previous` is the manifest from before this run (read from disk when not given);
-    `notes` collects what each graphic's render reported, for the manifest.
+    `notes` collects what each graphic's render reported, for the manifest;
+    `on_rendered(done)` is called with every clip so far each time one finishes.
     """
     save_designs(placed, html, folder)
     fd = tl.frame_duration
@@ -852,6 +932,8 @@ def render(
                     log(f"{job['slug']}: {result['error']}")
                 else:
                     done[job["id"]] = Path(job["out"])
+                    if on_rendered is not None:  # recorded before it's announced
+                        on_rendered(done)
                     log(f"rendered {job['slug']} ({job['frames']} frames) in {_took(result['seconds'])} [{n}/{len(jobs)}]")
         except KeyboardInterrupt:
             _STOP.set()  # the workers stop at their next frame and clean up
@@ -907,12 +989,6 @@ def _box(frame: bytes, w: int, h: int) -> tuple[float, float, float, float] | No
     x0 = next(c for c in range(w) if max(frame[c::w]) > QC_ALPHA)
     x1 = next(c for c in range(w - 1, -1, -1) if max(frame[c::w]) > QC_ALPHA)
     return x0 / w, rows[0] / h, (x1 + 1) / w, (rows[-1] + 1) / h
-
-
-def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float, float, float] | None] | None:
-    """Per frame, the box holding everything visible, or None when blank. None when the file can't be read."""
-    read = _alpha_frames(path, size)
-    return None if read is None else [_box(f, read[0], read[1]) for f in read[2]]
 
 
 def inspect(path: Path, kind: str, size: tuple[int, int], keep_out: dict[str, float] | None = None) -> list[str]:
@@ -1018,28 +1094,34 @@ def write_manifest(
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
     """Specs and (possibly hand-edited) HTML from an earlier run, for `roughcut render`.
 
-    HTML is keyed by the graphic's position in the plan, which doesn't move when a re-cut drops one.
+    Each spec sits at its position in the plan ("index"), and HTML is keyed by it. Positions don't
+    move when a re-cut drops a graphic, and graphics.json lists entries in timeline order, not
+    plan order, so entries are placed by index (gaps become empty specs, which place() skips).
     """
     data = _read_manifest(out_dir)
-    specs: list[GraphicSpec] = []
+    by_index: dict[int, GraphicSpec] = {}
     html: dict[int, str] = {}
-    for g in data.get("graphics", []):
-        index = int(g.get("index", len(specs)))
-        while len(specs) < index:  # keep positions aligned if entries were dropped
-            specs.append(GraphicSpec(kind="quote", segment="", words="", text=""))
+    entries = [g for g in data.get("graphics", []) if isinstance(g, dict)]
+    for position, g in enumerate(entries):
+        try:
+            index = int(g.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        if index < 0 or index in by_index:
+            continue
         try:
             seconds = float(g.get("seconds") or 0)
         except (TypeError, ValueError):
             seconds = 0.0
-        specs.append(
-            GraphicSpec(
-                kind=str(g.get("kind", "quote")), segment=str(g.get("segment", "")), words=str(g.get("words", "")),
-                text=str(g.get("text", "")), subtext=str(g.get("subtext", "")), seconds=seconds, direction=str(g.get("direction", "")),
-            )
+        by_index[index] = GraphicSpec(
+            kind=str(g.get("kind", "quote")), segment=str(g.get("segment", "")), words=str(g.get("words", "")),
+            text=str(g.get("text", "")), subtext=str(g.get("subtext", "")), seconds=seconds, direction=str(g.get("direction", "")),
         )
         page = out_dir / str(g.get("html") or "")
         if g.get("html") and page.is_file():
             html[index] = page.read_text(encoding="utf-8")
+    empty = GraphicSpec(kind="quote", segment="", words="", text="")
+    specs = [by_index.get(i, empty) for i in range(max(by_index, default=-1) + 1)]
     return specs, html, str(data.get("style", ""))
 
 
@@ -1060,21 +1142,30 @@ def make(
     if saved_html is not None:
         progress.stage("graphics", f"Re-timing {len(placed)} graphics")
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
+        for g in placed:
+            if g.id not in html:
+                warnings.append(f"graphic {g.id} {g.spec.text!r} has no saved design; left out")
     else:
         progress.stage("graphics", f"Designing {len(placed)} graphics")
         html = design(
             provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings, keep_out=keep_out
         )
-    # Every design is on disk before rendering starts: if rendering fails or is stopped,
-    # `roughcut render` re-renders them without asking the model again.
+    # Every design is on disk before rendering starts, and each render is recorded as it finishes:
+    # if rendering fails or is stopped, `roughcut render` renders only what's missing, without
+    # asking the model again.
     previous = _read_manifest(out_dir)
     save_designs(placed, html, folder)
     kept = unchanged(placed, html, folder, tl, previous)
-    write_manifest(out_dir, placed, kept, html, tl, style, notes={k: v for k, v in _old_notes(previous).items() if k in kept})
-    notes: dict[str, list[str]] = {}
-    files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out)
+    notes: dict[str, list[str]] = {k: v for k, v in _old_notes(previous).items() if k in kept}
+    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes)
+
+    def record(done: dict[str, Path]) -> None:
+        write_manifest(out_dir, placed, done, html, tl, style, notes=notes)
+
+    files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
     clips = attach(tl, placed, files, warnings)
     write_manifest(out_dir, placed, files, html, tl, style, notes=notes)
+    _put_aside_old_designs(folder, placed, html)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     try:
         from .graphics_preview import write_previews
