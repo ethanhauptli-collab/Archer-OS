@@ -17,6 +17,11 @@ enum StageStatus: Equatable {
     case pending, active, done, skipped
 }
 
+/// What the current run is doing.
+enum RunKind: Equatable {
+    case build, recut, revise
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -33,7 +38,12 @@ final class AppModel {
 
     // Run state
     private(set) var phase: Phase = .idle
-    private(set) var isRecut = false
+    private(set) var runKind: RunKind = .build
+    var isRecut: Bool { runKind == .recut }
+    /// After a failed run whose plan was saved: the folder `roughcut render` can finish without AI.
+    private(set) var resumeFolder: URL?
+    /// After a failed run: "usage_limit" when a Claude plan or API credit ran out.
+    private(set) var failureKind: String?
     private(set) var stageStatus: [Stage: StageStatus] = [:]
     private(set) var activeStage: Stage?
     private(set) var stageDetail = ""
@@ -43,6 +53,13 @@ final class AppModel {
 
     // Finished runs, newest first
     private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
+
+    // Presets from `roughcut preset list --json`
+    private(set) var presets: [Preset] = []
+
+    // `roughcut update`
+    private(set) var updating = false
+    var updateOutput: String?
 
     // Environment
     private(set) var cliURL: URL? = CLILocator.locate()
@@ -54,13 +71,19 @@ final class AppModel {
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var lastError: String?
     @ObservationIgnored private var lastResult: RunResult?
+    @ObservationIgnored private var lastResume: String?
+    @ObservationIgnored private var lastKind: String?
     /// Keeps the Mac from idle-sleeping while a run is going.
     @ObservationIgnored private var activity: NSObjectProtocol?
 
     var isRunning: Bool { phase == .running }
 
     var visibleStages: [Stage] {
-        isRecut ? [.cut, .graphics, .write] : Stage.allCases
+        switch runKind {
+        case .build: return Stage.allCases
+        case .recut: return [.cut, .graphics, .write]
+        case .revise: return [.plan, .cut, .graphics, .write]
+        }
     }
 
     func status(of stage: Stage) -> StageStatus {
@@ -92,7 +115,7 @@ final class AppModel {
             return
         }
         savePreferences()
-        run(cli: cli, arguments: options.arguments(), recut: false)
+        run(cli: cli, arguments: options.arguments(), kind: .build)
     }
 
     func recut(_ result: RunResult, style: CutStyle, format: SequenceFormat) {
@@ -104,7 +127,36 @@ final class AppModel {
             keepFillers: options.keepFillers,
             stringout: options.stringout
         )
-        run(cli: cli, arguments: recut.arguments(), recut: true)
+        run(cli: cli, arguments: recut.arguments(), kind: .recut)
+    }
+
+    /// Finish a stopped run from its saved plan, with no model call (`roughcut render`).
+    func finishWithoutAI() {
+        guard let folder = resumeFolder, let cli = resolveCLI() else { return }
+        let recut = RecutOptions(
+            outputFolder: folder,
+            style: options.style,
+            format: options.format,
+            keepFillers: options.keepFillers,
+            stringout: options.stringout
+        )
+        run(cli: cli, arguments: recut.arguments(), kind: .recut)
+    }
+
+    /// Re-plan the cut from editor notes as a new version (`roughcut revise`).
+    func revise(_ result: RunResult, notes: String, targetLength: String) {
+        guard let cli = resolveCLI() else { return }
+        let text = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-notes-\(UUID().uuidString).txt")
+        do {
+            try text.write(to: file, atomically: true, encoding: .utf8)
+        } catch {
+            phase = .failed("Couldn't save the notes for the revision: \(error.localizedDescription)")
+            return
+        }
+        let revise = ReviseOptions(outputFolder: result.outDirURL, notesFile: file, targetLength: targetLength)
+        run(cli: cli, arguments: revise.arguments(), kind: .revise)
     }
 
     func cancel() {
@@ -129,8 +181,13 @@ final class AppModel {
         return cli
     }
 
-    private func run(cli: URL, arguments: [String], recut: Bool) {
-        isRecut = recut
+    private func run(cli: URL, arguments: [String], kind: RunKind) {
+        runKind = kind
+        resumeFolder = nil
+        failureKind = nil
+        lastResume = nil
+        lastKind = nil
+        let recut = kind != .build
         stageStatus = [:]
         activeStage = nil
         stageDetail = ""
@@ -181,6 +238,8 @@ final class AppModel {
                     phase = .finished(result)
                 } else {
                     let tail = log.suffix(6).joined(separator: "\n")
+                    resumeFolder = ResumeCommand.outputFolder(from: lastResume)
+                    failureKind = lastKind
                     phase = .failed(lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)")
                 }
             }
@@ -203,7 +262,8 @@ final class AppModel {
             if options.openInFinalCutWhenDone {
                 openInFinalCut(result)
             }
-            notify(title: isRecut ? "Re-cut ready" : "Rough cut ready", body: result.title)
+            let title = runKind == .revise ? "Revision ready" : runKind == .recut ? "Re-cut ready" : "Rough cut ready"
+            notify(title: title, body: result.version.map { "\(result.title), version \($0)" } ?? result.title)
         case .failed(let message):
             notify(title: "Roughcut stopped", body: String(message.prefix(240)))
         default:
@@ -255,6 +315,8 @@ final class AppModel {
             phase = .finished(result)
         case "error":
             lastError = event.message
+            lastResume = event.resume ?? lastResume
+            lastKind = event.kind ?? lastKind
         default:
             break
         }
@@ -302,7 +364,7 @@ final class AppModel {
     }
 
     func openReport(_ result: RunResult) {
-        NSWorkspace.shared.open(result.reportURL)
+        NSWorkspace.shared.open(result.paperEditURL)
     }
 
     // MARK: Recent runs
@@ -314,7 +376,7 @@ final class AppModel {
 
     func showRecent(_ run: RecentRun) {
         guard !isRunning else { return }
-        isRecut = false
+        runKind = .build
         phase = .finished(run.result)
     }
 
@@ -394,6 +456,68 @@ final class AppModel {
         }
         doctor = report
         doctorError = report == nil ? (lastLine.isEmpty ? "`roughcut doctor` didn't answer." : lastLine) : nil
+        await refreshPresets()
+    }
+
+    // MARK: Presets
+
+    /// Reads the built-in and saved presets (`roughcut preset list --json`).
+    func refreshPresets() async {
+        guard let cli = cliURL else { return }
+        let output = await collectStdout(cli: cli, arguments: ["preset", "list", "--json"])
+        if let list = JSONLines.presets(from: output) {
+            presets = list
+        }
+    }
+
+    /// Fill the form from a preset; "" clears the choice and leaves the form as it is.
+    func applyPreset(named name: String) {
+        guard let preset = presets.first(where: { $0.name == name }) else {
+            options.presetName = ""
+            return
+        }
+        preset.apply(to: &options, replacing: presets.compactMap(\.brief))
+        if options.provider == .none {
+            options.graphics = false  // graphics are designed by the AI
+        }
+    }
+
+    // MARK: Updating
+
+    /// `roughcut update`: pull the latest version into the checkout the CLI runs from.
+    func updateRoughcut() {
+        guard !updating, let cli = resolveCLI() else { return }
+        updating = true
+        Task {
+            let output = await collectStdout(cli: cli, arguments: ["update"], includeStderr: true)
+            updating = false
+            updateOutput = output.isEmpty ? "roughcut update didn't say anything." : output
+            await refreshDoctor()
+        }
+    }
+
+    private func collectStdout(cli: URL, arguments: [String], includeStderr: Bool = false) async -> String {
+        let process = CLIProcess(
+            executable: cli,
+            arguments: arguments,
+            environment: CLILocator.environment(for: cli, extra: apiKeyEnvironment())
+        )
+        var lines: [String] = []
+        for await output in process.run() {
+            switch output {
+            case .stdout(let line):
+                lines.append(line)
+            case .event(let event):
+                if let message = event.message { lines.append(message) }
+            case .stderr(let line) where includeStderr:
+                lines.append(line)
+            case .failedToLaunch(let message):
+                lines.append(message)
+            default:
+                break
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Things that will stop a build, for the banner at the top of the window.
