@@ -175,41 +175,136 @@ def choose_format(pieces: list[_Piece], analysis: Analysis, override: str | None
 # ------------------------------------------------------------- speech runs
 
 
-def _silence_clamp_end(t: float, word_start: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
-    """Whisper word ends often run into the following silence; pull them back.
+class _Spans:
+    """(start, end) spans sorted by start, looked up by bisection.
 
-    Only a silence that covers the word's tail counts. A pause in the middle
-    of a stretched word must not cut the real audio after it.
+    A long talking clip has thousands of silences and words, and every
+    segment and piece asks about the few near it; scanning them all each
+    time made a three-hour recording take minutes.
     """
-    for s, e in silences:
-        if word_start < s < t and e >= t - eps:
-            return s
-    return t
+
+    def __init__(self, spans) -> None:
+        self.spans: list[tuple[float, float]] = sorted(spans)
+        self.starts = [s for s, _ in self.spans]
+        self.longest = max((e - s for s, e in self.spans), default=0.0)
+
+    def __iter__(self):
+        return iter(self.spans)
+
+    def __len__(self) -> int:
+        return len(self.spans)
+
+    def clamp_end(self, t: float, word_start: float, eps: float = 0.05) -> float:
+        """Whisper word ends often run into the following silence; pull them back.
+
+        Only a silence that covers the word's tail counts. A pause in the middle
+        of a stretched word must not cut the real audio after it.
+        """
+        i = bisect.bisect_right(self.starts, word_start)
+        while i < len(self.spans) and self.starts[i] < t:
+            s, e = self.spans[i]
+            if e >= t - eps:
+                return s
+            i += 1
+        return t
+
+    def clamp_start(self, t: float, word_end: float, eps: float = 0.05) -> float:
+        """Mirror of clamp_end: skip silence covering the word's head."""
+        i = bisect.bisect_left(self.starts, t - self.longest - 1e-6)  # a span ending after t starts after this
+        while i < len(self.spans) and self.starts[i] <= t + eps:
+            e = self.spans[i][1]
+            if t < e < word_end:
+                return e
+            i += 1
+        return t
+
+    def pause_between(self, prev_start: float, next_end: float, eps: float = 0.05) -> float:
+        """Longest measured silence between two words.
+
+        Whisper often stretches a word across the pause after it (or starts the
+        next word early), so the words' own times can show no gap at all. The
+        silence map still sees the pause.
+        """
+        longest = 0.0
+        i = bisect.bisect_left(self.starts, prev_start + eps)
+        while i < len(self.spans) and self.starts[i] <= next_end - eps:
+            s, e = self.spans[i]
+            if e <= next_end - eps:
+                longest = max(longest, e - s)
+            i += 1
+        return longest
+
+    def holds(self, s: float, e: float) -> bool:
+        """Does a span lie wholly inside s..e? (For words: is a whole word said in it?)"""
+        i = bisect.bisect_left(self.starts, s)
+        while i < len(self.spans) and self.starts[i] <= e:
+            if self.spans[i][1] <= e:
+                return True
+            i += 1
+        return False
 
 
-def _silence_clamp_start(t: float, word_end: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
-    """Mirror of _silence_clamp_end: skip silence covering the word's head."""
-    for s, e in silences:
-        if s <= t + eps and t < e < word_end:
-            return e
-    return t
+def _spans(silences) -> _Spans:
+    return silences if isinstance(silences, _Spans) else _Spans(silences)
 
 
-def _pause_between(prev_start: float, next_end: float, silences: list[tuple[float, float]], eps: float = 0.05) -> float:
-    """Longest measured silence between two words.
+# One-off forms taking a plain list of silences. The timeline itself uses a clip's _index().
+def _silence_clamp_end(t: float, word_start: float, silences, eps: float = 0.05) -> float:
+    return _spans(silences).clamp_end(t, word_start, eps)
 
-    Whisper often stretches a word across the pause after it (or starts the
-    next word early), so the words' own times can show no gap at all. The
-    silence map still sees the pause.
-    """
-    return max((e - s for s, e in silences if s >= prev_start + eps and e <= next_end - eps), default=0.0)
+
+def _silence_clamp_start(t: float, word_end: float, silences, eps: float = 0.05) -> float:
+    return _spans(silences).clamp_start(t, word_end, eps)
+
+
+def _pause_between(prev_start: float, next_end: float, silences, eps: float = 0.05) -> float:
+    return _spans(silences).pause_between(prev_start, next_end, eps)
 
 
 BREATH_MARGIN = 0.05  # kept either side of a breath in narration
 MIN_TRIM = 0.1  # a shorter trim isn't worth an edit
 
 
-_CLUSTERS: dict = {}  # memo: speech_pieces asks once per segment, _cut_silences once per piece
+@dataclass
+class _ClipIndex:
+    """A talking clip's pauses and words, sorted once (speech_pieces asks once per segment,
+    _cut_silences once per piece)."""
+
+    silences: _Spans
+    clusters: list[tuple[float, float, list[tuple[float, float]]]]  # see _pause_clusters
+    pauses: _Spans  # the clusters' spans
+    spoken: _Spans  # every transcribed word
+    seg_pos: dict[str, tuple[int, int]]  # segment ID -> (its index in the clip, clip-wide index of its first word)
+
+
+def _index(clip: Clip) -> _ClipIndex:
+    # Kept on the clip and rebuilt when its silences, breaths or segments change.
+    key = (id(clip.segments), len(clip.segments), tuple(clip.silences), tuple(clip.breaths))
+    memo = clip.__dict__.get("_timeline_index")
+    if memo is not None and memo[0] == key:
+        return memo[1]
+    silences = _Spans(clip.silences)
+    spoken = _Spans((w.start, w.end) for seg in clip.segments for w in seg.words)
+    breaths = sorted(clip.breaths)
+
+    def breath_between(a: float, b: float) -> bool:
+        i = bisect.bisect_left(breaths, (a - 1e-3,))
+        return i < len(breaths) and abs(breaths[i][0] - a) < 1e-3 and abs(breaths[i][1] - b) < 1e-3
+
+    clusters: list[tuple[float, float, list[tuple[float, float]]]] = []
+    for s, e in silences:
+        if clusters and breaths and breath_between(clusters[-1][1], s) and not spoken.holds(s, e) and not spoken.holds(*clusters[-1][2][-1]):
+            clusters[-1] = (clusters[-1][0], e, clusters[-1][2] + [(s, e)])
+            continue
+        clusters.append((s, e, [(s, e)]))
+    seg_pos: dict[str, tuple[int, int]] = {}
+    base = 0
+    for i, seg in enumerate(clip.segments):
+        seg_pos.setdefault(seg.id, (i, base))
+        base += len(seg.words)
+    ix = _ClipIndex(silences, clusters, _Spans((s, e) for s, e, _ in clusters), spoken, seg_pos)
+    clip.__dict__["_timeline_index"] = (key, ix)
+    return ix
 
 
 def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, float]]]]:
@@ -220,38 +315,7 @@ def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, fl
     marks the breaths (short, quiet, no transcribed word); silences that hold
     a whole word (quiet speech under a raised level) are never joined.
     """
-    if not clip.breaths:
-        return [(s, e, [(s, e)]) for s, e in sorted(clip.silences)]
-    key = (id(clip), clip.id, tuple(clip.silences), tuple(clip.breaths), id(clip.segments), sum(len(s.words) for s in clip.segments))
-    if key in _CLUSTERS:
-        return _CLUSTERS[key]
-    spans = sorted(clip.silences)
-    spoken = sorted((w.start, w.end) for seg in clip.segments for w in seg.words)
-    starts = [ws for ws, _ in spoken]
-    breaths = sorted(clip.breaths)
-
-    def holds_word(s: float, e: float) -> bool:
-        i = bisect.bisect_left(starts, s)
-        while i < len(spoken) and spoken[i][0] <= e:
-            if spoken[i][1] <= e:
-                return True
-            i += 1
-        return False
-
-    def breath_between(a: float, b: float) -> bool:
-        i = bisect.bisect_left(breaths, (a - 1e-3,))
-        return i < len(breaths) and abs(breaths[i][0] - a) < 1e-3 and abs(breaths[i][1] - b) < 1e-3
-
-    out: list[tuple[float, float, list[tuple[float, float]]]] = []
-    for s, e in spans:
-        if out and breath_between(out[-1][1], s) and not holds_word(s, e) and not holds_word(*out[-1][2][-1]):
-            out[-1] = (out[-1][0], e, out[-1][2] + [(s, e)])
-            continue
-        out.append((s, e, [(s, e)]))
-    if len(_CLUSTERS) > 64:
-        _CLUSTERS.clear()
-    _CLUSTERS[key] = out
-    return out
+    return _index(clip).clusters
 
 
 def _gap_limit(clip: Clip, style: Style) -> float:
@@ -266,9 +330,10 @@ def _gap_limits(analysis: Analysis, style: Style) -> dict[str, float]:
 
 def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[_Piece]:
     dur = clip.duration
+    ix = _index(clip)
     if not seg.words:
         # Silence-map segment: its position in the clip stands in for word indexes.
-        idx = next((i for i, s in enumerate(clip.segments) if s.id == seg.id), 0)
+        idx = ix.seg_pos.get(seg.id, (0, 0))[0]
         a, b = max(0.0, seg.start - style.pad_in), min(dur, seg.end + style.pad_out)
         return [_Piece(clip.id, a, b, seg.start, seg.end, section, [seg.id], idx, idx)]
 
@@ -282,14 +347,14 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     max_gap = _gap_limit(clip, style)
     # On camera a pause split by a breath is one pause, cut in one edit. Narration keeps its
     # breaths (sound is never removed there); _cut_silences trims the silence around them.
-    sil = [(s, e) for s, e, _ in _pause_clusters(clip)] if clip.media.has_video else clip.silences
+    sil = ix.pauses if clip.media.has_video else ix.silences
     for i, w in enumerate(all_words):
         if style.remove_fillers and w.is_filler:
             removed_since_last = True
             continue
         if current:
             prev = all_words[current[-1]]
-            gap = max(w.start - prev.end, _pause_between(prev.start, w.end, sil))
+            gap = max(w.start - prev.end, sil.pause_between(prev.start, w.end))
             if gap > max_gap or (removed_since_last and gap > filler_floor):
                 runs.append(current)
                 current = []
@@ -300,14 +365,13 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
 
     # Neighbouring words outside this segment, so padding never grabs the tail
     # of a cut retake or the start of the next sentence.
-    idx = next((i for i, s in enumerate(clip.segments) if s.id == seg.id), -1)
-    base = sum(len(s.words) for s in clip.segments[:idx]) if idx > 0 else 0
+    idx, base = ix.seg_pos.get(seg.id, (-1, 0))
 
     def end_of(w) -> float:  # where a neighbouring word's sound really stops / starts
-        return _silence_clamp_end(w.end, w.start, sil)
+        return sil.clamp_end(w.end, w.start)
 
     def start_of(w) -> float:
-        return _silence_clamp_start(w.start, w.end, sil)
+        return sil.clamp_start(w.start, w.end)
 
     prev_end = end_of(clip.segments[idx - 1].words[-1]) if idx > 0 and clip.segments[idx - 1].words else 0.0
     next_start = (
@@ -320,8 +384,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     for run in runs:
         first_i, last_i = run[0], run[-1]
         first, last = all_words[first_i], all_words[last_i]
-        wa = _silence_clamp_start(first.start, first.end, sil)
-        wb = _silence_clamp_end(last.end, last.start, sil)
+        wa = sil.clamp_start(first.start, first.end)
+        wb = sil.clamp_end(last.end, last.start)
         # Padding never reaches into a neighbouring word (including cut fillers).
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
@@ -371,7 +435,7 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
     out: list[_Piece] = []
     for p in pieces:
         clip = analysis.clip(p.clip_id)
-        spoken = [(w.start, w.end) for seg in clip.segments for w in seg.words]
+        ix = _index(clip)
         if p.seg_ids:
             longest = _gap_limit(clip, style)
         elif clip.role in ("aroll", "voiceover"):  # a timed range of talking footage
@@ -380,8 +444,11 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
             out.append(p)
             continue
         cur = p
-        for s, e, members in _pause_clusters(clip):
-            if e - s > longest and cur.wa < s and e < cur.wb and not any(s <= ws and we <= e for ws, we in spoken):
+        # Only pauses starting inside the piece's speech can qualify (cur.wa only moves later).
+        first = bisect.bisect_right(ix.pauses.starts, p.wa)
+        last = bisect.bisect_left(ix.pauses.starts, p.wb)
+        for s, e, members in ix.clusters[first:last]:
+            if e - s > longest and cur.wa < s and e < cur.wb and not ix.spoken.holds(s, e):
                 if clip.media.has_video or len(members) == 1:
                     cuts = [(s, e, style.pad_out, style.pad_in)]
                 else:

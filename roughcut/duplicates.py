@@ -53,8 +53,10 @@ def same_line(a: list[str], b: list[str], same_takes: bool) -> bool:
     if not same_takes and len(a) < LINE_REPEAT_MIN_WORDS:
         return False  # "Thank you." twice in different interviews is fine
     need = LINE_REPEAT_IN_TAKES if same_takes else LINE_REPEAT
+    if 2.0 * min(len(a), len(b)) / (len(a) + len(b)) < need:
+        return False  # real_quick_ratio, without building a matcher for every pair of lines
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
-    return sm.real_quick_ratio() >= need and sm.quick_ratio() >= need and sm.ratio() >= need
+    return sm.quick_ratio() >= need and sm.ratio() >= need
 
 
 def similarity(a: Clip, b: Clip) -> float:

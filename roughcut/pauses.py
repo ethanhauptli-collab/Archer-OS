@@ -153,11 +153,15 @@ def window_levels(path: Path) -> list[float]:
 def breath_candidates(silences: list[tuple[float, float]], words: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Short sounds between two silences that hold no transcribed word (its start, or all of it)."""
     spans = sorted(silences)
+    words = sorted(words)
+    starts = [ws for ws, _ in words]
     out = []
     for (_, e1), (s2, _) in zip(spans, spans[1:]):
         if not 0 < s2 - e1 <= BREATH_MAX:
             continue
-        if any(e1 <= ws < s2 or (e1 - 0.02 <= ws and we <= s2 + 0.02) for ws, we in words):
+        # Only words starting near the island can be in it (a long recording has tens of thousands).
+        near = words[bisect.bisect_left(starts, e1 - 0.02) : bisect.bisect_right(starts, s2 + 0.02)]
+        if any(e1 <= ws < s2 or (e1 - 0.02 <= ws and we <= s2 + 0.02) for ws, we in near):
             continue
         out.append((e1, s2))
     return out

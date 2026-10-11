@@ -682,3 +682,68 @@ def test_render_media_needs_the_run_style():
 
     with pytest.raises(TypeError):
         render_media(narration_project())  # a silent medium default would misstate tight/loose lengths
+
+
+def _linear_clamp_end(t, word_start, silences, eps=0.05):
+    return next((s for s, e in silences if word_start < s < t and e >= t - eps), t)
+
+
+def _linear_clamp_start(t, word_end, silences, eps=0.05):
+    return next((e for s, e in silences if s <= t + eps and t < e < word_end), t)
+
+
+def _linear_pause(prev_start, next_end, silences, eps=0.05):
+    return max((e - s for s, e in silences if s >= prev_start + eps and e <= next_end - eps), default=0.0)
+
+
+def test_pause_lookups_by_bisection_match_a_full_scan():
+    import random
+
+    from roughcut.timeline import _Spans
+
+    rng = random.Random(7)
+    for _ in range(200):
+        t, silences = 0.0, []
+        for _ in range(rng.randint(0, 30)):
+            t += rng.uniform(0.0, 2.0)
+            length = rng.uniform(0.01, 1.5)
+            silences.append((round(t, 3), round(t + length, 3)))
+            t += length
+        spans = _Spans(silences)
+        for _ in range(30):
+            a = rng.uniform(-0.5, t + 0.5)
+            b = a + rng.uniform(0.0, 3.0)
+            assert spans.clamp_end(b, a) == _linear_clamp_end(b, a, silences)
+            assert spans.clamp_start(a, b) == _linear_clamp_start(a, b, silences)
+            assert spans.pause_between(a, b) == _linear_pause(a, b, silences)
+            assert spans.holds(a, b) == any(a <= s and e <= b for s, e in silences)
+
+
+def test_a_long_recording_renders_and_cuts_in_seconds():
+    import random
+    import time
+
+    from roughcut.pauses import breath_candidates
+    from roughcut.plan import heuristic_plan
+    from roughcut.prompts import render_media
+
+    rng = random.Random(1)
+    vocab = "the city plans more parks near river and homes offices hotels restaurants we went down to coast".split()
+    sentences, silences, t = [], [], 0.5
+    for i in range(1500):
+        n = rng.randint(6, 14)
+        sentences.append((t, t + n * 0.3, " ".join(rng.choice(vocab) for _ in range(n)) + "."))
+        silences.append((t + n * 0.3, t + n * 0.3 + 0.7))
+        if i % 3 == 0:
+            silences.append((t + n * 0.15, t + n * 0.15 + 0.4))
+        t += n * 0.3 + 0.7
+    clip = make_clip("V01", seconds=t + 2, sentences=sentences, silences=sorted(silences))
+    a = Analysis(clips=[clip])
+    words = sorted((w.start, w.end) for s in clip.segments for w in s.words)
+    split = [half for s, e in clip.silences for half in ((s, (s + e) / 2 - 0.1), ((s + e) / 2 + 0.1, e))]
+    began = time.monotonic()
+    render_media(a, STYLES["medium"])
+    build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    assert breath_candidates(split, words)
+    assert time.monotonic() - began < 10  # was minutes: every segment and piece scanned the whole clip
+
