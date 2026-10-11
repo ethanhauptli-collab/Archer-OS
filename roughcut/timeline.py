@@ -17,6 +17,7 @@ from fractions import Fraction
 
 from . import timecode as tc
 from .analyze import Analysis, Clip
+from .pauses import word_in_pause
 from .phrases import exact_matches, frame_at, partial_match
 from .phrases import tokens as phrase_tokens
 from .plan import MusicCue, Plan
@@ -306,7 +307,15 @@ def _index(clip: Clip) -> _ClipIndex:
 
     clusters: list[tuple[float, float, list[tuple[float, float]]]] = []
     for s, e in silences:
-        if clusters and breaths and breath_between(clusters[-1][1], s) and not spoken.holds(s, e) and not spoken.holds(*clusters[-1][2][-1]):
+        if (
+            clusters
+            and breaths
+            and breath_between(clusters[-1][1], s)
+            and not spoken.holds(s, e)
+            and not spoken.holds(*clusters[-1][2][-1])
+            # A quiet word whose only sound is the "breath" (marked by an older analysis) stays.
+            and not word_in_pause(spoken.spans, spoken.starts, clusters[-1][0], clusters[-1][1], s, e)
+        ):
             clusters[-1] = (clusters[-1][0], e, clusters[-1][2] + [(s, e)])
             continue
         clusters.append((s, e, [(s, e)]))
@@ -326,7 +335,8 @@ def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, fl
     A breath splits one pause in two on the silence map, and each half can be
     shorter than the style's longest pause, so the pause stayed. Analysis
     marks the breaths (short, quiet, no transcribed word); silences that hold
-    a whole word (quiet speech under a raised level) are never joined.
+    a whole word (quiet speech under a raised level) are never joined, nor
+    two around a quiet word whose only sound is the "breath" between them.
     """
     return _index(clip).clusters
 
