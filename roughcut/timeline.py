@@ -1611,6 +1611,7 @@ def _duck_music(tl: Timeline, analysis: Analysis) -> None:
 MUSIC_FADE_IN = Fraction(1)  # seconds
 MUSIC_FADE_OUT = Fraction(2)
 DECLICK = Fraction(15, 1000)  # seconds: fade at a speech edit, too short to hear, long enough to stop a tick
+EDGE_DECLICK = Fraction(4, 1000)  # ...and at an edit on (or inside) a word: stops the tick without softening the word
 SPINE_BROLL_FADE = 6  # frames of fade on B-roll nat sound in the main storyline...
 CUTAWAY_FADE = Fraction(3, 10)  # ...and seconds on connected B-roll; both at most a quarter of the clip
 AUDIO_GRID = 48000  # fades are whole samples at 48 kHz
@@ -1629,9 +1630,12 @@ def _fades(tl: Timeline, analysis: Analysis) -> None:
     """Short fades where the audio jumps, so the first pass plays without ticks.
 
     Speech edits get a 15 ms de-click that ends before the first word and
-    starts after the last one (no fade where a cut sits right on a word).
-    B-roll nat sound eases in and out over a few frames. Fades are Final
-    Cut fade handles, so they stay draggable.
+    starts after the last one. Where there's less room than that (a cut
+    um/uh or retake right against the word, and frame rounding that puts
+    the edit inside it) the fade is shorter, never under 4 ms: a hard cut
+    in a voiced sound is the tick itself. B-roll nat sound eases in and out
+    over a few frames. Fades are Final Cut fade handles, so they stay
+    draggable.
     """
     fd = tl.frame_duration
     for i, sc in enumerate(tl.spine):
@@ -1644,7 +1648,7 @@ def _fades(tl: Timeline, analysis: Analysis) -> None:
         if clip.role in ("aroll", "voiceover") or sc.seg_ids:
             room_in = DECLICK if sc.wa is None else Fraction(sc.wa).limit_denominator(1000000) - sc.src_in
             room_out = DECLICK if sc.wb is None else sc.src_in + length - Fraction(sc.wb).limit_denominator(1000000)
-            fade_in, fade_out = min(DECLICK, room_in), min(DECLICK, room_out)
+            fade_in, fade_out = (max(EDGE_DECLICK, min(DECLICK, room)) for room in (room_in, room_out))
         else:  # nat sound under B-roll (or music) in the main storyline
             fade_in = fade_out = min(SPINE_BROLL_FADE * fd, length / 4)
         sc.fade_in = _samples(min(fade_in, length / 2)) if head else Fraction(0)
