@@ -41,6 +41,7 @@ class _Resources:
         self._next = 1
         self.formats: dict[tuple, str] = {}
         self.assets: dict[str, str] = {}  # clip id -> resource id
+        self.channel_sources: list[tuple[ET.Element, dict[str, str]]] = []  # (clip, <audio-channel-source> attributes)
 
     def _id(self) -> str:
         rid = f"r{self._next}"
@@ -103,6 +104,28 @@ def _timebase(m: MediaInfo) -> int | None:
 
 AUTO_FILL = "auto-fill"  # the note timeline._fill_picture gives the shots it chose
 
+# Where an asset-clip's subroles go.
+# "channel": as Final Cut writes them. The clip keeps only the main role
+#   (audioRole="dialogue"), and the audio subrole goes on an
+#   <audio-channel-source srcCh="1, 2" role="dialogue.Narration"/> after the
+#   clip's markers and keywords (DTD order); its volume and fades stay on the
+#   clip. Final Cut writes no element for a video component, and its exports only
+#   ever show a main role in an asset-clip's videoRole, so video subroles
+#   (B-Roll.Planned, B-Roll.Auto-fill, titles.Graphics) are left off asset-clips
+#   in this style. A still keeps its subrole: Final Cut writes
+#   <video role="VFX.VFX-Background">.
+# "clip": "main.Sub" straight on the clip's audioRole/videoRole.
+ROLE_STYLE = "channel"
+
+
+def _main_role(role: str | None) -> str | None:
+    return role.split(".", 1)[0] if role else role
+
+
+def source_channels(channels: int) -> str:
+    """srcCh for all of an asset's channels as one component, spelled like Final Cut ("1", "1, 2")."""
+    return ", ".join(str(ch) for ch in range(1, channels + 1))
+
 
 def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None]:
     """(video role, audio role) for one use of a clip, so Timeline Index > Roles
@@ -110,7 +133,8 @@ def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None
 
     `use` is "speech" (a story line in the main storyline, whatever the clip
     was classified as), "spine", "broll" (connected cutaway), "music",
-    "graphic" or "browser". None leaves Final Cut's default.
+    "graphic" or "browser". None leaves Final Cut's default. Roles come back
+    as "main.Sub"; ROLE_STYLE decides where an asset-clip writes the subrole.
     """
     m = clip.media
     if use == "graphic" or clip.role == "graphic":
@@ -175,15 +199,21 @@ def _clip_element(
     if m.kind == "video":
         attrs["tcFormat"] = "DF" if m.timecode and ";" in m.timecode else "NDF"
     video_role, audio_role = _roles(clip, use, note)
+    channel_role = None
     if tag == "video":
         if video_role:
-            attrs["role"] = video_role  # <video> has one role attribute
+            attrs["role"] = video_role  # <video> has one role attribute, subrole and all
     else:
         if audio_role and m.has_audio:
-            attrs["audioRole"] = audio_role
+            attrs["audioRole"] = _main_role(audio_role) if ROLE_STYLE == "channel" else audio_role
+            if attrs["audioRole"] != audio_role:
+                channel_role = audio_role
         if video_role and m.has_video:
-            attrs["videoRole"] = video_role
+            attrs["videoRole"] = _main_role(video_role) if ROLE_STYLE == "channel" else video_role
     el = ET.SubElement(parent, tag, attrs)
+    if channel_role:
+        # Written last, once the clip has everything else: the DTD puts it after anchored clips and markers.
+        res.channel_sources.append((el, {"srcCh": source_channels(m.audio_channels or 2), "role": channel_role}))
     if note and note != AUTO_FILL:
         # The DTD puts <note> first in an asset-clip, and before everything but params in a <video>.
         ET.SubElement(el, "note").text = note
@@ -497,6 +527,8 @@ def build_fcpxml(
             _browser_clip(event, clip, res, alts, cut_tl)
     for p in projects:
         event.append(p)
+    for el, attrs in res.channel_sources:
+        ET.SubElement(el, "audio-channel-source", attrs)
 
     _scrub(root)
     ET.indent(root, space="    ")

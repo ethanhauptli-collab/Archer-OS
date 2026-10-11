@@ -98,7 +98,7 @@ The CLI was first built in a Linux cloud session; the owner runs it from Termina
 4. Mixed media: iPhone HDR/VFR clips, vertical clips, a GoPro, a still, a separate audio recording. Watch the report's Warnings and Levels sections.
 5. Field-recorder WAVs: the asset `start` comes from the BWF `time_reference`. Confirm FCP agrees; if not, clips will read "outside the media".
 6. Mixed frame rates: we now write FCP's own `<conform-rate scaleEnabled="0">` (play at real speed) and the clip's `format`. Check that a 25p clip in a 23.98 cut plays at real speed with cuts on the words, and that 16:9 clips fit a vertical cut.
-8. Roles: subroles are written on the clip (`audioRole="dialogue.Narration"`); real exports put subroles on `<audio-channel-source>`. Check Timeline Index > Roles shows Narration, Music Bed, Nat Sound, Planned, Auto-fill and Graphics; if not, move the subrole to `audio-channel-source`.
+8. Roles: `fcpxml.ROLE_STYLE` picks where subroles go. `"channel"` (the default here) writes them as Final Cut does: the clip carries the main role (`audioRole="dialogue"`) and an `<audio-channel-source srcCh="1, 2" role="dialogue.Narration"/>` after its markers carries the subrole; Final Cut has no such element for video, so asset-clips keep only a main `videoRole` (Planned/Auto-fill survive on stills' `<video role>`, Graphics shows as Titles). `"clip"` writes `audioRole="dialogue.Narration"`/`videoRole="B-Roll.Planned"` on the clip. Check Timeline Index > Roles shows Narration, Music Bed and Nat Sound.
 7. If FCP rejects the XML, it names the line. Fix `fcpxml.py`, add a regression test, and re-validate against the DTD.
 
 ## Roadmap

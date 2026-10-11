@@ -16,11 +16,12 @@ from pathlib import Path
 
 import pytest
 from conftest import make_clip
-from test_end_to_end import DTD, RATE_UNDEFINED, STORY, check_invariants, effective_formats, format_problems, validate_dtd
+from test_end_to_end import DTD, RATE_UNDEFINED, STORY, audio_role, check_invariants, effective_formats, format_problems, validate_dtd, video_role
 
 from roughcut import timecode as tc
 from roughcut.analyze import Analysis
-from roughcut.fcpxml import FADE_SHAPE, STILL_ORIGIN, _roles, build_fcpxml
+from roughcut import fcpxml
+from roughcut.fcpxml import FADE_SHAPE, STILL_ORIGIN, _roles, build_fcpxml, source_channels
 from roughcut.plan import heuristic_plan, normalize
 from roughcut.timecode import parse_fcpx_time as T
 from roughcut.timeline import STYLES, build_timeline
@@ -35,7 +36,7 @@ def load(name: str) -> ET.Element:
 
 
 def test_the_fixtures_are_final_cut_exports():
-    assert len(FILES) == 8
+    assert len(FILES) == 9
     for f in FILES:
         root = ET.parse(f).getroot()
         assert root.get("version") in ("1.11", "1.13")
@@ -179,26 +180,29 @@ def test_markers_and_notes_are_written_like_final_cut():
     assert todo and standard and chapters and notes
 
 
-def test_child_order_in_a_clip_matches_final_cut():
-    """Inside a clip: note, conform-rate, adjustments (volume last), anchored items, then markers and keywords."""
-
-    def rank(tag: str) -> int:
-        if tag == "note":
-            return 0
-        if tag in ("conform-rate", "timeMap"):
-            return 1
-        if tag.startswith("adjust-"):
-            return 3 if tag in ("adjust-volume", "adjust-panner") else 2
-        if tag in STORY:
-            return 4
-        if tag in MARKS:
-            return 5
+def child_rank(tag: str) -> int:
+    """Where a child goes inside an asset-clip: note, conform-rate, adjustments (volume last),
+    anchored items, markers and keywords, audio channel sources, then filters and metadata."""
+    if tag == "note":
+        return 0
+    if tag in ("conform-rate", "timeMap"):
+        return 1
+    if tag.startswith("adjust-"):
+        return 3 if tag in ("adjust-volume", "adjust-panner") else 2
+    if tag in STORY:
+        return 4
+    if tag in MARKS:
+        return 5
+    if tag == "audio-channel-source":
         return 6
+    return 7
 
+
+def test_child_order_in_a_clip_matches_final_cut():
     checked = 0
     for f in FILES:
         for clip in ET.parse(f).getroot().iter("asset-clip"):
-            ranks = [rank(k.tag) for k in clip]
+            ranks = [child_rank(k.tag) for k in clip]
             assert ranks == sorted(ranks), f"{f.name}: {[k.tag for k in clip]}"
             checked += 1
     assert checked >= 40
@@ -260,6 +264,55 @@ def test_role_strings_have_final_cuts_shape():
                     assert value is None or ROLE.match(value), value
 
 
+def channel_source_problems(root: ET.Element) -> list[str]:
+    """Final Cut's way of writing an asset-clip's roles, which every clip in its exports follows:
+
+    - the clip's audioRole and videoRole are main roles only ("dialogue", "Sample Role");
+    - an audio subrole is on an <audio-channel-source> (one per audio component; for a
+      clip that plays all of its asset's channels as one, srcCh lists them: "1", "1, 2"),
+      as "main.sub";
+    - the clip's volume and fades stay on the clip: no <adjust-volume> in the channel source.
+    (Its place among the clip's children is checked with child_rank.)
+    """
+    channels = {a.get("id"): int(a.get("audioChannels")) for a in root.iter("asset") if a.get("hasAudio") == "1"}
+    problems = []
+    for clip in root.iter("asset-clip"):
+        name = clip.get("name")
+        for key in ("audioRole", "videoRole"):
+            if "." in (clip.get(key) or ""):
+                problems.append(f"{name}: {key}={clip.get(key)!r} carries a subrole")
+        for source in clip.findall("audio-channel-source"):
+            if source.get("srcCh") != source_channels(channels[clip.get("ref")]):
+                problems.append(f"{name}: srcCh={source.get('srcCh')!r} for a {channels[clip.get('ref')]}-channel asset")
+            if not (ROLE.match(source.get("role") or "") and "." in source.get("role")):
+                problems.append(f"{name}: channel source role {source.get('role')!r} is not main.sub")
+            if source.find("adjust-volume") is not None:
+                problems.append(f"{name}: volume on the channel source")
+    return problems
+
+
+def test_final_cut_writes_audio_subroles_on_channel_sources():
+    sources, mono, beside_volume, video_subroles = 0, 0, 0, set()
+    for f in FILES:
+        root = ET.parse(f).getroot()
+        assert channel_source_problems(root) == [], f.name
+        for clip in root.iter("asset-clip"):
+            for source in clip.findall("audio-channel-source"):
+                sources += 1
+                mono += source.get("srcCh") == "1"
+                beside_volume += clip.find("adjust-volume") is not None
+        # A video subrole is written on a <video> or <title>, which carry one role for the whole element.
+        video_subroles |= {el.tag for el in root.iter() if el.tag in ("video", "title") and "." in (el.get("role") or "")}
+    assert sources >= 15 and mono >= 1  # SyncClip.fcpxml: a mono asset is srcCh="1"
+    assert beside_volume >= 5  # a clip's own level and fades stay on the clip
+    assert video_subroles == {"video", "title"}
+    # Clip-level roles are main roles even where the channel plays another: Final Cut keeps the
+    # role a clip was given at import on the clip, and the one its audio plays as on the channel.
+    complex_ = load("Complex.fcpxml")
+    music = next(c for c in complex_.iter("asset-clip") if c.get("name", "").startswith("Interstellar") and c.get("start") is None)
+    assert music.get("audioRole") == "dialogue" and audio_role(music) == "music.music-1"
+
+
 # ------------------------------------------------------------ roughcut follows the same rules
 
 
@@ -267,6 +320,7 @@ def _narrated(tmp_path) -> Path:
     from test_narration import narration_project
 
     a = narration_project()  # narration (audio only) in the primary storyline, video and stills over it
+    a.clip("A01").media.audio_channels = 1  # a mono voice recording
     tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="narrated")
     assert any(a.clip(c.clip_id).media.kind == "video" for c in tl.connected)
     path = tmp_path / "narrated.fcpxml"
@@ -314,3 +368,117 @@ def test_roughcut_names_clip_formats_the_way_final_cut_does(tmp_path):
     assert all(c.get("format") not in (None, seq_fmt) for c in root.find(".//spine"))
     browser = root.find(".//event").findall("asset-clip")
     assert browser and all(c.get("format") for c in browser)  # browser clips always name theirs
+
+
+def _every_role(tmp_path) -> Path:
+    """A planned cut with every role roughcut writes on it: dialogue on the spine, a still
+    and a cutaway with nat sound over it, a music bed and a graphic."""
+    from roughcut.timeline import ConnectedClip
+
+    talk = make_clip("V01", seconds=30, sentences=[(1.0, 5.0, "We built the first boat in this garage."), (9.0, 13.0, "It took us three whole winters to finish.")])
+    song = make_clip("A01", kind="audio", seconds=60, role="music")
+    song.loudness, song.loudness_floor, song.peak_db, song.sound_end = -14.0, -30.0, -1.0, 55.0
+    gfx = make_clip("G01", seconds=4, role="graphic")
+    gfx.media.has_audio = False
+    a = Analysis(clips=[talk, make_clip("V02", seconds=40), make_clip("I01", kind="image"), song, gfx])
+    raw = {
+        "title": "t",
+        "sections": [
+            {
+                "name": "Open",
+                "items": ["V01.S001", "V01.S002"],
+                "broll": [{"clip": "I01", "over": ["V01.S001"], "reason": "the garage"}, {"clip": "V02", "over": ["V01.S002"], "source_in": 2, "reason": "the boat"}],
+            }
+        ],
+        "music": [{"clip": "A01", "first_section": 0, "last_section": 0, "source_in": 0}],
+    }
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t - Rough Cut")
+    tl.connected.append(ConnectedClip("G01", Fraction(0), 30, 10, lane=3, kind="graphic", note="Jane Doe, host"))
+    path = tmp_path / f"roles-{fcpxml.ROLE_STYLE}.fcpxml"
+    path.write_text(build_fcpxml([tl], a, event_name="e"))
+    return path
+
+
+def _roles_by_clip(root: ET.Element) -> dict[tuple, tuple]:
+    """(project, tag, name, lane, offset) -> (audio role it plays as, video role) for every clip roughcut wrote."""
+    out = {}
+    for parent in root.iter():
+        where = parent.get("name") if parent.tag == "project" else None
+        for el in (parent.iter() if where else []):
+            if el.tag in ("asset-clip", "video"):
+                out[(where, el.tag, el.get("name"), el.get("lane"), el.get("offset"))] = (audio_role(el), video_role(el))
+    for el in root.find("library/event"):
+        if el.tag in ("asset-clip", "clip"):
+            pic = el.find("video") if el.tag == "clip" else el
+            out[(None, el.tag, el.get("name"), None, None)] = (audio_role(el), video_role(pic))
+    return out
+
+
+@pytest.fixture(params=["channel", "clip"])
+def role_style(request, monkeypatch):
+    monkeypatch.setattr(fcpxml, "ROLE_STYLE", request.param)
+    return request.param
+
+
+def test_roughcut_writes_roles_in_either_style_and_both_validate(tmp_path, role_style):
+    for path in (_every_role(tmp_path), _narrated(tmp_path)):
+        validate_dtd(path)
+        check_invariants(path)
+        root = ET.parse(path).getroot()
+        for clip in root.iter("asset-clip"):
+            ranks = [child_rank(k.tag) for k in clip]
+            assert ranks == sorted(ranks), [k.tag for k in clip]
+        if role_style == "clip":
+            assert root.find(".//audio-channel-source") is None
+            assert any("." in (c.get("audioRole") or "") for c in root.iter("asset-clip"))
+        else:
+            assert channel_source_problems(root) == [], path.name
+
+
+def test_roughcut_puts_audio_subroles_where_final_cut_does(tmp_path, monkeypatch):
+    monkeypatch.setattr(fcpxml, "ROLE_STYLE", "channel")
+    root = ET.parse(_every_role(tmp_path)).getroot()
+    clips = {(c.get("name"), c.get("lane")): c for c in root.find(".//project").iter("asset-clip")}
+
+    talk = clips[("V01", None)]  # plain dialogue: Final Cut's default subrole, so no channel source
+    assert talk.get("audioRole") == "dialogue" and talk.find("audio-channel-source") is None
+    music = clips[("A01", "-1")]
+    assert music.get("audioRole") == "music" and audio_role(music) == "music.Music Bed"
+    cutaway = clips[("V02", "1")]
+    assert (cutaway.get("audioRole"), cutaway.get("videoRole")) == ("effects", "B-Roll")
+    assert audio_role(cutaway) == "effects.Nat Sound"
+    for clip in (music, cutaway):  # like Final Cut: the level and fades on the clip, the channel source last
+        (source,) = clip.findall("audio-channel-source")
+        assert source.attrib == {"srcCh": "1, 2", "role": audio_role(clip)} and list(clip)[-1] is source
+        assert clip.find("adjust-volume") is not None and len(source) == 0
+    assert clips[("G01", "3")].get("videoRole") == "titles"  # no element for a video subrole on an asset-clip
+    still = root.find(".//project//video")
+    assert still.get("role") == "B-Roll.Planned"  # a <video> keeps its subrole, as in Final Cut's exports
+
+    # Mono narration in the primary storyline: srcCh="1" (SyncClip.fcpxml), after its anchored shots and markers.
+    root = ET.parse(_narrated(tmp_path)).getroot()
+    spine = root.find(".//spine").findall("asset-clip")
+    assert spine and all(c.get("audioRole") == "dialogue" for c in spine)
+    for clip in spine:
+        (source,) = clip.findall("audio-channel-source")
+        assert source.attrib == {"srcCh": "1", "role": "dialogue.Narration"} and list(clip)[-1] is source
+    assert any(c.find("asset-clip") is not None or c.find("video") is not None for c in spine)
+    browser = {c.get("name"): c for c in root.find("library/event").findall("asset-clip")}
+    assert audio_role(browser["A01"]) == "dialogue.Narration" and browser["A01"].get("audioRole") == "dialogue"
+
+
+def test_both_role_styles_give_every_clip_the_same_roles(tmp_path, monkeypatch):
+    written = {}
+    for style in ("channel", "clip"):
+        monkeypatch.setattr(fcpxml, "ROLE_STYLE", style)
+        for build in (_every_role, _narrated):
+            for key, roles in _roles_by_clip(ET.parse(build(tmp_path)).getroot()).items():
+                written.setdefault(style, {})[(build.__name__, *key)] = roles
+    assert written["channel"].keys() == written["clip"].keys() and len(written["clip"]) >= 25
+    for key, (audio, video) in written["clip"].items():
+        assert written["channel"][key][0] == audio, key
+        if key[2] == "asset-clip" and video:  # the one difference: a video subrole on an asset-clip
+            assert written["channel"][key][1] == video.split(".")[0], key
+        else:
+            assert written["channel"][key][1] == video, key
+

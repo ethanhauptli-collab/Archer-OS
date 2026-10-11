@@ -105,7 +105,7 @@ When a run ends, Terminal and the app say what made it in and what was left out 
 ### In Final Cut Pro
 
 - **Markers**: chapter markers for each section; to-do markers for decisions to check (an uncovered jump cut, a music jump inside a finished promo, a line you asked to keep that didn't fit); standard markers name the alternate takes of a line.
-- **Roles**: dialogue (narration as its own subrole), B-Roll (planned shots and auto-fill separately), nat sound as effects, the music bed as music, graphics as titles. In the Timeline Index you can mute the music or hide the auto-fill in one click.
+- **Roles**: dialogue (narration as its own subrole), B-Roll, nat sound as effects, the music bed as music, graphics as titles; planned and auto-fill stills are separate B-Roll subroles. Audio subroles are written the way Final Cut writes them, on the clip's audio channels. In the Timeline Index you can mute the music or the nat sound in one click.
 - **Notes**: each planned B-roll shot carries Claude's reason for it in the inspector.
 - **Keywords**: the other reads of each line you used are marked "Alt take" in the browser, so swapping a read is select, then Shift-R. Duplicate exports are marked too.
 - **Levels**: every clip's speech is matched to the dialogue level, B-roll sound sits under it, and the music ducks under speech and comes up between lines. Volume and fades are ordinary FCP volume settings and fade handles you can drag.

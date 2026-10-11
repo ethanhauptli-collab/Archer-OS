@@ -11,7 +11,7 @@ from fractions import Fraction
 
 import pytest
 from conftest import NTSC, SPEECH, TALK_SECONDS, FakeProvider, ffmpeg, make_clip, spread_words
-from test_end_to_end import check_invariants, validate_dtd
+from test_end_to_end import audio_role, check_invariants, clip_video_role, validate_dtd, video_role
 
 from roughcut import pipeline
 from roughcut.analyze import Analysis
@@ -97,10 +97,10 @@ def test_roles_and_planner_notes_in_the_planned_cut(built):
     assert film.get("videoRole") == "B-Roll" and film.get("audioRole") is None
 
     music = next(el for el in rough.iter("asset-clip") if el.get("lane") == "-1")
-    assert music.get("audioRole") == "music.Music Bed"
+    assert audio_role(music) == "music.Music Bed"
 
     cutaway = next(el for el in rough.iter("asset-clip") if el.get("name") == "broll" and el.get("lane"))
-    assert cutaway.get("videoRole") == "B-Roll.Planned" and cutaway.get("audioRole") == "effects.Nat Sound"
+    assert video_role(cutaway) == clip_video_role("B-Roll.Planned") and audio_role(cutaway) == "effects.Nat Sound"
     assert cutaway[0].tag == "note" and cutaway[0].text == "cover the jump cut"
     photo = next(el for el in rough.iter("video") if el.get("lane"))
     assert photo.get("role") == "B-Roll.Planned" and photo.find("note").text == "photo"
@@ -126,11 +126,11 @@ def test_auto_fill_shots_are_their_own_subrole_without_a_note(tmp_path):
     root = ET.parse(path).getroot()
     rough = root.find(".//project")
     narration = list(rough.find("sequence/spine"))
-    assert narration and all(el.get("audioRole") == "dialogue.Narration" for el in narration)
+    assert narration and all(audio_role(el) == "dialogue.Narration" for el in narration)
     fills = [el for el in rough.iter() if el.tag in ("asset-clip", "video") and el.get("lane")]
     assert fills
     for el in fills:
-        assert (el.get("role") or el.get("videoRole")) == "B-Roll.Auto-fill"
+        assert video_role(el) == ("B-Roll.Auto-fill" if el.tag == "video" else clip_video_role("B-Roll.Auto-fill"))
         assert el.find("note") is None
 
 
@@ -146,7 +146,7 @@ def test_graphics_are_titles_and_their_text_is_the_note(tmp_path):
     path = _write(tmp_path, [tl], a, browser_clips=False)
     validate_dtd(path)
     el = next(e for e in ET.parse(path).getroot().iter("asset-clip") if e.get("name") == "G01")
-    assert el.get("videoRole") == "titles.Graphics" and el.get("audioRole") is None
+    assert video_role(el) == clip_video_role("titles.Graphics") and el.get("audioRole") is None
     assert el.find("note").text == "Jane Doe , host"  # illegal XML characters scrubbed
 
 
@@ -656,7 +656,7 @@ def test_music_flag_end_to_end(footage, tmp_path):
     root = ET.parse(fcpxml).getroot()
     rough = _rough(root)
     (music,) = [el for el in rough.iter("asset-clip") if el.get("lane") == "-1"]
-    assert music.get("name") == "Sunrise Theme" and music.get("audioRole") == "music.Music Bed"
+    assert music.get("name") == "Sunrise Theme" and audio_role(music) == "music.Music Bed"
     end = T(music.get("start")) + T(music.get("duration"))
     assert abs(float(end) - bed.sound_end) < 0.05  # back-timed onto the song's ending
     stringout = next(p for p in root.iter("project") if p.get("name") == "footage - Stringout v1")
@@ -754,7 +754,7 @@ def test_a_line_from_a_broll_clip_plays_as_dialogue(tmp_path):
     v02 = next(el for el in spine if el.get("name") == "V02")
     assert v02.get("audioRole") == "dialogue" and v02.get("videoRole") is None
     child = next(el for el in spine[-1] if el.get("name") == "V02")
-    assert child.get("audioRole") == "effects.Nat Sound" and child.get("videoRole") == "B-Roll.Planned"
+    assert audio_role(child) == "effects.Nat Sound" and video_role(child) == clip_video_role("B-Roll.Planned")
 
 
 def _montage(song_loudness: float = -9.5):

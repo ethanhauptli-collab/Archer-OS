@@ -59,6 +59,25 @@ def check_invariants(path: Path) -> dict:
     return report
 
 
+def audio_role(el: ET.Element) -> str | None:
+    """The role a clip's audio plays as: its channel source's role when it has one
+    (where Final Cut writes a subrole), otherwise the clip's own audioRole."""
+    source = el.find("audio-channel-source")
+    return source.get("role") if source is not None else el.get("audioRole")
+
+
+def video_role(el: ET.Element) -> str | None:
+    return el.get("role") if el.tag == "video" else el.get("videoRole")
+
+
+def clip_video_role(role: str) -> str:
+    """The videoRole roughcut writes on an asset-clip for `role` under the current
+    fcpxml.ROLE_STYLE ("channel" keeps only the main role there; a still's <video> keeps it all)."""
+    from roughcut import fcpxml
+
+    return role if fcpxml.ROLE_STYLE == "clip" else role.split(".", 1)[0]
+
+
 RATE_UNDEFINED = "FFVideoFormatRateUndefined"
 STORY = {"asset-clip", "clip", "video", "audio", "title", "gap", "sync-clip", "ref-clip", "mc-clip", "audition", "spine", "caption"}
 
