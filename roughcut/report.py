@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .analyze import ROLE_LABELS, Analysis
+from .media import frame_rate_warnings, vfr_warning_covered
 from .plan import Plan
 from .providers import UsageLog, estimate_cost
 from .timecode import seconds_to_clock
@@ -36,6 +37,32 @@ def collapse_warnings(warnings: list[str]) -> list[str]:
             shown = ", ".join(ids[:8]) + (f" and {len(ids) - 8} more" if len(ids) > 8 else "")
             out.append(f"{items[0][0]}  (x{len(items)}: {shown})")
     return out
+
+
+def levels_section(tl: Timeline, analysis: Analysis) -> list[str]:
+    """What level matching measured and the clip volume it set for each source."""
+    if tl.dialogue_level is None:
+        return []
+    L = [
+        "## Levels",
+        "",
+        f"Speech is matched to about {tl.dialogue_level:g} LUFS, B-roll and music sit under it. Volume is each clip's "
+        "Volume in Final Cut's audio inspector; change it there, or set `--dialogue-level` and run `roughcut render`.",
+        "",
+    ]
+    if tl.levels:
+        L += ["| Clip | Used as | Measured | Volume | Note |", "|---|---|---|---|---|"]
+        for r in tl.levels:
+            clip = analysis.clip(r["clip"])
+            measured = f"{r['lufs']:.1f} LUFS" + (" (speech)" if r.get("words") else "")
+            volume = f"{r['volume']:+g} dB" if r["volume"] else "as recorded"
+            L.append(f"| {clip.media.name} | {r['use']} | {measured} | {volume} | {r['why']} |")
+    leveled = {r["clip"] for r in tl.levels}
+    used = {c.clip_id for c in tl.spine} | {c.clip_id for c in tl.connected}
+    unmeasured = sorted(c.media.name for c in analysis.clips if c.id in used and c.media.has_audio and c.id not in leveled and c.role != "graphic")
+    if unmeasured:
+        L += ["", "Not measured, so left as recorded: " + ", ".join(unmeasured) + "."]
+    return L + [""]
 
 
 def build_report(
@@ -148,6 +175,8 @@ def build_report(
             L.append(f"| `{_tc(g.start, tl)}` | {g.id} | {g.spec.kind.replace('_', ' ')} | {text.replace('|', '/')} | {file} |")
         L.append("")
 
+    L += levels_section(tl, analysis)
+
     L += ["## Media", "", "| ID | File | Role | Length | Notes |", "|---|---|---|---|---|"]
     for c in analysis.clips:
         if c.role == "graphic":
@@ -160,7 +189,11 @@ def build_report(
         L.append(f"| {c.id} | {c.media.name} | {ROLE_LABELS.get(c.role, c.role)} | {length} | {desc} |")
     L.append("")
 
-    warnings = collapse_warnings(list(analysis.warnings) + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or []))
+    used = {c.clip_id for c in tl.spine} | {c.clip_id for c in tl.connected if c.kind != "graphic"}
+    used_media = [c.media for c in analysis.clips if c.id in used]
+    rates = frame_rate_warnings(tl.frame_duration, used_media)
+    probe = [w for w in analysis.warnings if not vfr_warning_covered(w, used_media)]  # said once, in the rate lines
+    warnings = collapse_warnings(probe + list(plan.warnings) + list(tl.warnings) + list(extra_warnings or []) + rates)
     if warnings:
         L += ["## Warnings", ""] + [f"- {w}" for w in warnings] + [""]
     return "\n".join(L)

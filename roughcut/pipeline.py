@@ -10,14 +10,14 @@ from datetime import date
 from pathlib import Path
 
 from . import progress
-from .analyze import Analysis, Cache, analyze, default_cache_dir, log
+from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
 from .fcpxml import build_fcpxml
-from .media import require_tools, scan
+from .media import AUDIO_EXTS, require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
 from .report import build_report
-from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
+from .timeline import DIALOGUE_LEVEL, STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
 
 
@@ -46,12 +46,15 @@ class Options:
     format: str | None = None
     broll_db: float | None = -20.0
     music_db: float = -14.0
+    dialogue_level: float | None = DIALOGUE_LEVEL  # LUFS speech is matched to; None = clip levels as recorded
+    fades: bool = True  # de-click fades at audio edits, soft fades on B-roll nat sound
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
     graphics_style: str = ""  # look and brand for them: colors, fonts, mood
     graphics_logo: str | None = None  # logo file designs may show (<img src="brand:logo">)
     graphics_look: tuple[str, ...] = ()  # approved designs (.html) new ones should match
+    music: list[Path] = field(default_factory=list)  # --music: songs to lay under the cut (not transcribed)
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -113,7 +116,10 @@ def style_for(opts: Options) -> Style:
 def run_analysis(opts: Options, out_dir: Path) -> Analysis:
     require_tools()
     progress.stage("scan", "Finding media")
-    files = scan(opts.inputs, exclude=[out_dir])
+    for song in opts.music:
+        if not song.expanduser().is_file() or song.suffix.lower() not in AUDIO_EXTS:
+            raise RoughcutError(f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})")
+    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir])
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -130,7 +136,8 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
         w, h, _ = parse_format(opts.format)
         prefer_vertical = h > w
     return analyze(
-        files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical
+        files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical,
+        music=opts.music,
     )
 
 
@@ -150,7 +157,8 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
     progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
     rough = build_timeline(
-        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill
+        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
+        dialogue_level=opts.dialogue_level, fades=opts.fades,
     )
     stringout = None
     if opts.stringout:
@@ -164,6 +172,9 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
                 format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}",
                 broll_db=opts.broll_db,
                 fill=opts.fill,
+                dialogue_level=opts.dialogue_level,
+                fades=opts.fades,
+                music_beds=False,  # the stringout is for reading the speech
             )
     return rough, stringout
 
@@ -172,7 +183,7 @@ def write_outputs(out_dir: Path, name: str, plan: Plan, raw_plan: dict | None, a
     progress.stage("write", "Writing the Final Cut file")
     out_dir.mkdir(parents=True, exist_ok=True)
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
-    xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})")
+    xml = build_fcpxml(timelines, analysis, event_name=f"{name} ({date.today().isoformat()})", alternates=plan.alternates)
     fcpxml_path = out_dir / f"{slug(name)}.fcpxml"
     fcpxml_path.write_text(xml, encoding="utf-8")
     (out_dir / "plan.json").write_text(json.dumps({"name": name, "plan": plan.to_json(), "raw": raw_plan}, indent=1))
@@ -305,6 +316,8 @@ def rerender(out_dir: Path, opts: Options) -> Result:
         raise RoughcutError(f"{out_dir} isn't a roughcut output folder (no analysis.json/plan.json)")
     start_log(out_dir, "render")
     analysis = Analysis.load(out_dir / "analysis.json")
+    if opts.dialogue_level is not None:  # folders from before level matching: measure now (cached)
+        measure_levels(analysis.clips, Cache(opts.cache_dir or default_cache_dir()), workers=opts.workers, only_missing=True)
     saved = json.loads((out_dir / "plan.json").read_text())
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")

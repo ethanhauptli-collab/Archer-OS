@@ -96,6 +96,15 @@ class Clip:
     same_words: float = 0.0  # word overlap with take_of
     silence_db: float | None = None  # level the silence map was detected at
     background_db: float | None = None  # this clip's measured background (peak dBFS)
+    # Loudness (EBU R128). The whole clip is what its nat sound or music plays
+    # at; speech is measured over the transcribed words only.
+    loudness: float | None = None  # integrated LUFS of the whole clip
+    loudness_floor: float | None = None  # background, momentary LUFS
+    peak_db: float | None = None  # sample peak dBFS of the whole clip
+    speech_loudness: float | None = None  # integrated LUFS of the words (None: no words, or under 0.5 s)
+    speech_peak: float | None = None  # sample peak dBFS inside the words
+    sound_end: float | None = None  # seconds: where the last sound fades out
+    music_bed: bool = False  # given with --music: not transcribed, always the cut's music
 
     @property
     def hidden(self) -> bool:
@@ -128,6 +137,13 @@ class Clip:
             "same_words": self.same_words,
             "silence_db": self.silence_db,
             "background_db": self.background_db,
+            "loudness": self.loudness,
+            "loudness_floor": self.loudness_floor,
+            "peak_db": self.peak_db,
+            "speech_loudness": self.speech_loudness,
+            "speech_peak": self.speech_peak,
+            "sound_end": self.sound_end,
+            "music_bed": self.music_bed,
         }
 
     @classmethod
@@ -146,6 +162,13 @@ class Clip:
             same_words=d.get("same_words", 0.0),
             silence_db=d.get("silence_db"),
             background_db=d.get("background_db"),
+            loudness=d.get("loudness"),
+            loudness_floor=d.get("loudness_floor"),
+            peak_db=d.get("peak_db"),
+            speech_loudness=d.get("speech_loudness"),
+            speech_peak=d.get("speech_peak"),
+            sound_end=d.get("sound_end"),
+            music_bed=bool(d.get("music_bed", False)),
         )
 
 
@@ -223,6 +246,58 @@ def pause_warning(clip: Clip) -> str | None:
     return f"{clip.media.name}: found almost no pauses, so little dead air could be cut.{why}"
 
 
+LOUDNESS_CACHE = "loudness-v1.json"
+
+
+def _loudness_blocks(m: MediaInfo, cache: Cache) -> dict | None:
+    """The clip's 100 ms loudness blocks, measured once per file version."""
+    cached = cache.get(m.fingerprint, LOUDNESS_CACHE)
+    if cached is None:
+        if not Path(m.path).is_file():
+            return None
+        cached = ffmpeg_ops.loudness_blocks(Path(m.path)) or {}
+        cache.put(m.fingerprint, LOUDNESS_CACHE, cached)
+    return cached or None
+
+
+def speech_spans(clip: Clip) -> list[tuple[float, float]] | None:
+    """Where a clip has words: any clip with a transcript, since a B-roll clip's
+    one spoken line can be a story item too. Talking footage without word
+    times falls back to its sentences (or sound regions); None otherwise."""
+    if clip.music_bed:
+        return None
+    spans = [(w.start, w.end) for s in clip.segments for w in s.words]
+    if spans:
+        return spans
+    if clip.role in ("aroll", "voiceover"):
+        return [(s.start, s.end) for s in clip.segments] or None
+    return None
+
+
+def measure_levels(clips: list[Clip], cache: Cache, *, workers: int = 4, only_missing: bool = False) -> None:
+    """Set each audible clip's loudness, background, peak and last sound.
+
+    Speech is measured over the words as well as the whole clip, so pauses
+    and room tone don't drag the dialogue number down.
+    """
+    todo = [
+        c
+        for c in clips
+        if c.media.has_audio and c.role != "graphic" and not (only_missing and c.loudness is not None and (c.speech_loudness is not None or not c.segments))
+    ]
+
+    def one(clip: Clip) -> None:
+        blocks = _loudness_blocks(clip.media, cache)
+        if not blocks:
+            return
+        s = ffmpeg_ops.level_summary(blocks, speech_spans(clip), clip.duration)
+        clip.loudness, clip.loudness_floor, clip.peak_db, clip.sound_end = s["lufs"], s["floor"], s["peak"], s["end"]
+        clip.speech_loudness, clip.speech_peak = s["speech"], s["speech_peak"]
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(one, todo))
+
+
 def classify(clip: Clip) -> str:
     m = clip.media
     if m.kind == "image":
@@ -298,9 +373,12 @@ def analyze(
     workers: int = 4,
     noise_db: float | None = None,
     prefer_vertical: bool = False,
+    music: list[Path] | None = None,
 ) -> Analysis:
+    """`music`: files given with --music. They aren't transcribed and become the cut's music bed."""
     t0 = time.monotonic()
     warnings: list[str] = []
+    music_paths = {str(Path(p).expanduser().resolve()) for p in music or []}
     progress.stage("probe", f"Reading {len(paths)} files")
 
     def _probe(p: Path) -> MediaInfo | None:
@@ -330,6 +408,12 @@ def analyze(
     log(f"probed {len(infos)} files in {time.monotonic() - t0:.1f}s")
 
     clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos)]
+    for clip in clips:
+        if str(Path(clip.media.path).resolve()) in music_paths:
+            if clip.media.kind == "audio":
+                clip.music_bed = True
+            else:
+                warnings.append(f"{clip.media.name}: --music takes an audio file; this one has pictures, so it's used as an ordinary clip")
 
     default_maps: dict[str, list[tuple[float, float]]] = {}
 
@@ -360,14 +444,22 @@ def analyze(
         if clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB:
             default_maps[clip.id] = _silence_at(m, ffmpeg_ops.DEFAULT_NOISE_DB)
 
+    def _sound(clip: Clip) -> None:
+        _silence(clip)
+        if clip.media.has_audio:
+            _loudness_blocks(clip.media, cache)  # measured now; summarized once roles are known
+
     t1 = time.monotonic()
     progress.stage("silence", "Finding the pauses")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(_silence, clips))
-    log(f"mapped silence in {time.monotonic() - t1:.1f}s")
+        list(pool.map(_sound, clips))
+    log(f"mapped silence and loudness in {time.monotonic() - t1:.1f}s")
 
     t2 = time.monotonic()
-    audible = [c for c in clips if c.media.has_audio]
+    for clip in clips:
+        if clip.music_bed:  # a song's lyrics aren't lines to cut
+            clip.transcript_source = "music"
+    audible = [c for c in clips if c.media.has_audio and not c.music_bed]
     failures = _TranscribeFailures()
     transcribed = 0
     for n, clip in enumerate(audible, 1):
@@ -420,7 +512,8 @@ def analyze(
         log(f"transcripts ready in {time.monotonic() - t2:.1f}s")
 
     for clip in clips:
-        clip.role = classify(clip)
+        clip.role = "music" if clip.music_bed else classify(clip)
+    measure_levels(clips, cache, workers=workers)
 
     from .duplicates import mark_duplicates
 

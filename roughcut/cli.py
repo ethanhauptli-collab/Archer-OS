@@ -20,13 +20,37 @@ def _read(path: str | None) -> str:
     return Path(path).expanduser().read_text(encoding="utf-8") if path else ""
 
 
+def _level(text: str) -> float | None:
+    """--dialogue-level: LUFS (-16, -16LUFS) or off."""
+    t = text.strip().lower().removesuffix("lufs").strip()
+    if t in ("off", "none", "no"):
+        return None
+    try:
+        value = float(t)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a loudness like -16 or 'off', got {text!r}") from None
+    if not -40.0 <= value <= -5.0:
+        raise argparse.ArgumentTypeError(f"{value:g} LUFS is outside -40 to -5; online video is usually -16 to -14")
+    return value
+
+
 def _add_render_args(p: argparse.ArgumentParser) -> None:
+    from .timeline import DIALOGUE_LEVEL
+
     g = p.add_argument_group("cut style")
     g.add_argument("--style", choices=["tight", "medium", "loose"], default="medium", help="how aggressively pauses are trimmed (default: medium)")
     g.add_argument("--keep-fillers", action="store_true", help="don't cut um/uh")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, or WxH@fps (default: from the footage)")
-    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll audio level in dB (default: -20)")
-    g.add_argument("--music-db", type=float, default=-14.0, help="music level in dB (default: -14)")
+    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
+    g.add_argument("--music-db", type=float, default=-14.0, help="music bed level in dB, relative to the dialogue (default: -14)")
+    g.add_argument(
+        "--dialogue-level", type=_level, default=DIALOGUE_LEVEL, metavar="LUFS",
+        help="match every clip's speech to this loudness in LUFS, e.g. -16 (default), -14 or -14LUFS; 'off' keeps clip levels as recorded",
+    )
+    g.add_argument(
+        "--fades", choices=["on", "off"], default="on",
+        help="short de-click fades at audio edits and soft fades on B-roll nat sound (default: on); the music bed fades in and out either way",
+    )
     g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
     g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
     p.add_argument("--name", help="project/event name (default: folder name)")
@@ -59,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
     ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
+    b.add_argument(
+        "--music", action="append", default=[], metavar="FILE",
+        help="a song to lay under the cut (from anywhere, e.g. Downloads): not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more",
+    )
     gfx = b.add_argument_group("motion graphics")
     gfx.add_argument("--graphics", action="store_true", help="have Claude design animated graphics (lower thirds, stats, kinetic captions...) from the transcript, rendered to ProRes 4444 above the footage")
     gfx.add_argument("--no-graphics", dest="graphics", action="store_false", help="no motion graphics, even if the preset has them")
@@ -380,8 +408,22 @@ def _log_end(line: str) -> None:
     log_to(None)
 
 
+def _glue_levels(argv: list[str]) -> list[str]:
+    """argparse takes `-14LUFS` after `--dialogue-level` for another option
+    (only bare numbers like -14 pass), so join it as `--dialogue-level=-14LUFS`."""
+    out: list[str] = []
+    it = iter(argv)
+    for a in it:
+        if a == "--dialogue-level":
+            value = next(it, None)
+            out.append(a if value is None else f"{a}={value}")
+        else:
+            out.append(a)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    argv = _glue_levels(list(sys.argv[1:] if argv is None else argv))
     args = build_parser().parse_args(argv)
     if args.command == "update":
         from .update import update
@@ -427,6 +469,8 @@ def main(argv: list[str] | None = None) -> int:
         format=args.format,
         broll_db=args.broll_db,
         music_db=args.music_db,
+        dialogue_level=args.dialogue_level,
+        fades=args.fades == "on",
         stringout=not args.no_stringout,
         fill=not args.no_fill,
     )
@@ -466,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                 graphics_style=args.graphics_style,
                 graphics_logo=args.graphics_logo,
                 graphics_look=tuple(args.graphics_look or ()),
+                music=[Path(p).expanduser() for p in args.music],
                 **common,
             )
             result = build(opts)
