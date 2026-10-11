@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python -m pip install -e '.[dev,graphics]'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest -q
+
+  mac-app:
+    name: Mac app (build, test, package)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version && xcodebuild -version
+      - name: swift build
+        working-directory: mac
+        run: swift build
+      - name: swift test
+        working-directory: mac
+        run: swift test
+      - name: Package Roughcut.app
+        run: mac/scripts/build-app.sh
+      - name: Launch smoke test
+        run: .github/scripts/app-launch-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Roughcut.app
+          path: mac/build/Roughcut.app
+          if-no-files-found: ignore
+
+  mac-engine:
+    name: Engine on Apple Silicon (mlx-whisper, real speech)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: brew install ffmpeg
+      - run: python -m pip install -e '.[mac,dev,graphics]'
+      - run: python -m playwright install chromium
+      - run: python -m pytest -q
+      - name: Build a rough cut from spoken footage
+        run: .github/scripts/mac-engine-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-smoke-output
+          path: smoke/*_roughcut
+          if-no-files-found: ignore
