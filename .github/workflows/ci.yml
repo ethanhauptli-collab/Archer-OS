@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -29,7 +29,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift --version && xcodebuild -version
       - name: swift build
         working-directory: mac
@@ -41,7 +41,7 @@ jobs:
         run: mac/scripts/build-app.sh
       - name: Launch smoke test
         run: .github/scripts/app-launch-smoke.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: Roughcut.app
@@ -53,8 +53,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: brew install ffmpeg
@@ -63,7 +63,7 @@ jobs:
       - run: python -m pytest -q
       - name: Build a rough cut from spoken footage
         run: .github/scripts/mac-engine-smoke.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: engine-smoke-output
