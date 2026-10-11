@@ -3,7 +3,8 @@
 Graphics render offline, so a design that names a font the Mac doesn't have
 silently falls back to a system face. roughcut ships the Venture OC fonts
 (Jost, Inter, Fraunces; SIL Open Font License) and reads any .ttf/.otf/.woff2
-you drop into the fonts folder (`roughcut fonts` prints where it is). Every
+you drop into the fonts folder (~/Library/Application Support/roughcut/fonts on
+a Mac; $ROUGHCUT_FONTS overrides it). Every
 family a design names is embedded into the page as @font-face data, so the
 render never depends on what's installed.
 """
