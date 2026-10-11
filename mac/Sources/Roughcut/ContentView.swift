@@ -1,3 +1,4 @@
+import AppKit
 import RoughcutKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -70,6 +71,21 @@ struct BuildForm: View {
                         } icon: {
                             Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(Color.red)
                         }
+                        if model.failureKind == "usage_limit" {
+                            Text("Nothing is lost: transcripts and clip notes are saved. Build again after your plan resets and it picks up from there.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        if model.resumeFolder != nil {
+                            HStack {
+                                Text("The edit plan was saved before it stopped.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Finish without AI") { model.finishWithoutAI() }
+                                    .help("Cuts from the saved plan with no model call (roughcut render)")
+                            }
+                        }
                     }
                 } else if model.phase == .cancelled {
                     Section {
@@ -90,6 +106,18 @@ struct BuildForm: View {
                 }
 
                 Section("Brief") {
+                    if !model.presets.isEmpty {
+                        Picker("Preset", selection: Binding(
+                            get: { model.options.presetName },
+                            set: { model.applyPreset(named: $0) }
+                        )) {
+                            Text("None").tag("")
+                            ForEach(model.presets) { preset in
+                                Text(preset.title).tag(preset.name)
+                            }
+                        }
+                        .help("Fills the brief, length, pacing, format and graphics look from a saved preset. Change anything after.")
+                    }
                     TextEditor(text: $model.options.brief)
                         .font(.body)
                         .frame(minHeight: 96)
@@ -151,6 +179,16 @@ struct BuildForm: View {
                     }
                 }
 
+                Section("Audio") {
+                    Picker("Dialogue level", selection: $model.options.dialogueLevel) {
+                        ForEach(DialogueLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    Toggle("Short fades at audio edits (no clicks)", isOn: $model.options.fades)
+                    MusicPicker()
+                }
+
                 Section("Output") {
                     Picker("Format", selection: $model.options.format) {
                         ForEach(SequenceFormat.allCases) { format in
@@ -160,7 +198,18 @@ struct BuildForm: View {
                     Toggle("Motion graphics (Claude designs lower thirds, stats and captions from the transcript)", isOn: $model.options.graphics)
                         .disabled(model.options.provider == .none)
                     if model.options.graphics && model.options.provider != .none {
-                        TextField("Graphics style", text: $model.options.graphicsStyle, prompt: Text("Brand colors, fonts, mood, e.g. orange #FF6A13, bold sans, minimal"))
+                        TextField("Graphics style", text: $model.options.graphicsStyle, prompt: Text("Brand colors, fonts and mood, or pick a preset above"), axis: .vertical)
+                            .lineLimit(1...4)
+                        LogoPicker()
+                        if !model.options.graphicsLook.isEmpty {
+                            HStack {
+                                Text("Matching \(model.options.graphicsLook.count) approved graphic\(model.options.graphicsLook.count == 1 ? "" : "s") from an earlier video")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Don't match") { model.options.graphicsLook = [] }
+                            }
+                        }
                     }
                     TextField("Project name", text: $model.options.projectName, prompt: Text("Defaults to the folder name"))
                     Toggle("Also build a Stringout (all dialogue, dead air removed)", isOn: $model.options.stringout)
@@ -315,6 +364,84 @@ struct RecentRunRow: View {
         .contextMenu {
             Button("Show in Finder") { model.revealInFinder(run.result) }
             Button("Remove from Recent") { model.forgetRecent(run) }
+        }
+    }
+}
+
+/// Songs to lay under the cut (`--music`).
+struct MusicPicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Music bed")
+                Spacer()
+                Button(model.options.music.isEmpty ? "Choose a song…" : "Add another…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = false
+                    panel.allowsMultipleSelection = true
+                    panel.allowedContentTypes = [.audio]
+                    panel.message = "A song to lay under the cut. It ducks under speech and is timed to end with the cut."
+                    if panel.runModal() == .OK {
+                        for url in panel.urls where !model.options.music.contains(url) {
+                            model.options.music.append(url)
+                        }
+                    }
+                }
+            }
+            ForEach(model.options.music, id: \.self) { url in
+                HStack(spacing: 8) {
+                    Image(systemName: "music.note").foregroundStyle(.secondary)
+                    Text(url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button {
+                        model.options.music.removeAll { $0 == url }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Remove")
+                }
+            }
+            if model.options.music.isEmpty {
+                Text("Optional. Without one, the AI uses music from your footage folder if there is any.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// A logo graphics may show (`--graphics-logo`).
+struct LogoPicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack {
+            Text("Logo")
+            Spacer()
+            if model.options.graphicsLogo.isEmpty {
+                Text("None").foregroundStyle(.secondary)
+            } else {
+                Text(URL(fileURLWithPath: model.options.graphicsLogo).lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Clear") { model.options.graphicsLogo = "" }
+            }
+            Button("Choose…") {
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = true
+                panel.canChooseDirectories = false
+                panel.allowsMultipleSelection = false
+                panel.allowedContentTypes = [.png, .jpeg, .svg, .webP]
+                panel.message = "A logo for title cards and lower thirds (PNG with transparency works best)"
+                if panel.runModal() == .OK, let url = panel.url {
+                    model.options.graphicsLogo = url.path
+                }
+            }
         }
     }
 }

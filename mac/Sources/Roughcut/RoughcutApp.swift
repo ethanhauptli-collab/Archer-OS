@@ -32,6 +32,14 @@ struct RoughcutApp: App {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 620, minHeight: 680)
+                .alert("Roughcut update", isPresented: Binding(
+                    get: { model.updateOutput != nil },
+                    set: { if !$0 { model.updateOutput = nil } }
+                )) {
+                    Button("OK") { model.updateOutput = nil }
+                } message: {
+                    Text(model.updateOutput ?? "")
+                }
                 .onAppear { appDelegate.model = model }
                 .task { await model.refreshDoctor() }
         }
@@ -41,6 +49,10 @@ struct RoughcutApp: App {
                 Button("New Build") { model.startOver() }
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(model.isRunning)
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Update Roughcut…") { model.updateRoughcut() }
+                    .disabled(model.isRunning || model.updating)
             }
         }
 

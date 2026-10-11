@@ -44,6 +44,10 @@ public struct ProgressEvent: Decodable, Equatable, Sendable {
     public var current: Int?
     public var total: Int?
     public var result: RunResult?
+    /// On an `error` after the plan was saved: the command that finishes the cut without AI.
+    public var resume: String?
+    /// On an `error`: "usage_limit" when a Claude plan or API credit ran out.
+    public var kind: String?
 
     /// Nil for stages this version of the app doesn't know about.
     public var stageValue: Stage? { stage.flatMap(Stage.init(rawValue:)) }
@@ -63,10 +67,73 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var plannedBy: String
     public var fellBack: Bool
     public var warnings: [String]
+    // Added later; nil from older CLIs.
+    public var version: Int?
+    /// The Final Cut project and event this cut imports as.
+    public var project: String?
+    public var event: String?
+    public var graphics: GraphicsSummary?
+    public var visualLog: VisualLogSummary?
+    public var skipped: SkippedSummary?
+    public var usage: UsageSummary?
+    /// The paper edit as a web page.
+    public var reportHtml: String?
 
     public var outDirURL: URL { URL(fileURLWithPath: outDir, isDirectory: true) }
     public var fcpxmlURL: URL { URL(fileURLWithPath: fcpxml) }
     public var reportURL: URL { URL(fileURLWithPath: report) }
+
+    /// The paper edit to open: the web page when there is one.
+    public var paperEditURL: URL {
+        if let reportHtml, FileManager.default.fileExists(atPath: reportHtml) {
+            return URL(fileURLWithPath: reportHtml)
+        }
+        return reportURL
+    }
+}
+
+public struct GraphicsSummary: Codable, Equatable, Sendable {
+    public var planned: Int
+    public var placed: Int
+    public var rendered: Int
+    public var note: String?
+}
+
+public struct VisualLogSummary: Codable, Equatable, Sendable {
+    public var described: Int
+    public var total: Int
+}
+
+public struct SkippedSummary: Codable, Equatable, Sendable {
+    public var files: [String]
+    public var planRefs: Int
+}
+
+/// What the AI steps cost (`providers.cost_breakdown`).
+public struct UsageSummary: Codable, Equatable, Sendable {
+    public var calls: Int
+    public var dollars: Double
+    public var byPurpose: [String: Double]?
+    public var subscriptionCalls: Int?
+    public var unpricedCalls: Int?
+
+    /// "about $0.84 (visual log $0.20, edit plan $0.64)", or the plan's name when nothing was billed.
+    public var summaryText: String {
+        let subscription = subscriptionCalls ?? 0
+        if dollars <= 0 && subscription > 0 {
+            return "\(subscription) request\(subscription == 1 ? "" : "s") on your Claude plan (no API charge)"
+        }
+        var text = String(format: "about $%.2f", dollars)
+        let parts = (byPurpose ?? [:]).filter { $0.value >= 0.005 }.sorted { $0.value > $1.value }
+            .map { String(format: "%@ $%.2f", $0.key, $0.value) }
+        if !parts.isEmpty {
+            text += " (" + parts.joined(separator: ", ") + ")"
+        }
+        if let unpriced = unpricedCalls, unpriced > 0 {
+            text += ", plus \(unpriced) request\(unpriced == 1 ? "" : "s") without a known price"
+        }
+        return text
+    }
 }
 
 /// `roughcut doctor --json`.

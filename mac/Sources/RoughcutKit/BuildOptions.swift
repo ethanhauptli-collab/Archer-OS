@@ -102,6 +102,23 @@ public struct ClaudeModelChoice: Identifiable, Hashable, Sendable {
     ]
 }
 
+/// How loud speech plays after level matching (`--dialogue-level`).
+public enum DialogueLevel: String, CaseIterable, Codable, Identifiable, Sendable {
+    case standard = "-16"
+    case louder = "-14"
+    case off
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .standard: return "Matched at -16 LUFS (YouTube, most web)"
+        case .louder: return "Matched at -14 LUFS (louder, for phones)"
+        case .off: return "Off: keep each clip's own level"
+        }
+    }
+}
+
 /// Reasoning effort for Claude (`--effort`).
 public enum Effort: String, CaseIterable, Codable, Identifiable, Sendable {
     case low, medium, high, xhigh, max
@@ -134,12 +151,24 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var graphicsStyle: String = ""
     /// The app opens the new project in Final Cut Pro as soon as a run finishes.
     public var openInFinalCutWhenDone: Bool = false
+    /// The preset the form was last filled from (shown in the picker; never sent: the form holds its values).
+    public var presetName: String = ""
+    /// Songs laid under the cut (`--music`), not transcribed.
+    public var music: [URL] = []
+    public var dialogueLevel: DialogueLevel = .standard
+    /// De-click fades at audio edits and soft fades on B-roll nat sound (`--fades`).
+    public var fades: Bool = true
+    /// A logo file graphics may show (`--graphics-logo`).
+    public var graphicsLogo: String = ""
+    /// Approved graphics (.html) new designs match (`--graphics-look`).
+    public var graphicsLook: [String] = []
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case sources, outputFolder, projectName, brief, targetLength, style, format, provider, model, visionModel
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
+        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook
     }
 
     /// Saved preferences from an older version of the app are missing newer
@@ -170,6 +199,12 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         graphics = value(.graphics, d.graphics)
         graphicsStyle = value(.graphicsStyle, d.graphicsStyle)
         openInFinalCutWhenDone = value(.openInFinalCutWhenDone, d.openInFinalCutWhenDone)
+        presetName = value(.presetName, d.presetName)
+        music = value(.music, d.music)
+        dialogueLevel = value(.dialogueLevel, d.dialogueLevel)
+        fades = value(.fades, d.fades)
+        graphicsLogo = value(.graphicsLogo, d.graphicsLogo)
+        graphicsLook = value(.graphicsLook, d.graphicsLook)
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -190,6 +225,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         }
         if graphics && provider == .none {
             list.append("Motion graphics are designed by the AI: choose a provider other than None.")
+        }
+        if let missing = music.first(where: { !FileManager.default.fileExists(atPath: $0.path) }) {
+            list.append("The music file \(missing.lastPathComponent) isn't there any more: remove it or pick it again.")
         }
         return list
     }
@@ -244,11 +282,22 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if !language.trimmed.isEmpty {
             args.append("--language=\(language.trimmed)")
         }
+        args += music.map { "--music=\($0.path)" }
+        if dialogueLevel != .standard {
+            args.append("--dialogue-level=\(dialogueLevel.rawValue)")
+        }
+        if !fades {
+            args += ["--fades", "off"]
+        }
         if graphics && provider != .none {
             args.append("--graphics")
             if !graphicsStyle.trimmed.isEmpty {
                 args.append("--graphics-style=\(graphicsStyle.trimmed)")
             }
+            if !graphicsLogo.trimmed.isEmpty {
+                args.append("--graphics-logo=\(graphicsLogo.trimmed)")
+            }
+            args += graphicsLook.map { "--graphics-look=\($0)" }
         }
         return args
     }
@@ -261,6 +310,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         copy.projectName = ""
         copy.brief = ""
         copy.targetLength = ""
+        copy.music = []
         return copy
     }
 }
