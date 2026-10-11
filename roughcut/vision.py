@@ -10,7 +10,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .analyze import Analysis, Cache, Clip, log
 from .prompts import VISION_SCHEMA, VISION_SYSTEM
-from .providers import ImagePart, Provider, ProviderAuthError, ProviderError, TextPart
+from .providers import ImagePart, Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart
 
 
 def sample_times(clip: Clip) -> list[float]:
@@ -83,7 +83,7 @@ def describe_clips(
             result = provider.complete_json(
                 VISION_SYSTEM, parts, VISION_SCHEMA, schema_name="clip_log", purpose="visual log", effort=effort, max_tokens=16000
             )
-        except ProviderAuthError:
+        except (ProviderAuthError, ProviderLimitError):  # every later batch would fail the same way
             stop.set()
             raise
         except ProviderError as e:

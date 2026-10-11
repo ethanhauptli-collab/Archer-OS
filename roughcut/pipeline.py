@@ -16,7 +16,7 @@ from .fcpxml import build_fcpxml
 from .media import require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
-from .providers import Provider, ProviderAuthError, ProviderError, TextPart, cost_breakdown, make_provider
+from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
@@ -134,6 +134,18 @@ def run_summary(
         "skipped": {"files": list(skipped_files or []), "plan_refs": len(plan.warnings)},
         "usage": cost_breakdown(usage) if usage and any(u.calls for u in usage) else None,
     }
+
+
+def limit_stop(e: ProviderLimitError, analysis: Analysis) -> ProviderLimitError:
+    """The plan or credit ran out: say that nothing is lost and how to carry on."""
+    cov = visual_coverage(analysis)
+    done = "transcripts"
+    if any(c.visual for c in analysis.clips):
+        done += f" and the visual descriptions of {cov['described']} of {cov['total']} clips"
+    return ProviderLimitError(
+        f"{e} Nothing is lost: the {done} are cached, and no new cut was written (an earlier one in this folder is untouched). "
+        "Run the same command again after the reset; it picks up from the cache instead of starting over."
+    )
 
 
 def visual_coverage(analysis: Analysis) -> dict:
@@ -443,7 +455,10 @@ def build(opts: Options) -> Result:
                 usage.append(vision_provider.usage)
             t = time.monotonic()
             cache = Cache(opts.cache_dir or default_cache_dir())
-            extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
+            try:
+                extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
+            except ProviderLimitError as e:
+                raise limit_stop(e, analysis) from e
             timings["visual log"] = time.monotonic() - t
             visual_log = visual_coverage(analysis)
 
@@ -464,6 +479,8 @@ def build(opts: Options) -> Result:
             plan, raw_plan = plan_with_model(provider, analysis, opts)
         except ProviderAuthError:
             raise
+        except ProviderLimitError as e:  # not a stringout that looks like a finished cut
+            raise limit_stop(e, analysis) from e
         except ProviderError as e:
             log(f"AI planning failed: {e}")
             extra_warnings.append(f"AI planning failed, so this cut is the stringout only: {e}")
@@ -759,7 +776,10 @@ def revise(
     except ProviderAuthError:
         raise
     except ProviderError as e:
-        raise ProviderError(f"{e} Nothing changed: " + (f"v{prev_n} is still the latest cut." if prev_n else "the previous cut is still there.")) from e
+        still = f"v{prev_n} is still the latest cut." if prev_n else "the previous cut is still there."
+        if isinstance(e, ProviderLimitError):
+            raise ProviderLimitError(f"{e} Nothing changed: {still} Run the same revise again after the reset.") from e
+        raise ProviderError(f"{e} Nothing changed: {still}") from e
     timings = {"revision": time.monotonic() - t}
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=avoid_ids, previous=previous)

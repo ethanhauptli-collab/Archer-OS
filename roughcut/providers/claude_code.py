@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .anthropic_provider import resolve_model
-from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog, extract_json
+from .base import ImagePart, Part, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, Usage, UsageLog, extract_json
 
 SIGN_IN_HELP = (
     "Sign Claude Code in with your subscription: run `claude` in Terminal and type /login "
@@ -44,6 +46,23 @@ def find_claude() -> str | None:
         if candidate and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
+
+
+def plan_limit_reached(lowered: str) -> bool:
+    """Claude Code's wording when the plan is used up ("Claude AI usage limit reached|1760000000",
+    "5-hour limit reached ∙ resets 3pm", "You've hit your limit · resets 5pm"). Not any message
+    with "limit" in it: a prompt over the context limit is a different, non-fatal problem."""
+    return any(k in lowered for k in ("usage limit", "limit reached", "hit your limit")) or ("limit" in lowered and "resets" in lowered)
+
+
+def _reset_time(message: str) -> str:
+    """' (resets 17:00)' from the epoch Claude Code appends, or its own 'resets 5pm' wording."""
+    m = re.search(r"\|(\d{10})\b", message)
+    if m:
+        when = datetime.fromtimestamp(int(m.group(1)))
+        return f" (it resets {when:%H:%M}" + ("" if when.date() == datetime.now().date() else f" on {when:%b %d}") + ")"
+    m = re.search(r"resets?\s+(?:at\s+)?([^.\n|·∙]{1,40})", message, re.IGNORECASE)
+    return f" (it resets {m.group(1).strip()})" if m else ""
 
 
 def subscription_env() -> dict[str, str]:
@@ -147,8 +166,8 @@ class ClaudeCodeProvider:
             lowered = message.lower()
             if any(k in lowered for k in ("/login", "not logged in", "log in", "authentication", "oauth token", "invalid api key")):
                 raise ProviderAuthError(f"Claude Code couldn't use your account: {message} {SIGN_IN_HELP}")
-            if "limit" in lowered:
-                raise ProviderError(f"Your Claude plan's usage limit was reached during the {purpose} request: {message}")
+            if plan_limit_reached(lowered):
+                raise ProviderLimitError(f"Your Claude plan's usage limit was reached during the {purpose} request{_reset_time(message)}.")
             raise ProviderError(f"Claude Code failed on the {purpose} request: {message}")
 
         u = data.get("usage") or {}

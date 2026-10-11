@@ -642,3 +642,124 @@ def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monk
     done = _events(capsys.readouterr().out)[-1]["result"]
     assert done["fell_back"] and done["graphics"]["note"] == "none: AI planning failed"
     assert "Motion graphics were on, but AI planning failed" in (out / "edit_report.md").read_text()
+
+
+# ---------------------------------------------------------------- T20: a used-up plan or credit stops cleanly
+
+
+FAKE_CLAUDE_REPLIES = r'''#!{python}
+import json, os, sys
+mode = os.environ["FAKE_CLAUDE_MODE"]
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai"}}))
+    sys.exit(0)
+schema = json.loads(sys.argv[sys.argv.index("--json-schema") + 1])
+step = "vision" if "clips" in schema.get("properties", {{}}) else "plan"
+with open(os.environ["FAKE_CLAUDE_LOG"], "a") as log:
+    log.write(step + "\n")
+sys.stdin.read()
+if mode == step + "_limit":
+    print(json.dumps({{"type": "result", "is_error": True, "result": "Claude AI usage limit reached|1760000000"}}))
+    sys.exit(1)
+if mode == step + "_context":
+    print(json.dumps({{"type": "result", "is_error": True, "result": "Prompt is too long: context limit exceeded"}}))
+    sys.exit(1)
+if step == "vision":
+    out = {{"clips": [{{"id": i, "description": "bars", "tags": ["test"], "shot": "wide", "quality": "good"}} for i in ("V01", "V02", "V03", "I01")]}}
+else:
+    out = json.loads(os.environ["FAKE_CLAUDE_PLAN"])
+print(json.dumps({{"type": "result", "is_error": False, "result": "", "structured_output": out, "usage": {{"input_tokens": 10, "output_tokens": 5}}}}))
+'''
+
+
+@pytest.fixture
+def claude_replies(tmp_path, monkeypatch):
+    import os
+    import stat
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exe = bin_dir / "claude"
+    exe.write_text(FAKE_CLAUDE_REPLIES.format(python=sys.executable))
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    log = tmp_path / "claude-calls.log"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setenv("FAKE_CLAUDE_PLAN", json.dumps(CANNED_PLAN))
+
+    def run(mode: str, out: Path, *extra: str) -> tuple[int, list[str], list[dict]]:
+        import contextlib
+        import io
+
+        monkeypatch.setenv("FAKE_CLAUDE_MODE", mode)
+        log.unlink(missing_ok=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = main(["build", *extra, "-o", str(out), "--provider", "claude-code", "--model", "sonnet",
+                         "--transcriber", "none", "--cache-dir", str(tmp_path / "cache"), "--workers", "1", "--progress-json"])
+        progress.enable(False)
+        calls = log.read_text().split() if log.exists() else []
+        return code, calls, _events(buf.getvalue())
+
+    return run
+
+
+def test_a_used_up_plan_during_the_visual_log_stops_with_nothing_lost(footage, tmp_path, claude_replies):
+    out = tmp_path / "out"
+    code, calls, events = claude_replies("vision_limit", out, "--name", "x", str(footage))
+    assert code == 1 and calls == ["vision"]  # stopped at the first batch: no planning, no stringout
+    error = events[-1]
+    assert error["event"] == "error" and error["kind"] == "usage_limit"
+    assert "usage limit was reached during the visual log request (it resets" in error["message"]
+    assert "Nothing is lost" in error["message"] and "Run the same command again after the reset" in error["message"]
+    assert not list(out.glob("*.fcpxml")) and not (out / "plan.json").exists()
+    assert "STOPPED: Your Claude plan's usage limit" in (out / "roughcut.log").read_text()
+
+
+def test_a_used_up_plan_while_planning_never_delivers_a_stringout(footage, tmp_path, claude_replies):
+    out = tmp_path / "out"
+    assert claude_replies("none", out, "--name", "x", str(footage))[0] == 0  # a finished v1
+    before = (out / "plan.json").read_text()
+    code, calls, events = claude_replies("plan_limit", out, "--name", "x", str(footage))
+    assert code == 1 and calls == ["plan"]  # the visual log came from the cache
+    assert "visual descriptions of 4 of 4 clips are cached" in events[-1]["message"]
+    assert _top_fcpxml(out) == ["x v1.fcpxml"] and (out / "plan.json").read_text() == before  # v1 untouched
+
+
+def test_a_context_limit_is_not_a_plan_limit(footage, tmp_path, claude_replies):
+    out = tmp_path / "out"
+    code, calls, events = claude_replies("plan_context", out, "--name", "x", str(footage))
+    assert code == 3 and events[-1]["result"]["fell_back"]  # announced stringout, as before
+
+
+def test_an_empty_api_balance_is_a_limit_not_a_failure():
+    import httpx2
+
+    from test_providers import SCHEMA, _anthropic_provider
+
+    from roughcut.providers import ProviderLimitError, TextPart
+
+    def handler(request):
+        body = {"type": "error", "error": {"type": "invalid_request_error",
+                "message": "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}
+        return httpx2.Response(400, json=body)
+
+    provider, _ = _anthropic_provider(handler)
+    with pytest.raises(ProviderLimitError, match="credit balance is too low.*Plans & Billing"):
+        provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="edit_plan", purpose="edit plan")
+
+
+def test_a_used_up_plan_during_revise_changes_nothing(footage, tmp_path, monkeypatch, fake):
+    from roughcut.providers import ProviderLimitError
+
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+
+    def used_up(*a, **k):
+        raise ProviderLimitError("Your Claude plan's usage limit was reached during the revision request (it resets 17:00).")
+
+    monkeypatch.setattr(fake, "complete_json", used_up)
+    with pytest.raises(ProviderLimitError, match="Nothing changed: v1 is still the latest cut. Run the same revise again after the reset."):
+        pipeline.revise(out, "Tighter.", Options(inputs=[]))
+    assert _top_fcpxml(out) == ["footage v1.fcpxml"]

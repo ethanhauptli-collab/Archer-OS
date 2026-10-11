@@ -16,6 +16,15 @@ class ProviderAuthError(ProviderError):
     """Credentials were rejected. Retrying or falling back won't help: stop the run."""
 
 
+class ProviderLimitError(ProviderError):
+    """The Claude plan's usage limit or the API credit ran out.
+
+    Like a rejected key, every further request fails the same way, so the run
+    stops instead of delivering a stringout that looks like a finished cut.
+    Everything done so far is cached; the same command picks up after the reset.
+    """
+
+
 @dataclass
 class TextPart:
     text: str

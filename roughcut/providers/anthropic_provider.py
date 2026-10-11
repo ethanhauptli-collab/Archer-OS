@@ -8,7 +8,7 @@ import os
 import re
 import time
 
-from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog
+from .base import ImagePart, Part, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
@@ -107,6 +107,12 @@ def key_problem_hint(env: dict | None = None) -> str:
         f"Anthropic rejected the key {_mask(shown)}. It may be mistyped, revoked, or in a workspace without "
         f"API credit. Check it at console.anthropic.com → API Keys. {where}"
     )
+
+
+def out_of_credit(said: str) -> bool:
+    """The API's 400 for an empty prepaid balance or a reached workspace spend limit."""
+    s = said.lower()
+    return "credit balance" in s or ("usage limit" in s and "regain access" in s) or "spend limit" in s
 
 
 def refused_message(said: str, model: str) -> str:
@@ -229,6 +235,12 @@ class AnthropicProvider:
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise auth_error(e, self.model) from e
         except anthropic.BadRequestError as e:
+            said = _api_said(e)
+            if out_of_credit(said):
+                raise ProviderLimitError(
+                    f"Anthropic stopped the {purpose} request: {said} Add credit (or raise the workspace's spend limit) at "
+                    "console.anthropic.com → Plans & Billing."
+                ) from e
             if self.use_fallbacks and "fallback" in str(e).lower():
                 self.use_fallbacks = False
                 return self.complete_json(

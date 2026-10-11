@@ -318,6 +318,13 @@ def _print_doctor(r: dict) -> int:
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
 
 
+def _error_kind(e: BaseException) -> dict:
+    """For the app: a used-up plan or credit means "come back later", not "fix something"."""
+    from .providers import ProviderLimitError
+
+    return {"kind": "usage_limit"} if isinstance(e, ProviderLimitError) else {}
+
+
 def resume_command(e: BaseException) -> str | None:
     """`roughcut render '<out_dir>'` when the run stopped after its plan was saved."""
     out_dir = getattr(e, "plan_saved", None)
@@ -449,7 +456,7 @@ def _run(args, json_mode: bool) -> int:
         print(f"roughcut: {e}", file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
-        progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}))
+        progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}), **_error_kind(e))
         _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
         return 1
     except KeyboardInterrupt as e:
