@@ -87,7 +87,7 @@ def resolve(pieces: list[str], argv: list[str], *, notify=print) -> list[str]:
     guess = _guess(pieces)
     missing = [p for p in guess if not _exists(p)]
     message = "can't find " + ", ".join(shlex.quote(p) for p in missing) + " (no such file or folder)."
-    if any(" " in p for p in missing):
+    if any(p not in pieces for p in missing):  # joined from pieces the shell split: show the quotes
         message += (
             "\nA path with spaces needs quotes (or drag the folder into Terminal), like this:\n  "
             + _command(argv, pieces, guess)

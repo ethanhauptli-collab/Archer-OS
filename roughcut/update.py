@@ -4,6 +4,7 @@ roughcut is installed editable (`pip install -e`) from a git clone, so new
 code takes effect as soon as it's pulled. pip runs again only when
 pyproject.toml changed (new dependencies or commands), using the same
 Python that runs roughcut, so no activated venv or `pip` on PATH is needed.
+Then `roughcut doctor` runs in a fresh process, on the new code.
 """
 
 from __future__ import annotations
@@ -106,5 +107,11 @@ def update(repo: Path | None = None, *, runner=subprocess.run, out=print) -> int
     if len(commits) > 20:
         out(f"  ... and {len(commits) - 20} more")
     if any(p.startswith("mac/") for p in changed) and APP.exists():
+        # Not rebuilt here: an ad-hoc signed rebuild makes macOS ask for Keychain and folder access again.
         out("The Mac app changed too. Rebuild it with:\n  " + shlex.quote(str(repo / "mac" / "scripts" / "build-app.sh")) + " --install")
+    out("\nChecking the setup with the new code (roughcut doctor):")
+    # A fresh process, so the checks run the code just pulled; run from the clone so
+    # `-m roughcut` can't pick up some other folder named roughcut.
+    if runner([sys.executable, "-m", "roughcut", "doctor"], cwd=str(repo)).returncode != 0:
+        out("The update itself worked; fix what doctor flagged above before the next run.")
     return 0

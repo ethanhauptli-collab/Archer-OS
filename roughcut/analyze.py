@@ -258,12 +258,14 @@ class _TranscribeFailures:
     """A corrupt or half-copied clip is cut on its pauses; a broken transcriber stops the run.
 
     The transcriber looks broken when the first two clips it tries both fail, or when
-    three fail in a row.
+    three fail in a row. A run where no clip ends up with a transcript stops too (`finish`):
+    with one clip to transcribe, a failed model download looks just like a bad file.
     """
 
     def __init__(self) -> None:
         self.ok = 0
         self.streak: list[str] = []
+        self.error: BaseException | None = None
 
     def succeeded(self) -> None:
         self.ok += 1
@@ -271,11 +273,20 @@ class _TranscribeFailures:
 
     def failed(self, what: str, error: BaseException) -> None:
         self.streak.append(what)
+        self.error = error
         if (self.ok == 0 and len(self.streak) >= 2) or len(self.streak) >= 3:
             raise TranscriptionError(
                 f"Transcription failed on {len(self.streak)} clips in a row ({'; '.join(self.streak)}), so the "
                 "transcriber itself looks broken. Run `roughcut doctor`, or use --transcriber none to cut on pauses only."
             ) from error
+
+    def finish(self, transcribed: int) -> None:
+        """Stop when clips failed and none has a transcript: there'd be nothing for the plan to read."""
+        if self.streak and transcribed == 0:
+            raise TranscriptionError(
+                f"Couldn't transcribe {'; '.join(self.streak)}, and no clip has a transcript to plan from. If the file "
+                "plays, the transcriber is the problem: run `roughcut doctor`. Or use --transcriber none to cut on pauses only."
+            ) from self.error
 
 
 def analyze(
@@ -358,6 +369,7 @@ def analyze(
     t2 = time.monotonic()
     audible = [c for c in clips if c.media.has_audio]
     failures = _TranscribeFailures()
+    transcribed = 0
     for n, clip in enumerate(audible, 1):
         m = clip.media
         # current = files finished, so the bar never reads full while work remains.
@@ -392,6 +404,7 @@ def analyze(
                     cache.put(m.fingerprint, key, transcript.to_json())
                     log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
         if transcript is not None:
+            transcribed += 1
             # Only true silence proves a word was invented. A raised level (music bed, loud
             # room) can sit above a quiet real word, so it never deletes words.
             words = drop_words_in_silence(transcript.words, default_maps.get(clip.id, clip.silences))
@@ -401,6 +414,7 @@ def analyze(
             regions = ffmpeg_ops.sound_regions(clip.silences, float(m.duration))
             clip.segments = segments_from_regions(clip.id, regions)
             clip.transcript_source = "silence-map"
+    failures.finish(transcribed)
     if audible:
         progress.stage("transcribe", "Transcripts ready", current=len(audible), total=len(audible))
         log(f"transcripts ready in {time.monotonic() - t2:.1f}s")

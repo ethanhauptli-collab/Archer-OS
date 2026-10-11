@@ -99,6 +99,27 @@ def test_transcription_errors_are_never_swallowed(four_talks, tmp_path):
         _analyze(four_talks, stub, tmp_path)
 
 
+def test_one_clip_that_cant_be_transcribed_stops_the_run(four_talks, tmp_path):
+    # A one-clip project on the first run, while the Whisper model can't be downloaded:
+    # going on would plan (and bill) a cut with no words at all.
+    error = OSError("Cannot find the requested files in the disk cache and outgoing traffic has been disabled")
+    with pytest.raises(TranscriptionError) as e:
+        _analyze(four_talks[:1], StubTranscriber(fail={"a.mov"}, error=error), tmp_path)
+    message = str(e.value)
+    assert "a.mov" in message and "disk cache" in message
+    assert "roughcut doctor" in message and "--transcriber none" in message
+
+
+def test_one_bad_clip_among_transcribed_ones_still_goes_on(four_talks, tmp_path):
+    # The other clips were transcribed on an earlier run (cached), so the transcriber works.
+    _analyze(four_talks[1:], StubTranscriber(), tmp_path)
+    stub = StubTranscriber(fail={"a.mov"})
+    analysis = _analyze(four_talks, stub, tmp_path)
+    assert stub.calls == ["a.mov"]
+    assert [c.transcript_source for c in analysis.clips] == ["silence-map", "stub", "stub", "stub"]
+    assert any(w.startswith("a.mov: couldn't transcribe") for w in analysis.warnings)
+
+
 # ------------------------------------------------------------ T18: cheaper visual log
 
 
@@ -187,6 +208,16 @@ def test_readme_commands_paste_cleanly_into_zsh():
             assert ".[" not in line.replace("'.[", ""), f"unquoted pip extras: {line!r}"
 
 
+def test_readme_inline_commands_paste_cleanly_into_zsh():
+    import re
+
+    text = README.read_text(encoding="utf-8")
+    inline = [c for c in re.findall(r"`([^`\n]+)`", text) if c.startswith(("roughcut ", "pip ", "git ", "cd "))]
+    assert len(inline) >= 10
+    for command in inline:
+        assert "<" not in command and ">" not in command, f"placeholder or redirect in {command!r}"
+
+
 def test_readme_check_catches_comments():
     assert " #" in _bash_blocks("```bash\npip install -e '.[mac]'   # fast\n```\n")[0]
 
@@ -235,6 +266,17 @@ def test_missing_path_fails_with_the_quoted_command(tmp_path):
     with pytest.raises(PathInputError) as e:  # a plain typo: no advice about quotes
         resolve([str(tmp_path / "Tirp")], ["build", str(tmp_path / "Tirp")])
     assert "quotes" not in str(e.value)
+
+
+def test_a_quoted_path_with_a_typo_gets_no_quoting_advice(spaced):
+    # It arrived whole (typed in quotes, or from the Mac app): the folder is what's wrong.
+    from roughcut.paths import PathInputError, resolve
+
+    typo = str(spaced.parent / "OCVIBX")
+    with pytest.raises(PathInputError) as e:
+        resolve([typo], ["build", typo, "--progress-json"])
+    message = str(e.value)
+    assert message == f"can't find '{typo}' (no such file or folder)."
 
 
 def test_build_and_render_accept_split_paths(footage, spaced, tmp_path, capsys):
@@ -292,19 +334,27 @@ def clone(tmp_path) -> tuple[Path, Path]:
 
 
 class Runner:
-    """subprocess.run that does git for real and records pip instead of running it."""
+    """subprocess.run that does git for real and records pip and doctor instead of running them."""
 
-    def __init__(self, pip_code: int = 0):
-        self.pip: list[list[str]] = []
-        self.pip_code = pip_code
+    def __init__(self, pip_code: int = 0, doctor_code: int = 0):
+        self.ran: list[tuple[list[str], dict]] = []
+        self.pip_code, self.doctor_code = pip_code, doctor_code
+
+    @property
+    def pip(self) -> list[list[str]]:
+        return [cmd for cmd, _ in self.ran if "pip" in cmd]
+
+    @property
+    def doctor(self) -> list[tuple[list[str], dict]]:
+        return [(cmd, kw) for cmd, kw in self.ran if cmd[-1] == "doctor"]
 
     def __call__(self, cmd, **kwargs):
         import subprocess
 
         if cmd[0] == "git":
             return subprocess.run(cmd, **kwargs)
-        self.pip.append(cmd)
-        return subprocess.CompletedProcess(cmd, self.pip_code, "", "")
+        self.ran.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, self.doctor_code if cmd[-1] == "doctor" else self.pip_code, "", "")
 
 
 def test_update_pulls_and_reinstalls_only_when_dependencies_change(clone):
@@ -317,6 +367,7 @@ def test_update_pulls_and_reinstalls_only_when_dependencies_change(clone):
     runner = Runner()
     assert update.update(local, runner=runner, out=lines.append) == 0
     assert any("Already up to date: roughcut 0.1.0" in ln for ln in lines) and runner.pip == []
+    assert runner.doctor == [], "nothing new, nothing to check"
 
     _commit(upstream, {"roughcut/cut.py": "x = 1\n"}, "Cut tighter around breaths")
     lines.clear()
@@ -324,6 +375,8 @@ def test_update_pulls_and_reinstalls_only_when_dependencies_change(clone):
     assert runner.pip == [], "code-only change: an editable install needs no reinstall"
     assert any("Cut tighter around breaths" in ln for ln in lines)
     assert (local / "roughcut" / "cut.py").is_file()
+    # Then doctor checks the setup, in a fresh process on the new code, run from the clone.
+    assert runner.doctor == [([sys.executable, "-m", "roughcut", "doctor"], {"cwd": str(local)})]
 
     _commit(upstream, {"pyproject.toml": "[project]\nname='roughcut'\ndependencies=['x']\n", "roughcut/__init__.py": '__version__ = "0.2.0"\n'}, "New dependency")
     lines.clear()
@@ -332,6 +385,17 @@ def test_update_pulls_and_reinstalls_only_when_dependencies_change(clone):
     cmd = runner.pip[0]
     assert cmd[:5] == [sys.executable, "-m", "pip", "install", "-e"] and cmd[5].startswith(str(local))
     assert any("roughcut 0.1.0 → 0.2.0" in ln for ln in lines)
+
+
+def test_update_says_when_doctor_finds_a_problem(clone):
+    from roughcut import update
+
+    upstream, local = clone
+    _commit(upstream, {"roughcut/cut.py": "x = 1\n"}, "Cut tighter")
+    lines: list[str] = []
+    runner = Runner(doctor_code=1)
+    assert update.update(local, runner=runner, out=lines.append) == 0, "the update itself worked"
+    assert len(runner.doctor) == 1 and "fix what doctor flagged" in lines[-1]
 
 
 def test_update_explains_a_failed_pull(clone):
@@ -377,9 +441,10 @@ def config(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 def capture(monkeypatch):
-    from roughcut import pipeline
+    from roughcut import graphics, pipeline
 
     seen = {}
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)  # don't start a browser for each check
 
     def grab(kind):
         def fn(*args):
@@ -423,6 +488,8 @@ def test_no_invented_brand_colors_anywhere():
     help_text = build_parser()._subparsers._group_actions[0].choices["build"].format_help()
     for text in (presets.VENTURE_OC_LOOK, presets.SAVE_THE_KID_LOOK, presets.VENTURE_OC_BRIEF, help_text, README.read_text(encoding="utf-8")):
         assert not hex_code.search(text), hex_code.search(text)
+    # But the brand's color family is pinned, so two runs don't pick two different accents.
+    assert "navy" in presets.VENTURE_OC_LOOK and "orange accent" in presets.VENTURE_OC_LOOK
 
 
 def test_preset_fills_in_what_you_didnt_type(footage, config, capture):
@@ -451,6 +518,24 @@ def test_preset_graphics_are_skipped_without_a_model(footage, config, capture, c
     opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc", "--provider", "none"])
     assert opts.graphics is False and opts.style == "tight"
     assert "graphics are skipped" in capsys.readouterr().err
+
+
+def test_preset_graphics_without_a_renderer_stop_before_anything_runs(footage, config, capture, monkeypatch, capsys):
+    from roughcut import graphics
+    from roughcut.cli import main
+
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: graphics.INSTALL_HELP)
+    assert main(["build", str(footage), "--preset", "save-the-kid", "--no-menu"]) == 1
+    err = capsys.readouterr().err
+    assert "save-the-kid preset turns motion graphics on" in err and "pip install" in err
+    assert "--no-graphics" in err and "preset save save-the-kid --no-graphics" in err
+    assert not (footage.parent / f"{footage.name}_roughcut").exists(), "nothing created, no log left behind"
+    # Typing --no-graphics gets the rest of the preset.
+    opts = _opts(capture, ["build", str(footage), "--preset", "save-the-kid", "--no-graphics"])
+    assert opts.graphics is False and opts.style == "loose"
+    # Graphics you typed yourself are checked by the build, as before.
+    opts = _opts(capture, ["build", str(footage), "--preset", "save-the-kid", "--graphics"])
+    assert opts.graphics is True
 
 
 def test_render_takes_the_presets_pacing(config, capture, tmp_path):
@@ -514,6 +599,29 @@ def test_bad_preset_values_are_refused(config, tmp_path, capsys):
     assert not (config / "presets").exists() or not list((config / "presets").iterdir())
     err = capsys.readouterr().err
     assert "isn't a length" in err and "doesn't exist" in err and "can't be a preset name" in err
+
+
+def test_saving_over_a_broken_preset_file_never_blanks_it(config, capsys):
+    from roughcut import presets
+    from roughcut.cli import main
+
+    folder = config / "presets"
+    folder.mkdir(parents=True)
+    broken = folder / "save-the-kid.json"
+    broken.write_text('{"target": "nonsense"}')
+    assert main(["preset", "save", "save-the-kid", "--graphics-style", "navy and orange"]) == 1
+    err = capsys.readouterr().err
+    assert "isn't a length" in err and "roughcut preset remove save-the-kid" in err
+    assert broken.read_text() == '{"target": "nonsense"}', "left as it was"
+    (folder / "mine.json").write_text("{not json")
+    assert main(["preset", "save", "mine", "-t", "5m"]) == 1
+    assert (folder / "mine.json").read_text() == "{not json"
+    # After removing it, saving starts from the built-in again.
+    assert main(["preset", "remove", "save-the-kid"]) == 0
+    assert main(["preset", "save", "save-the-kid", "--graphics-style", "navy and orange"]) == 0
+    saved = presets.load("save-the-kid")
+    assert saved.brief == presets.SAVE_THE_KID_BRIEF and (saved.target, saved.style, saved.graphics) == ("10m", "loose", True)
+    assert json.loads(broken.read_text()) == {"graphics_style": "navy and orange"}
 
 
 def test_missing_logo_stops_before_anything_runs(footage, config, tmp_path, capsys):

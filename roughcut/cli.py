@@ -107,9 +107,19 @@ def _apply_preset(args, argv: list[str]):
         typed = args
         args = build_parser().parse_args(argv[: k + 1] + flags(preset, args.command) + argv[k + 1 :])
         skipped = ""
-        if args.command == "build" and args.provider == "none" and args.graphics and not typed.graphics:
-            args.graphics = False  # the preset's graphics need a model; silence-only runs skip them
-            skipped = " Its graphics are skipped: they need a model."
+        if args.command == "build" and args.graphics and not typed.graphics:
+            if args.provider == "none":
+                args.graphics = False  # the preset's graphics need a model; silence-only runs skip them
+                skipped = " Its graphics are skipped: they need a model."
+            else:
+                from .graphics import renderer_problem
+
+                problem = renderer_problem()
+                if problem:
+                    return args, (
+                        f"the {preset.name} preset turns motion graphics on, but they can't be rendered on this computer yet. {problem}\n"
+                        f"Or cut without them: add --no-graphics, or run `roughcut preset save {preset.name} --no-graphics` once."
+                    )
         print(f"Using the {preset.name} preset ({preset.summary()}); flags you typed win.{skipped}", file=sys.stderr)
     if args.command == "build" and args.graphics and args.graphics_logo:
         problem = logo_problem(args.graphics_logo)

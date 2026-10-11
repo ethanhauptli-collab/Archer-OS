@@ -12,14 +12,20 @@ There's a command-line tool (below) and a Mac app in [`mac/`](mac/README.md) tha
 brew install ffmpeg python@3.12
 git clone https://github.com/ethanhauptli-collab/Archer-OS.git && cd Archer-OS
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e '.[mac,dev]'
+pip install -e '.[mac,graphics,dev]'
 ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut
 roughcut key set
 ```
 
-The `mac` extra installs mlx-whisper for fast on-device transcription. The `ln` line puts `roughcut` in every Terminal window, so you don't have to `source .venv/bin/activate` in each new one. `roughcut key set` asks for your Claude API key and saves it in the macOS Keychain.
+The `mac` extra installs mlx-whisper for fast on-device transcription, and `graphics` the renderer for motion graphics (the built-in presets turn them on). The `ln` line puts `roughcut` in every Terminal window, so you don't have to `source .venv/bin/activate` in each new one. `roughcut key set` asks for your Claude API key and saves it in the macOS Keychain.
 
-To update later, run `roughcut update` from any folder. It pulls the latest code into your clone, reinstalls only when the dependencies changed, and lists what's new.
+To update later, run `roughcut update` from any folder. It pulls the latest code into your clone, reinstalls only when the dependencies changed, lists what's new and runs `roughcut doctor`.
+
+If your copy is older than `roughcut update` (it says "invalid choice: 'update'"), update the old way once:
+
+```bash
+cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics,dev]'
+```
 
 The first transcription downloads the Whisper model (`whisper-large-v3-turbo`, about 1.6 GB) once.
 
@@ -82,6 +88,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 
 | Option | Default | |
 |---|---|---|
+| `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look (see Presets) |
 | `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
 | `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
 | `--script FILE` | | A script, outline or transcript to follow |
@@ -100,7 +107,6 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--no-fill` | | Don't auto-cover narration the plan left without picture |
 | `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below); `--no-graphics` turns a preset's off |
 | `--graphics-logo FILE` | | A PNG, SVG, JPEG or WebP logo the graphics may show |
-| `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look (see below) |
 
 ### Presets
 
@@ -112,7 +118,7 @@ roughcut build ~/Movies/OCVIBE --preset venture-oc -c "OC Vibe launch night. Fea
 
 Anything you type wins over the preset (`-t 2m`, `--style medium`, `--no-graphics`), and your `-c` brief is added to the preset's. `roughcut preset list` shows them all and `roughcut preset show venture-oc` shows everything one sets.
 
-The built-in looks name no colors. Save your own version once with the exact brand colors, font and logo, and every run with that preset uses them:
+The built-in `venture-oc` look asks for navy plates with an orange accent, not exact shades. Save your own version once with the exact brand colors, font and logo, and every run with that preset uses them:
 
 ```bash
 roughcut preset save venture-oc --graphics-style "BRAND COLORS, FONT, MOOD" --logo ~/Brand/logo.png
@@ -130,7 +136,7 @@ roughcut build ~/Movies/OCVIBE --graphics \
 
 With `--graphics` (or a preset that has them on), Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). With `--graphics-logo` (or a preset's logo) the designs can place your logo; it's embedded in each saved design, so re-renders don't need the file. A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
 
-Each clip's design is saved next to it in `graphics/` as an `.html` file. Edit one (text, colors, timing) and run `roughcut render <output folder>` to re-render just that graphic. A re-cut with a different `--style` re-times the graphics and only re-renders the ones whose length changed.
+Each clip's design is saved next to it in `graphics/` as an `.html` file. Edit one (text, colors, timing) and run `roughcut render OUTPUT_FOLDER` to re-render just that graphic. A re-cut with a different `--style` re-times the graphics and only re-renders the ones whose length changed.
 
 Setup: `pip install -e '.[graphics]'`. Rendering uses Google Chrome if it's installed; otherwise run `playwright install chromium` once. `roughcut doctor` shows whether graphics are ready. Expect about a minute of design time per eight graphics, and roughly 25 MB per 4-second 1080p graphic.
 

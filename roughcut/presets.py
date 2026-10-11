@@ -23,11 +23,11 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 # The graphics look for each built-in preset: one constant each, used nowhere else.
-# No hex codes: the exact brand colors come from the owner (`roughcut preset save
-# venture-oc --graphics-style "..."`), never from a guess.
+# Color families, no hex codes: the exact shades come from the owner (`roughcut preset
+# save venture-oc --graphics-style "..."`), never from a guess.
 VENTURE_OC_LOOK = (
-    "Venture Orange County house look: bold geometric sans-serif type, white text on solid dark plates "
-    "with a single strong accent color, crisp confident ease-out motion, premium and energetic, no gimmicks."
+    "Venture Orange County house look: bold geometric sans-serif type, white text on solid deep navy plates "
+    "with one orange accent, crisp confident ease-out motion, premium and energetic, no gimmicks."
 )
 SAVE_THE_KID_LOOK = (
     "Understated and warm: clean white type with a soft shadow or a thin translucent plate, no loud colors, "
@@ -158,12 +158,13 @@ TEXT_FIELDS = ("description", "brief", "graphics_style")  # "" when unset; the o
 def _from_file(path: Path) -> Preset:
     """A saved preset. One saved over a built-in holds only what differs, so it keeps
     picking up improvements to the built-in brief after `roughcut update`."""
+    fix = f"Fix that file, or delete it with `roughcut preset remove {path.stem}`."
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        raise PresetError(f"can't read the preset {path}: {e}") from e
+        raise PresetError(f"can't read the preset {path}: {e}. {fix}") from e
     if not isinstance(data, dict):
-        raise PresetError(f"can't read the preset {path}: not a JSON object")
+        raise PresetError(f"can't read the preset {path}: not a JSON object. {fix}")
     built_in = path.stem in BUILT_IN
     preset = replace(BUILT_IN[path.stem]) if built_in else Preset(name=path.stem)
     for key in FIELDS:
@@ -180,7 +181,7 @@ def _from_file(path: Path) -> Preset:
     preset.source = "saved over built in" if built_in else "saved"
     problem = check(preset, need_logo=False)
     if problem:
-        raise PresetError(f"the preset {path} has a problem: {problem}")
+        raise PresetError(f"the preset {path} has a problem: {problem}. {fix}")
     return preset
 
 
@@ -403,11 +404,10 @@ def _command(args: argparse.Namespace) -> int:
     name = _clean_name(args.name)
     if args.base:
         preset = replace(load(args.base), name=name)
+    elif _file(name).is_file() or name in BUILT_IN:
+        preset = load(name)  # a broken saved file stops here; it's never overwritten with blanks
     else:
-        try:
-            preset = load(name)
-        except PresetError:
-            preset = Preset(name=name)
+        preset = Preset(name=name)
     if args.description is not None:
         preset.description = args.description
     if args.brief_file:
