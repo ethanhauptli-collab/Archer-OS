@@ -18,6 +18,7 @@ from pathlib import Path
 from .analyze import Analysis, Clip, log
 from .ffmpeg_ops import extract_frame
 from .timecode import seconds_to_clock
+from .textio import run_text
 from .timeline import Timeline
 
 PAGE = "preview.html"
@@ -99,7 +100,7 @@ def _preview(job: dict, previews: Path, size: tuple[int, int], rate: str, fd: fl
             for codec in (["libx264", "-preset", "veryfast", "-crf", "20"], ["h264_videotoolbox", "-b:v", "4M"]):
                 cmd = ["ffmpeg", "-v", "error", "-y", *background, "-i", str(job["mov"]), "-filter_complex", graph, "-map", "[v]", "-an",
                        "-c:v", *codec, "-r", rate, "-movflags", "+faststart", str(partial)]
-                proc = subprocess.run(cmd, capture_output=True, text=True)
+                proc = run_text(cmd)
                 if proc.returncode == 0 and partial.is_file():
                     break
                 error = (proc.stderr.strip().splitlines() or ["ffmpeg failed"])[-1][:200]

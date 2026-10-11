@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
 from . import timecode as tc
+from .textio import run_text
 
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mts", ".m2ts", ".mxf", ".avi", ".3gp", ".insv"}
 AUDIO_EXTS = {".wav", ".aif", ".aiff", ".mp3", ".m4a", ".aac", ".caf", ".bwf"}
@@ -132,7 +132,7 @@ def _ffprobe(path: Path) -> dict:
         "-show_streams",
         str(path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         raise MediaError(f"ffprobe failed on {path.name}: {proc.stderr.strip()[:300]}")
     return json.loads(proc.stdout or "{}")

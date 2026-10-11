@@ -49,7 +49,7 @@ def pip_command(repo: Path, extras: list[str]) -> list[str]:
 
 
 def _git(repo: Path, *args: str, runner=subprocess.run) -> subprocess.CompletedProcess:
-    return runner(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return runner(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _pull_hint(repo: Path, err: str) -> str:

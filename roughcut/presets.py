@@ -24,6 +24,8 @@ import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from .textio import read_user_text, real_files
+
 # The graphics look for each built-in preset: one constant each, used nowhere else.
 # Venture OC's palette and typefaces are the ones ventureoc.com uses (navy text and
 # plates, orange buttons, gold highlights; Jost headings, Inter body, Fraunces
@@ -211,7 +213,7 @@ def _from_file(path: Path) -> Preset:
 
 
 def names() -> list[str]:
-    saved = sorted(p.stem for p in presets_dir().glob("*.json")) if presets_dir().is_dir() else []
+    saved = sorted(p.stem for p in real_files(presets_dir().glob("*.json"))) if presets_dir().is_dir() else []
     return list(BUILT_IN) + [n for n in saved if n not in BUILT_IN]
 
 
@@ -559,7 +561,7 @@ def _command(args: argparse.Namespace) -> int:
         preset.description = args.description
     if args.brief_file:
         try:
-            preset.brief = Path(args.brief_file).expanduser().read_text(encoding="utf-8").strip()
+            preset.brief = read_user_text(args.brief_file).strip()
         except OSError as e:
             raise PresetError(f"can't read {args.brief_file}: {e}") from e
     elif args.brief is not None:

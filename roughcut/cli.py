@@ -19,7 +19,10 @@ from .timecode import parse_duration, seconds_to_clock
 
 
 def _read(path: str | None) -> str:
-    return Path(path).expanduser().read_text(encoding="utf-8") if path else ""
+    """A brief, script or notes file, in whatever encoding its editor saved it."""
+    from .textio import read_user_text
+
+    return read_user_text(path) if path else ""
 
 
 LEVEL_OFF = "off"  # --dialogue-level off: given, as opposed to left out (None)

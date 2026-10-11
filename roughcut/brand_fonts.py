@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from .textio import is_junk
+
 BUNDLED_DIR = Path(__file__).parent / "assets" / "fonts"
 _EXTENSIONS = {".ttf": "truetype", ".otf": "opentype", ".woff2": "woff2", ".woff": "woff"}
 _MIME = {".ttf": "font/ttf", ".otf": "font/otf", ".woff2": "font/woff2", ".woff": "font/woff"}
@@ -115,7 +117,7 @@ def _scan(dirs: tuple[Path, ...]) -> tuple[FontFile, ...]:
         if not folder.is_dir():
             continue
         for path in sorted(folder.rglob("*")):
-            info = _describe(path) if path.is_file() else None
+            info = _describe(path) if path.is_file() and not is_junk(path) else None
             if info:
                 found.append(info)
     return tuple(found)

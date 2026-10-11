@@ -78,7 +78,7 @@ def subscription_env() -> dict[str, str]:
 def auth_status(binary: str, run=subprocess.run) -> dict:
     """`claude auth status --json`: {"loggedIn": bool, "authMethod": "claude.ai" | "oauth_token" | "api_key" ...}."""
     try:
-        proc = run([binary, "auth", "status", "--json"], capture_output=True, text=True, env=subscription_env(), timeout=60)
+        proc = run([binary, "auth", "status", "--json"], capture_output=True, text=True, encoding="utf-8", errors="replace", env=subscription_env(), timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ProviderError(f"Couldn't run Claude Code ({e}).") from e
     try:
@@ -154,7 +154,9 @@ class ClaudeCodeProvider:
             t0 = time.monotonic()
             try:
                 with progress.doing(f"waiting for Claude Code ({self.model}, {purpose})", external=True):  # bounded by self.timeout
-                    proc = self._run(cmd, input=prompt, capture_output=True, text=True, env=subscription_env(), cwd=tmp, timeout=self.timeout)
+                    proc = self._run(
+                        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", env=subscription_env(), cwd=tmp, timeout=self.timeout
+                    )
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"Claude Code took longer than {self.timeout / 60:.0f} minutes on the {purpose} request.") from e
             except OSError as e:

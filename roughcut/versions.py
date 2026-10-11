@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
+from .textio import read_text_lenient, real_files
+
 VERSIONS = "versions.json"
 HISTORY = "history"
 KEEP = 5  # earlier versions kept in history/
@@ -103,7 +105,7 @@ def entries(out_dir: Path) -> list[dict]:
     found = _read(out_dir)
     if found:
         return found
-    if not (out_dir / "plan.json").is_file() or not any(out_dir.glob("*.fcpxml")):
+    if not (out_dir / "plan.json").is_file() or not real_files(out_dir.glob("*.fcpxml")):
         return []
     cut = _legacy_cut(out_dir)
     if cut is None:  # renamed or never written: still version 1, but no file of it to take off the top level
@@ -213,9 +215,9 @@ _SRC = re.compile(r'src="file://[^"]*?/graphics/([^"/]+)"')
 def graphics_in(files) -> list[str]:
     """The graphics clips (file names in graphics/) these FCPXML files use."""
     names: set[str] = set()
-    for f in files:
+    for f in real_files(files):
         try:
-            names.update(unquote(m) for m in _SRC.findall(Path(f).read_text(encoding="utf-8")))
+            names.update(unquote(m) for m in _SRC.findall(read_text_lenient(f)))
         except OSError:
             continue
     return sorted(names)
@@ -289,7 +291,7 @@ def prune_graphics(out_dir: Path) -> list[str]:
     keep |= {Path(str(g.get("html") or "")).name for g in entries}
     removed = []
     designs = [f for f in folder.glob("*.html") if DESIGN_FILE.fullmatch(f.name)]
-    for f in list(folder.glob("*.mov")) + designs:
+    for f in real_files(folder.glob("*.mov")) + designs:
         if f.name not in keep:
             f.unlink(missing_ok=True)
             removed.append(f.name)

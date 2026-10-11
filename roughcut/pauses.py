@@ -21,11 +21,11 @@ from __future__ import annotations
 import bisect
 import math
 import statistics
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import ffmpeg_ops
+from .textio import run_text
 from .analyze import Cache, Clip, log
 
 MUSIC_FLATNESS = 0.25  # median flatness of the pauses below this: a music bed
@@ -42,7 +42,7 @@ def pause_flatness(path: Path, silences: list[tuple[float, float]]) -> float | N
         "aspectralstats=win_size=1024:measure=flatness,ametadata=mode=print:file=-"
     )
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return None
     spans = sorted(silences)
@@ -75,7 +75,7 @@ def cuts_per_minute(path: Path, duration: float) -> float | None:
         return None
     vf = "fps=10,scale=160:-2,scdet=threshold=10,metadata=mode=print:key=lavfi.scd.time:file=-"
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:v:0", "-vf", vf, "-an", "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return None
     cuts = sum(1 for line in proc.stdout.splitlines() if line.startswith("lavfi.scd.time="))
@@ -136,7 +136,7 @@ def window_levels(path: Path) -> list[float]:
         "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-"
     )
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return []
     levels = []

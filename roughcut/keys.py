@@ -38,6 +38,8 @@ def keychain_get(account: str) -> str | None:
         ["security", "find-generic-password", "-s", SERVICE, "-a", account, "-w"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     value = proc.stdout.strip() if proc.returncode == 0 else ""
     return value or None
@@ -54,6 +56,8 @@ def keychain_set(account: str, value: str) -> None:
         input=f"add-generic-password -U -s {SERVICE} -a {account} -l Roughcut -w {value}\n",
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0 or keychain_get(account) != value:
         raise KeychainError(f"Couldn't save to the Keychain: {proc.stderr.strip() or 'unknown error'}")

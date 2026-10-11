@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import re
-import subprocess
 from pathlib import Path
+
+from .textio import run_text
 
 _SILENCE_START = re.compile(r"silence_start:\s*(-?[\d.]+)")
 _SILENCE_END = re.compile(r"silence_end:\s*(-?[\d.]+)")
@@ -39,7 +40,7 @@ def window_peaks(path: Path, window: float = 0.05) -> list[float]:
         "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file=-"
     )
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return []
     peaks = []
@@ -89,7 +90,7 @@ def loudness_blocks(path: Path) -> dict | None:
         "ebur128=metadata=1:dualmono=1,ametadata=mode=print:file=-"
     )
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return None
     return parse_loudness(proc.stdout)
@@ -204,7 +205,7 @@ def detect_silences(
         "null",
         "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0:
         return []
     return parse_silencedetect(proc.stderr, duration)
@@ -246,7 +247,7 @@ def extract_frame(src: Path, at: float, dest: Path, width: int = 512) -> Path | 
         "5",
         str(dest),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = run_text(cmd)
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         return None
     return dest
