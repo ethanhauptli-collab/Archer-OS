@@ -214,6 +214,9 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     runs: list[list[int]] = []  # indexes into all_words
     current: list[int] = []
     removed_since_last = False
+    # On camera, cutting out a very short um/uh jumps the picture, so it stays. Narration
+    # has no picture of its own (B-roll covers it), so every um/uh can go.
+    filler_floor = 0.25 if clip.media.has_video else 0.0
     for i, w in enumerate(all_words):
         if style.remove_fillers and w.is_filler:
             removed_since_last = True
@@ -221,7 +224,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         if current:
             prev = all_words[current[-1]]
             gap = max(w.start - prev.end, _pause_between(prev.start, w.end, clip.silences))
-            if gap > style.max_gap or (removed_since_last and gap > 0.25):
+            if gap > style.max_gap or (removed_since_last and gap > filler_floor):
                 runs.append(current)
                 current = []
         current.append(i)
@@ -268,6 +271,20 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
                 )
             )
     return pieces
+
+
+def _fillers_left_on_camera(pieces: list[_Piece], analysis: Analysis) -> int:
+    """How many um/uh still play inside kept on-camera speech (too short to cut cleanly)."""
+    left = set()
+    for p in pieces:
+        clip = analysis.clip(p.clip_id)
+        if not clip.media.has_video or not p.seg_ids:
+            continue
+        for seg_id in p.seg_ids:
+            for w in analysis.segment(seg_id).words:
+                if w.is_filler and p.a <= w.start and w.end <= p.b:
+                    left.add((clip.id, w.start))
+    return len(left)
 
 
 def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> list[_Piece]:
@@ -362,6 +379,12 @@ def build_timeline(
 
     width, height, seq_fd = choose_format(pieces, analysis, format_override)
     tl = Timeline(name=name, frame_duration=seq_fd, width=width, height=height)
+    left = _fillers_left_on_camera(pieces, analysis) if style.remove_fillers else 0
+    if left:
+        tl.notes.append(
+            f"Left {left} short um/uh on camera: cutting one under a quarter second would jump the picture. "
+            "Trim them in Final Cut, or cover them with B-roll, if they bother you."
+        )
 
     offset = 0
     last_section = -1

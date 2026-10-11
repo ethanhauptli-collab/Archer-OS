@@ -104,7 +104,7 @@ def default_out_dir(inputs: list[Path]) -> Path:
 def style_for(opts: Options) -> Style:
     base = STYLES[opts.style]
     if opts.keep_fillers:
-        return Style(base.pad_in, base.pad_out, base.max_gap, remove_fillers=False, min_broll=base.min_broll)
+        return replace(base, remove_fillers=False)  # keeps the style's B-roll pacing too
     return base
 
 

@@ -188,3 +188,50 @@ def test_a_shared_line_across_unrelated_clips_is_dropped_only_when_long():
     # Retakes inside one recording stay the planner's call.
     one = Analysis(clips=[make_clip("V01", seconds=20, sentences=thanks + [(10.0, 15.0, "It opens this summer in Anaheim near the arena.")])])
     assert len(normalize({"sections": [{"name": "x", "items": ["V01.S002", "V01.S003"]}]}, one).sections[0].items) == 2
+
+
+# ------------------------------------------------------------ T10: fillers and pacing
+
+
+@pytest.mark.parametrize("name", ["tight", "medium", "loose"])
+def test_keep_fillers_keeps_the_rest_of_the_style(name):
+    from dataclasses import asdict
+
+    from roughcut.pipeline import Options, style_for
+
+    base = STYLES[name]
+    kept = style_for(Options(inputs=[], style=name, keep_fillers=True))
+    assert kept.remove_fillers is False
+    assert {k: v for k, v in asdict(kept).items() if k != "remove_fillers"} == {k: v for k, v in asdict(base).items() if k != "remove_fillers"}
+    assert style_for(Options(inputs=[], style=name)) == base
+
+
+def _short_uh(kind):
+    from roughcut.segments import build_segments
+    from roughcut.transcribe import Word
+
+    clip = make_clip("A01" if kind == "audio" else "V01", kind=kind, seconds=6, role="voiceover" if kind == "audio" else "aroll")
+    words = [Word(1.0, 1.4, "We"), Word(1.4, 1.8, "went"), Word(1.8, 2.0, "uh,"), Word(2.0, 2.4, "to"), Word(2.4, 2.9, "the"), Word(2.9, 3.4, "park.")]
+    clip.segments = build_segments(clip.id, words)
+    return clip
+
+
+def test_a_short_uh_is_cut_from_narration_and_left_on_camera():
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import speech_pieces
+
+    vo = _short_uh("audio")
+    pieces = speech_pieces(vo.segments[0], vo, STYLES["medium"], 0)
+    assert len(pieces) == 2 and pieces[0].b <= 1.8 + 1e-9 and pieces[1].a >= 2.0 - 1e-9
+    a = Analysis(clips=[vo, make_clip("V09", seconds=30)])
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    kept = [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]
+    assert not [k for k in kept if k[0] < 1.95 and k[1] > 1.85], kept  # no part of the uh plays
+
+    cam = _short_uh("video")
+    assert len(speech_pieces(cam.segments[0], cam, STYLES["medium"], 0)) == 1  # a 0.2 s cut would jump the picture
+    a = Analysis(clips=[cam])
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    assert any(n.startswith("Left 1 short um/uh on camera") for n in tl.notes)
+    keep = build_timeline(heuristic_plan(a), a, style=STYLES["medium"].__class__(0.1, 0.2, 0.6, remove_fillers=False), name="t")
+    assert not any("um/uh" in n for n in keep.notes)
