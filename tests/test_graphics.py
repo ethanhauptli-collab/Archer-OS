@@ -37,6 +37,14 @@ def test_schema_and_brief_only_change_when_graphics_are_on():
     assert "<motion_graphics>" in brief and "never invented" in brief and "orange, Gotham" in brief
 
 
+def test_names_in_a_rundown_get_a_graphic_each_where_the_brief_puts_them():
+    # "list the restaurants and chef names ... right center": one 8 s list faded out before the last names were said.
+    brief = render_brief("list the restaurants and chef names, right center of frame", None, None, graphics=True)
+    assert "get one graphic each, on the words" in brief and "never one list" in brief
+    assert "where on screen they go" in brief
+    assert 'Where the brief or a graphic\'s direction says to put graphics (e.g. "right center"), put them there' in graphics.DESIGN_SYSTEM
+
+
 def test_plan_keeps_only_graphics_on_words_in_the_cut():
     raw = {"sections": [{"name": "x", "items": ["V01.S003", "V01.S005"], "broll": []}], "graphics": GRAPHICS}
     a, plan, _ = analysis_and_cut(raw)

@@ -441,9 +441,10 @@ window.seek = function (t) { ... } that sets the DOM for time t in seconds; it i
 every frame, in order, starting at 0, and must be deterministic.
 - Words come with the time they are spoken, in seconds from the graphic's start. Kinetic captions \
 reveal each word at its time; other kinds may use the times to land emphasis.
-- Keep everything inside the title-safe area (5% in from every edge). Lower thirds and stats sit \
-in the lower third or a corner, away from the center of frame where faces usually are. Only title \
-cards may fill the frame. On a vertical video the canvas block lists the areas the app's buttons \
+- Keep everything inside the title-safe area (5% in from every edge). Where the brief or a \
+graphic's direction says to put graphics (e.g. "right center"), put them there. Otherwise lower \
+thirds and stats sit in the lower third or a corner, away from the center of frame where faces \
+usually are. Only title cards may fill the frame. On a vertical video the canvas block lists the areas the app's buttons \
 and captions cover: keep all text and plates out of them (a lower third sits just above the bottom one).
 - Each graphic says what it sits over ("over"), and there may be a frame of that picture: make the \
 text read clearly over it, and keep plates off faces and the main subject.
