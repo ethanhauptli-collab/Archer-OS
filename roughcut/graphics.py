@@ -803,7 +803,7 @@ async def _render_async(job: dict) -> dict:
             for note in ([seek_error] if seek_error else []) + fonts + inspect(out, job.get("kind", ""), size, job.get("keep_out")):
                 _note(notes, note)
         except _Stuck as e:
-            result["error"] = f"{e}; left out. Fix graphics/{out.with_suffix('.html').name} and run `roughcut render`"
+            result["error"] = f"{e}; left out. Fix graphics/{job.get('slug') or out.stem}.html and run `roughcut render`"
         except _Stopped:
             result["error"] = "stopped"
         except Exception as e:  # noqa: BLE001 - report, don't kill the run
@@ -871,7 +871,7 @@ def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path
             (folder / f"{g.slug}.html").write_text(html[g.id], encoding="utf-8")
 
 
-_DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")
+DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")  # a graphic's saved design, e.g. G01-lower-third.html
 
 
 def _put_aside_old_designs(folder: Path, placed: list[PlacedGraphic], html: dict[str, str]) -> None:
@@ -883,7 +883,7 @@ def _put_aside_old_designs(folder: Path, placed: list[PlacedGraphic], html: dict
     imported into Final Cut may still use them.
     """
     live = {f"{g.slug}.html" for g in placed if g.id in html}
-    stale = [p for p in folder.glob("G*.html") if _DESIGN_FILE.fullmatch(p.name) and p.name not in live]
+    stale = [p for p in folder.glob("G*.html") if DESIGN_FILE.fullmatch(p.name) and p.name not in live]
     if not stale:
         return
     old = folder / "old"
@@ -941,15 +941,15 @@ def render(
             for n, future in enumerate(as_completed(futures), 1):
                 job, result = futures[future], future.result()
                 progress.stage("graphics", f"Rendering {len(jobs)} graphics", current=n, total=len(jobs))
-                notes[job["id"]] = result["notes"]
-                if result["error"]:
+                notes[job["id"]] = list(result.get("notes") or [])
+                if result.get("error"):
                     warnings.append(f"graphic {job['id']} {result['error']}")
                     log(f"{job['slug']}: {result['error']}")
                 else:
                     done[job["id"]] = Path(job["out"])
                     if on_rendered is not None:  # recorded before it's announced
                         on_rendered(done)
-                    log(f"rendered {job['slug']} ({job['frames']} frames) in {_took(result['seconds'])} [{n}/{len(jobs)}]")
+                    log(f"rendered {job['slug']} ({job['frames']} frames) in {_took(result.get('seconds') or 0.0)} [{n}/{len(jobs)}]")
         except KeyboardInterrupt:
             _STOP.set()  # the workers stop at their next frame and clean up
             pool.shutdown(wait=False, cancel_futures=True)

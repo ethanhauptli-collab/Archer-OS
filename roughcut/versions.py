@@ -247,8 +247,13 @@ def prune_graphics(out_dir: Path) -> list[str]:
     folder is gone: Final Cut reads imported media in place, so deleting it
     would take the graphics out of a project already in a library. HTML
     designs the current version doesn't use go: history/ keeps a copy of
-    every kept version's designs.
+    every kept version's designs. The preview page (graphics/preview.html)
+    belongs to the current version: it stays while that version has rendered
+    graphics, and goes (with its previews) when it has none.
     """
+    from .graphics import DESIGN_FILE
+    from .graphics_preview import FOLDER, PAGE
+
     folder = out_dir / "graphics"
     if not folder.is_dir():
         return []
@@ -257,12 +262,20 @@ def prune_graphics(out_dir: Path) -> list[str]:
         manifest = json.loads((out_dir / "graphics.json").read_text())
     except (OSError, json.JSONDecodeError):
         manifest = {}
-    keep |= {Path(str(g.get("html") or "")).name for g in manifest.get("graphics", [])}
+    entries = [g for g in manifest.get("graphics", []) if isinstance(g, dict)] if isinstance(manifest, dict) else []
+    keep |= {Path(str(g.get("html") or "")).name for g in entries}
     removed = []
-    for f in list(folder.glob("*.mov")) + list(folder.glob("*.html")):
+    designs = [f for f in folder.glob("*.html") if DESIGN_FILE.fullmatch(f.name)]
+    for f in list(folder.glob("*.mov")) + designs:
         if f.name not in keep:
             f.unlink(missing_ok=True)
             removed.append(f.name)
+    if not any(g.get("file") for g in entries):  # this version has no graphics: no page showing an earlier one's
+        page = folder / PAGE
+        if page.is_file():
+            page.unlink(missing_ok=True)
+            removed.append(page.name)
+        shutil.rmtree(folder / FOLDER, ignore_errors=True)
     return removed
 
 
