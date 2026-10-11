@@ -140,6 +140,8 @@ def source_channels(channels: int) -> str:
 def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None]:
     """(video role, audio role) for one use of a clip, so Timeline Index > Roles
     can mute the music bed, solo the planned B-roll or hide the auto-fill.
+    Under ROLE_STYLE "channel" video subroles stay only on stills (<video role>):
+    asset-clips carry the main video role, as Final Cut's own exports do.
 
     `use` is "speech" (a story line in the main storyline, whatever the clip
     was classified as), "spine", "broll" (connected cutaway), "music",
