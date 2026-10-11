@@ -43,7 +43,7 @@ Graphics: a lower third for each speaker the first time they appear (only names 
 
 SAVE_THE_KID_BRIEF = """\
 What it is: an episode of Save the Kid, a personal YouTube channel about fatherhood and adventure.
-Tone: intimate, reflective and candid: a dad talking honestly, not a presenter. Let moments breathe; keep real pauses, laughter and unscripted moments with the kids.
+Tone: intimate, reflective and candid: a dad talking honestly, not a presenter. Let moments breathe; keep the laughter and the unscripted moments with the kids.
 Structure: open on the most honest or surprising moment, then follow the day or the story in order, and end on a reflective line to camera if there is one. Cut logistics and false starts.
 B-roll: scenery and small family moments over talking stretches; hold shots longer than a promo would.
 Music: a gentle bed under montage passages, never under long talking.
@@ -375,7 +375,7 @@ def _command(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps([{**p.to_json(), "source": p.source} for p in found]))
             return 0
-        width = max(len(p.name) for p in found)
+        width = max((len(p.name) for p in found), default=10)
         for p in found:
             print(f"{p.name:<{width}}  {p.summary()}  [{p.source}]")
             if p.description:
