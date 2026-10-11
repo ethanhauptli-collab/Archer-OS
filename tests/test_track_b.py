@@ -24,6 +24,12 @@ def _reset_progress():
     progress.enable(False)
 
 
+@pytest.fixture(scope="module")
+def shared_cache(tmp_path_factory):
+    """One analysis cache for these tests: probes, silence maps and frames are keyed by file, so results don't change."""
+    return tmp_path_factory.mktemp("analysis-cache")
+
+
 @pytest.fixture
 def fake(monkeypatch):
     provider = FakeProvider()
@@ -52,7 +58,7 @@ def _events(text: str) -> list[dict]:
 # ---------------------------------------------------------------- N2: the paid plan is never lost
 
 
-def test_plan_is_saved_before_graphics_and_render_finishes_without_the_model(footage, tmp_path, monkeypatch, capsys):
+def test_plan_is_saved_before_graphics_and_render_finishes_without_the_model(footage, tmp_path, monkeypatch, capsys, shared_cache):
     provider = FakeProvider(_graphics_plan())
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
@@ -62,7 +68,7 @@ def test_plan_is_saved_before_graphics_and_render_finishes_without_the_model(foo
 
     monkeypatch.setattr(graphics, "render", crash)
     out = tmp_path / "out"
-    code = main(["build", str(footage), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics", "--progress-json"])
+    code = main(["build", str(footage), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(shared_cache), "--graphics", "--progress-json"])
     assert code == 1
     events = _events(capsys.readouterr().out)
     assert events[-1]["event"] == "error" and events[-1]["resume"] == f"roughcut render {out}"
@@ -83,7 +89,7 @@ def test_plan_is_saved_before_graphics_and_render_finishes_without_the_model(foo
     assert again.plan.title == "Mountain Day"
 
 
-def test_stop_after_the_plan_prints_how_to_finish(footage, tmp_path, monkeypatch, capsys):
+def test_stop_after_the_plan_prints_how_to_finish(footage, tmp_path, monkeypatch, capsys, shared_cache):
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
 
     def broken(*a, **k):
@@ -91,16 +97,16 @@ def test_stop_after_the_plan_prints_how_to_finish(footage, tmp_path, monkeypatch
 
     monkeypatch.setattr(pipeline, "make_timelines", broken)
     out = tmp_path / "my out"
-    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 1
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(shared_cache)]) == 1
     err = capsys.readouterr().err
     assert f"roughcut render '{out}'" in err  # quoted: the path has a space
 
 
-def test_a_failed_rebuild_leaves_the_previous_plan_working(footage, tmp_path, monkeypatch, fake):
+def test_a_failed_rebuild_leaves_the_previous_plan_working(footage, tmp_path, monkeypatch, fake, shared_cache):
     """IDs follow recording order: an earlier clip renumbers everything after it."""
     src = tmp_path / "footage"
     shutil.copytree(footage, src)
-    out, cache = tmp_path / "out", tmp_path / "c"
+    out, cache = tmp_path / "out", shared_cache
     pipeline.build(_opts(src, out, cache))
     before = (out / "analysis.json").read_text()
 
@@ -120,9 +126,9 @@ def test_a_failed_rebuild_leaves_the_previous_plan_working(footage, tmp_path, mo
     assert pipeline.rerender(out, Options(inputs=[])).plan.title == "Mountain Day"
 
 
-def test_render_refuses_a_plan_made_for_other_clips(footage, tmp_path, fake):
+def test_render_refuses_a_plan_made_for_other_clips(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     data = json.loads((out / "analysis.json").read_text())
     data["clips"][0]["media"]["fingerprint"] = "a-different-file"
     (out / "analysis.json").write_text(json.dumps(data))
@@ -130,9 +136,9 @@ def test_render_refuses_a_plan_made_for_other_clips(footage, tmp_path, fake):
         pipeline.rerender(out, Options(inputs=[]))
 
 
-def test_render_keeps_the_builds_cut_settings(footage, tmp_path, fake):
+def test_render_keeps_the_builds_cut_settings(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"),
+    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(shared_cache),
                  "--style", "tight", "--no-stringout"]) == 0
     tight = _rough(check_invariants(next(out.glob("*.fcpxml"))))["seconds"]
 
@@ -146,11 +152,11 @@ def test_render_keeps_the_builds_cut_settings(footage, tmp_path, fake):
     assert json.loads((out / "plan.json").read_text())["settings"]["style"] == "medium"  # the next render starts here
 
 
-def test_a_new_build_without_graphics_drops_the_old_ones(footage, tmp_path, monkeypatch, fake):
+def test_a_new_build_without_graphics_drops_the_old_ones(footage, tmp_path, monkeypatch, fake, shared_cache):
     out = tmp_path / "out"
     out.mkdir()
     (out / "graphics.json").write_text(json.dumps({"style": "", "graphics": [{"id": "G01", "index": 0, **GRAPHIC, "html": "graphics/G01-title-card.html"}]}))
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     assert not (out / "graphics.json").exists()
 
     def never(*a, **k):
@@ -160,7 +166,7 @@ def test_a_new_build_without_graphics_drops_the_old_ones(footage, tmp_path, monk
     pipeline.rerender(out, Options(inputs=[]))
 
 
-def test_progress_stream_with_graphics_only_moves_forward(footage, tmp_path, monkeypatch, capsys):
+def test_progress_stream_with_graphics_only_moves_forward(footage, tmp_path, monkeypatch, capsys, shared_cache):
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_graphics_plan()))
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
 
@@ -170,7 +176,7 @@ def test_progress_stream_with_graphics_only_moves_forward(footage, tmp_path, mon
 
     monkeypatch.setattr(graphics, "make", fake_make)
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics", "--progress-json"]) == 0
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(shared_cache), "--graphics", "--progress-json"]) == 0
     events = _events(capsys.readouterr().out)
     stages = [e["stage"] for e in events if e["event"] == "stage"]
     idx = [progress.STAGES.index(s) for s in stages]
@@ -185,9 +191,9 @@ def _top_fcpxml(out: Path) -> list[str]:
     return sorted(p.name for p in out.glob("*.fcpxml"))
 
 
-def test_every_run_is_a_new_version_with_its_own_project_name(footage, tmp_path, fake):
+def test_every_run_is_a_new_version_with_its_own_project_name(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    first = pipeline.build(_opts(footage, out, tmp_path / "c"))
+    first = pipeline.build(_opts(footage, out, shared_cache))
     assert (first.version, first.project) == (1, "footage - Rough Cut v1 (medium, fake-model)")
     assert _top_fcpxml(out) == ["footage v1.fcpxml"]
 
@@ -207,9 +213,9 @@ def test_every_run_is_a_new_version_with_its_own_project_name(footage, tmp_path,
     assert [(v["n"], v["command"], v["style"]) for v in listed] == [(1, "build", "medium"), (2, "render", "tight")]
 
 
-def test_history_keeps_the_last_five_versions(footage, tmp_path):
+def test_history_keeps_the_last_five_versions(footage, tmp_path, shared_cache):
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--name", "f", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 0
+    assert main(["build", str(footage), "-o", str(out), "--name", "f", "--provider", "none", "--transcriber", "none", "--cache-dir", str(shared_cache)]) == 0
     for _ in range(6):
         assert main(["render", str(out)]) == 0
     kept = sorted(int(p.name.split()[0][1:]) for p in (out / "history").iterdir())
@@ -235,9 +241,9 @@ def test_graphics_used_by_a_kept_version_are_never_deleted(tmp_path):
     assert sorted(p.name for p in (out / "graphics").iterdir()) == ["G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G01-stat.html"]
 
 
-def test_a_failed_write_leaves_the_previous_version_intact(footage, tmp_path, monkeypatch, fake):
+def test_a_failed_write_leaves_the_previous_version_intact(footage, tmp_path, monkeypatch, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     before = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
 
     def broken(*a, **k):
@@ -267,10 +273,10 @@ def test_atomic_write_never_leaves_a_half_written_file(tmp_path, monkeypatch):
     assert target.read_text() == "old" and [p.name for p in tmp_path.iterdir()] == ["plan.json"]
 
 
-def test_render_works_on_a_folder_from_before_versions(footage, tmp_path, fake):
+def test_render_works_on_a_folder_from_before_versions(footage, tmp_path, fake, shared_cache):
     """Output folders written by earlier roughcut releases: one <name>.fcpxml, plan.json without settings."""
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c", style="tight"))
+    pipeline.build(_opts(footage, out, shared_cache, style="tight"))
     # Turn it into the old layout by hand.
     (out / "versions.json").unlink()
     (out / "footage v1.fcpxml").rename(out / "footage.fcpxml")
@@ -286,9 +292,9 @@ def test_render_works_on_a_folder_from_before_versions(footage, tmp_path, fake):
     validate_dtd(out / "footage v2.fcpxml")
 
 
-def test_a_run_that_never_finished_is_reported_next_time(footage, tmp_path, fake):
+def test_a_run_that_never_finished_is_reported_next_time(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     log = out / "roughcut.log"
     log.write_text(log.read_text() + "2025-01-02 14:02:00  === roughcut build started (output: x)\n2025-01-02 14:02:01  found 5 media files\n")
     assert main(["render", str(out)]) == 0
@@ -315,13 +321,13 @@ def test_open_hands_the_cut_to_final_cut(monkeypatch, tmp_path):
     assert "only works on a Mac" in cli.open_in_final_cut(tmp_path / "x.fcpxml", run=run)
 
 
-def test_build_open_flag_opens_the_new_cut(footage, tmp_path, monkeypatch, capsys):
+def test_build_open_flag_opens_the_new_cut(footage, tmp_path, monkeypatch, capsys, shared_cache):
     from roughcut import cli
 
     opened = []
     monkeypatch.setattr(cli, "open_in_final_cut", lambda path: opened.append(path) or "Opened in Final Cut Pro.")
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--open"]) == 0
+    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none", "--cache-dir", str(shared_cache), "--open"]) == 0
     assert opened == [out / "footage v1.fcpxml"]
     printed = capsys.readouterr().out
     assert "Opened in Final Cut Pro." in printed and 'the project "footage - Rough Cut v1 (medium, no AI)" in the event "footage (' in printed
@@ -350,7 +356,7 @@ def _alive(pid: int) -> bool:
         return True
 
 
-def test_cancel_from_the_app_stops_claude_and_logs_it(footage, tmp_path):
+def test_cancel_from_the_app_stops_claude_and_logs_it(footage, tmp_path, shared_cache):
     """The app cancels with SIGTERM; `claude -p` mid-request must not keep running (and billing) on its own."""
     import os
     import signal
@@ -369,7 +375,7 @@ def test_cancel_from_the_app_stops_claude_and_logs_it(footage, tmp_path):
     out = tmp_path / "out"
     proc = subprocess.Popen(
         [sys.executable, "-m", "roughcut", "build", str(footage), "--provider", "claude-code", "--model", "sonnet", "--no-vision",
-         "--transcriber", "none", "-o", str(out), "--cache-dir", str(tmp_path / "c"), "--progress-json"],
+         "--transcriber", "none", "-o", str(out), "--cache-dir", str(shared_cache), "--progress-json"],
         cwd=Path(__file__).parents[1], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
@@ -403,9 +409,9 @@ def _revised_plan() -> dict:
     return plan
 
 
-def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_path, fake):
+def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c", context="Family trip", target_seconds=60))
+    pipeline.build(_opts(footage, out, shared_cache, context="Family trip", target_seconds=60))
     build_call = next(c for c in fake.calls if c["purpose"] == "edit plan")
     fake.plan = _revised_plan()
 
@@ -438,9 +444,9 @@ def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_pa
     assert saved["settings"]["context"] == "Family trip" and saved["revision_of"] == 1
 
 
-def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake):
+def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
     pipeline.revise(out, "More B-roll in the wrap.", Options(inputs=[]))
     request = fake.calls[-1]["parts"][1].text
@@ -449,9 +455,9 @@ def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake):
     assert _top_fcpxml(out) == ["footage v3.fcpxml"]
 
 
-def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake):
+def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     code = main(["revise", str(out), "Less of the photo.", "--avoid", "V01.S003,V02", "--avoid", "V03@0-2", "--keep", "V01.S002"])
     assert code == 0
     plan = json.loads((out / "plan.json").read_text())["plan"]
@@ -466,9 +472,9 @@ def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake):
     validate_dtd(next(out.glob("*.fcpxml")))
 
 
-def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake):
+def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c", context="Family trip to the lake", target_seconds=90))
+    pipeline.build(_opts(footage, out, shared_cache, context="Family trip to the lake", target_seconds=90))
     saved = json.loads((out / "plan.json").read_text())
     (out / "plan.json").write_text(json.dumps({"name": saved["name"], "plan": saved["plan"], "raw": saved["raw"]}))
     (out / "versions.json").unlink()
@@ -482,11 +488,11 @@ def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, 
     check_invariants(result.fcpxml)
 
 
-def test_a_failed_revision_changes_nothing(footage, tmp_path, monkeypatch, fake):
+def test_a_failed_revision_changes_nothing(footage, tmp_path, monkeypatch, fake, shared_cache):
     from roughcut.providers import ProviderError
 
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     before = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file() and p.name != "roughcut.log"}
 
     def overloaded(*a, **k):
@@ -499,9 +505,9 @@ def test_a_failed_revision_changes_nothing(footage, tmp_path, monkeypatch, fake)
     assert after == before
 
 
-def test_revise_progress_stream_for_the_app(footage, tmp_path, fake, capsys):
+def test_revise_progress_stream_for_the_app(footage, tmp_path, fake, capsys, shared_cache):
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     capsys.readouterr()
     assert main(["revise", str(out), "Tighter hook.", "--progress-json"]) == 0
     events = _events(capsys.readouterr().out)
@@ -515,7 +521,7 @@ def test_revise_needs_notes(tmp_path, capsys):
     assert "Say what to change" in capsys.readouterr().err
 
 
-def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp_path, monkeypatch):
+def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp_path, monkeypatch, shared_cache):
     plan = _graphics_plan()
     plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "for weeks", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
     provider = FakeProvider(plan)
@@ -524,7 +530,7 @@ def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp
     # The designs are what's under test: skip the browser, keep everything else.
     monkeypatch.setattr(graphics, "_render_one", lambda job: {"id": job["id"], "error": "not rendered in this test", "console": []})
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c", graphics=True))
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
     manifest = json.loads((out / "graphics.json").read_text())
     title = next(g for g in manifest["graphics"] if g["kind"] == "title_card")
     (out / title["html"]).write_text((out / title["html"]).read_text() + "<!-- hand edit -->")
@@ -626,7 +632,7 @@ def test_the_end_of_a_run_says_what_made_it_in_and_what_it_cost(footage, tmp_pat
     assert done["visual_log"] == {"described": 4, "total": 4}
 
 
-def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monkeypatch, capsys):
+def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monkeypatch, capsys, shared_cache):
     from roughcut.providers import ProviderError
 
     class Broken(FakeProvider):
@@ -638,7 +644,7 @@ def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monk
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: Broken())
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics", "--progress-json"]) == 3
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(shared_cache), "--graphics", "--progress-json"]) == 3
     done = _events(capsys.readouterr().out)[-1]["result"]
     assert done["fell_back"] and done["graphics"]["note"] == "none: AI planning failed"
     assert "Motion graphics were on, but AI planning failed" in (out / "edit_report.md").read_text()
@@ -750,11 +756,11 @@ def test_an_empty_api_balance_is_a_limit_not_a_failure():
         provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="edit_plan", purpose="edit plan")
 
 
-def test_a_used_up_plan_during_revise_changes_nothing(footage, tmp_path, monkeypatch, fake):
+def test_a_used_up_plan_during_revise_changes_nothing(footage, tmp_path, monkeypatch, fake, shared_cache):
     from roughcut.providers import ProviderLimitError
 
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
 
     def used_up(*a, **k):
         raise ProviderLimitError("Your Claude plan's usage limit was reached during the revision request (it resets 17:00).")
@@ -768,7 +774,7 @@ def test_a_used_up_plan_during_revise_changes_nothing(footage, tmp_path, monkeyp
 # ---------------------------------------------------------------- T5: heartbeat and stall dump
 
 
-def test_a_long_step_says_it_is_still_working_and_a_stall_leaves_a_stack(footage, tmp_path, monkeypatch, capsys):
+def test_a_long_step_says_it_is_still_working_and_a_stall_leaves_a_stack(footage, tmp_path, monkeypatch, capsys, shared_cache):
     import time
 
     class SlowPlanner(FakeProvider):
@@ -781,7 +787,7 @@ def test_a_long_step_says_it_is_still_working_and_a_stall_leaves_a_stack(footage
     monkeypatch.setattr(progress, "HEARTBEAT_SECONDS", 0.3)
     monkeypatch.setattr(progress, "STALL_SECONDS", 0.9)
     out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--progress-json"]) == 0
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(shared_cache), "--progress-json"]) == 0
     log = (out / "roughcut.log").read_text()
     assert "still working (" in log and "): planning the edit with fake-model" in log
     assert "most recent call first" in log and "in complete_json" in log  # exactly where it was waiting
@@ -847,9 +853,9 @@ def test_the_paper_edit_converter_handles_what_the_report_writes():
     assert '<li class="todo">' in page and "<td>a / b</td>" in page and "|---" not in page
 
 
-def test_build_writes_a_readable_report_and_result_json(footage, tmp_path, fake):
+def test_build_writes_a_readable_report_and_result_json(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
-    result = pipeline.build(_opts(footage, out, tmp_path / "c"))
+    result = pipeline.build(_opts(footage, out, shared_cache))
     page = (out / "edit_report.html").read_text()
     assert page.startswith("<!doctype html>") and "@media print" in page and "Copy chapters" in page
     assert "footage - Rough Cut v1 (medium, fake-model)" in page
@@ -861,7 +867,7 @@ def test_build_writes_a_readable_report_and_result_json(footage, tmp_path, fake)
     assert (next((out / "history").glob("v1 *")) / "result.json").is_file()  # and v1's stays with v1
 
 
-def test_the_report_page_in_a_browser(footage, tmp_path, fake):
+def test_the_report_page_in_a_browser(footage, tmp_path, fake, shared_cache):
     from roughcut.graphics import launch_browser, renderer_problem
 
     if renderer_problem() is not None:
@@ -869,7 +875,7 @@ def test_the_report_page_in_a_browser(footage, tmp_path, fake):
     from playwright.sync_api import sync_playwright
 
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    pipeline.build(_opts(footage, out, shared_cache))
     chapters = (out / "edit_report.md").read_text().split("## Chapters\n\n```\n")[1].split("\n```")[0]
     with sync_playwright() as p:
         browser = launch_browser(p)
