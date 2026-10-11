@@ -26,7 +26,7 @@ def extract_frames(clip: Clip, cache: Cache) -> list[str]:
     m = clip.media
     frames = []
     for i, t in enumerate(sample_times(clip)):
-        dest = cache.path(m.fingerprint, f"frames/{i}.jpg")
+        dest = cache.path(m.fingerprint, f"frames-v2/{i}.jpg")  # v2: longest side 512 px
         if not dest.exists():
             ffmpeg_ops.extract_frame(Path(m.path), t, dest)
         if dest.exists():
@@ -48,7 +48,8 @@ def describe_clips(
     # Claude Code runs the same Claude models, so it shares descriptions with the API.
     family = "anthropic" if provider.name == "claude-code" else provider.name
     key = f"vision-{family}-{provider.model}.json".replace("/", "_")
-    visual_clips = [c for c in analysis.clips if c.media.has_video]
+    # Alternate exports of the same footage aren't looked at again (see share_with_copies).
+    visual_clips = [c for c in analysis.clips if c.media.has_video and not c.hidden]
     todo: list[Clip] = []
     for clip in visual_clips:
         cached = cache.get(clip.media.fingerprint, key)
@@ -57,6 +58,7 @@ def describe_clips(
         else:
             todo.append(clip)
     if not todo:
+        share_with_copies(analysis, cache, key)
         return warnings
 
     t0 = time.monotonic()
@@ -109,4 +111,18 @@ def describe_clips(
             warnings.extend(w)
             progress.stage("vision", f"Looking at {len(todo)} clips", current=done, total=len(batches))
     log(f"visual log done in {time.monotonic() - t0:.1f}s")
+    share_with_copies(analysis, cache, key)
     return warnings
+
+
+def share_with_copies(analysis: Analysis, cache: Cache, key: str) -> None:
+    """Hidden alternate exports take the kept clip's description, so their Final Cut keywords stay."""
+    for clip in analysis.clips:
+        if not clip.hidden or clip.visual:
+            continue
+        own = cache.get(clip.media.fingerprint, key)  # described on its own by an earlier run
+        kept = analysis.clip(clip.duplicate_of or "")
+        if own:
+            clip.visual = own
+        elif kept is not None and kept.visual:
+            clip.visual = {**kept.visual, "tags": list(kept.visual.get("tags", []))}
