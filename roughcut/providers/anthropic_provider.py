@@ -8,7 +8,8 @@ import os
 import re
 import time
 
-from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog
+from .. import progress
+from .base import ImagePart, Part, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, Usage, UsageLog
 
 DEFAULT_MODEL = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
@@ -109,6 +110,12 @@ def key_problem_hint(env: dict | None = None) -> str:
     )
 
 
+def out_of_credit(said: str) -> bool:
+    """The API's 400 for an empty prepaid balance or a reached workspace spend limit."""
+    s = said.lower()
+    return "credit balance" in s or ("usage limit" in s and "regain access" in s) or "spend limit" in s
+
+
 def refused_message(said: str, model: str) -> str:
     return (
         f"Anthropic accepted the key but refused the request ({said}). Check at console.anthropic.com that "
@@ -203,7 +210,7 @@ class AnthropicProvider:
         anthropic = self._anthropic
         output_config: dict = {"format": {"type": "json_schema", "schema": schema}}
         effort = effort or self.effort
-        if effort and not self.model.startswith("claude-haiku"):  # Haiku 4.5 rejects effort
+        if effort and not self.model.startswith("claude-haiku-4"):  # Haiku 4.5 rejects effort; Haiku 5.5 takes it
             output_config["effort"] = effort
         params = dict(
             model=self.model,
@@ -220,7 +227,8 @@ class AnthropicProvider:
 
         t0 = time.monotonic()
         try:
-            with self.client.beta.messages.stream(**params) as stream:
+            # external: the SDK's timeouts bound the request, so a long plan is not a stall
+            with progress.doing(f"waiting for {self.model} ({purpose})", external=True), self.client.beta.messages.stream(**params) as stream:
                 message = stream.get_final_message()
         except TypeError as e:  # the SDK found no credentials at all
             if "authentication" not in str(e).lower():
@@ -229,6 +237,12 @@ class AnthropicProvider:
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
             raise auth_error(e, self.model) from e
         except anthropic.BadRequestError as e:
+            said = _api_said(e)
+            if out_of_credit(said):
+                raise ProviderLimitError(
+                    f"Anthropic stopped the {purpose} request: {said} Add credit (or raise the workspace's spend limit) at "
+                    "console.anthropic.com → Plans & Billing."
+                ) from e
             if self.use_fallbacks and "fallback" in str(e).lower():
                 self.use_fallbacks = False
                 return self.complete_json(

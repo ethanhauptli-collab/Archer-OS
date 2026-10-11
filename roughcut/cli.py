@@ -8,7 +8,9 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, progress
@@ -20,11 +22,14 @@ def _read(path: str | None) -> str:
     return Path(path).expanduser().read_text(encoding="utf-8") if path else ""
 
 
-def _level(text: str) -> float | None:
+LEVEL_OFF = "off"  # --dialogue-level off: given, as opposed to left out (None)
+
+
+def _level(text: str) -> float | str:
     """--dialogue-level: LUFS (-16, -16LUFS) or off."""
     t = text.strip().lower().removesuffix("lufs").strip()
     if t in ("off", "none", "no"):
-        return None
+        return LEVEL_OFF
     try:
         value = float(t)
     except ValueError:
@@ -35,25 +40,25 @@ def _level(text: str) -> float | None:
 
 
 def _add_render_args(p: argparse.ArgumentParser) -> None:
-    from .timeline import DIALOGUE_LEVEL
-
-    g = p.add_argument_group("cut style")
-    g.add_argument("--style", choices=["tight", "medium", "loose"], default="medium", help="how aggressively pauses are trimmed (default: medium)")
-    g.add_argument("--keep-fillers", action="store_true", help="don't cut um/uh")
-    g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, or WxH@fps (default: from the footage)")
-    g.add_argument("--broll-db", type=float, default=-20.0, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
-    g.add_argument("--music-db", type=float, default=-14.0, help="music bed level in dB, relative to the dialogue (default: -14)")
+    # Defaults are None so `render` can tell "not given" (keep the saved run's setting) from a choice.
+    g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
+    g.add_argument("--style", choices=["tight", "medium", "loose"], help="how aggressively pauses are trimmed (default: medium)")
+    g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
+    g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
+    g.add_argument("--broll-db", type=float, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
+    g.add_argument("--music-db", type=float, help="music bed level in dB, relative to the dialogue (default: -14)")
     g.add_argument(
-        "--dialogue-level", type=_level, default=DIALOGUE_LEVEL, metavar="LUFS",
+        "--dialogue-level", type=_level, metavar="LUFS",
         help="match every clip's speech to this loudness in LUFS, e.g. -16 (default), -14 or -14LUFS; 'off' keeps clip levels as recorded",
     )
     g.add_argument(
-        "--fades", choices=["on", "off"], default="on",
+        "--fades", choices=["on", "off"],
         help="short de-click fades at audio edits and soft fades on B-roll nat sound (default: on); the music bed fades in and out either way",
     )
-    g.add_argument("--no-stringout", action="store_true", help="don't add the 'Stringout' project")
-    g.add_argument("--no-fill", action="store_true", help="leave narration without picture where the plan has no B-roll")
+    g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
+    g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
     p.add_argument("--name", help="project/event name (default: folder name)")
+    p.add_argument("--open", action="store_true", help="open the new cut in Final Cut Pro when it's done (Mac)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
 
 
@@ -107,6 +112,20 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`")
     r.add_argument("--preset", help="use a preset's pacing and format; flags you type win")
     _add_render_args(r)
+
+    rv = sub.add_parser("revise", help="re-plan the latest cut from your notes, as a new version (no re-transcription)")
+    rv.add_argument("out_dir", help="a folder written by `roughcut build`")
+    rv.add_argument("notes", nargs="?", default="", help='what to change, e.g. "tighter hook, drop the second Roy Choi line, more drone over the intro"')
+    rv.add_argument("--notes-file", help="read the notes from a text file")
+    rv.add_argument("--keep", action="append", default=[], metavar="IDS", help="segment or clip IDs the new cut must keep (comma-separated or repeated)")
+    rv.add_argument("--avoid", action="append", default=[], metavar="IDS", help="segment IDs, clip IDs or CLIP@start-end ranges to leave out")
+    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30 (default: the build's)")
+    rv.add_argument("--provider", choices=[p for p in PROVIDERS if p != "none"], help="who re-plans (default: the one that planned this cut)")
+    rv.add_argument("--model", help="model for the revision (default: the one that planned this cut)")
+    rv.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="reasoning effort (default: the build's)")
+    rv.add_argument("--graphics", action=argparse.BooleanOptionalAction, help="motion graphics (default: as in the build; unchanged ones are reused, not redesigned)")
+    rv.add_argument("--workers", type=int, default=4)
+    _add_render_args(rv)
 
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
@@ -401,9 +420,30 @@ def _print_doctor(r: dict) -> int:
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
 
 
+def _error_kind(e: BaseException) -> dict:
+    """For the app: a used-up plan or credit means "come back later", not "fix something"."""
+    from .providers import ProviderLimitError
+
+    return {"kind": "usage_limit"} if isinstance(e, ProviderLimitError) else {}
+
+
+def resume_command(e: BaseException) -> str | None:
+    """`roughcut render '<out_dir>'` when the run stopped after its plan was saved."""
+    out_dir = getattr(e, "plan_saved", None)
+    return f"roughcut render {shlex.quote(str(out_dir))}" if out_dir else None
+
+
+def resume_hint(e: BaseException) -> str | None:
+    command = resume_command(e)
+    if not command:
+        return None
+    return f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}"
+
+
 def _log_end(line: str) -> None:
     from .analyze import log_file_only, log_to
 
+    progress.stop_watch()
     log_file_only(line)
     log_to(None)
 
@@ -457,26 +497,130 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _print_doctor(report)
 
-    from .pipeline import Options, build, rerender, result_summary
-
     json_mode = bool(args.progress_json)
     progress.enable(json_mode)
+    # Only a real command line (not a test calling main()) takes over the process group.
+    restore = _install_stop_handlers(json_mode, own_group=argv is None)
+    awake = keep_awake()  # after setpgrp, so a cancel from the app stops it too
+    started = time.monotonic()
+    _OUTCOME.clear()
+    try:
+        return _run(args, json_mode)
+    finally:
+        if awake is not None:
+            _stop(awake)
+        _restore_handlers(restore)
+        if _OUTCOME and not json_mode and _interactive() and time.monotonic() - started >= NOTIFY_AFTER:
+            signal_done(_OUTCOME["text"])
 
-    common = dict(
-        name=args.name,
-        style=args.style,
-        keep_fillers=args.keep_fillers,
-        format=args.format,
-        broll_db=args.broll_db,
-        music_db=args.music_db,
-        dialogue_level=args.dialogue_level,
-        fades=args.fades == "on",
-        stringout=not args.no_stringout,
-        fill=not args.no_fill,
-    )
+
+# ------------------------------------------------------------------ walking away from a long run
+
+NOTIFY_AFTER = 60.0  # seconds: shorter runs finish while you're still watching
+_OUTCOME: dict = {}  # how the run ended, for the notification
+
+
+def keep_awake(popen=subprocess.Popen):
+    """macOS: keep the Mac from idle-sleeping (and from sleeping on power) until this process exits.
+
+    A MacBook that sleeps partway through drops the Claude request and wastes the run.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        return popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def _stop(proc) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:  # noqa: BLE001 - it exits with us anyway (-w)
+        pass
+
+
+def _applescript(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def signal_done(text: str, run=subprocess.run) -> None:
+    """The end of a long Terminal run: a bell (the Dock icon bounces) and, on a Mac, a notification banner."""
+    sys.stdout.write("\a")
+    sys.stdout.flush()
+    if sys.platform != "darwin":
+        return
+    script = f"display notification {_applescript(text[:220])} with title \"roughcut\""
+    try:
+        run(["osascript", "-e", script], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+FORMAT_FROM_FOOTAGE = ("auto", "footage", "from footage")
+# Cut settings the Mac app's Re-cut always conveys (RecutOptions.arguments()): with
+# --progress-json, `render` takes these from the command line, never from the saved run.
+APP_RECUT_FIELDS = ("style", "format", "keep_fillers", "stringout")
+
+
+def _run(args, json_mode: bool) -> int:
+    from .pipeline import Options, build, rerender, result_summary
+
+    # Only the cut settings given on the command line; the rest are defaults (build) or the saved run's (render).
+    given = {
+        k: v
+        for k, v in dict(
+            style=args.style,
+            keep_fillers=args.keep_fillers,
+            format=args.format,
+            broll_db=args.broll_db,
+            music_db=args.music_db,
+            stringout=args.stringout,
+            fill=args.fill,
+            dialogue_level=args.dialogue_level,
+            fades=None if args.fades is None else args.fades == "on",
+        ).items()
+        if v is not None
+    }
+    if str(args.format or "").strip().lower() in FORMAT_FROM_FOOTAGE:
+        given["format"] = None  # given, and it means "the footage's own format", e.g. after a vertical build
+    if args.dialogue_level == LEVEL_OFF:
+        given["dialogue_level"] = None  # given: keep clip levels as recorded
+    if json_mode and args.command == "render":
+        # The app's Re-cut sends its whole form: a toggle it leaves off means off and
+        # its "From footage" format sends no flag, so neither falls back to the saved run.
+        default = Options(inputs=[])
+        for f in APP_RECUT_FIELDS:
+            given.setdefault(f, getattr(default, f))
+    common = dict(name=args.name, **given)
     try:
         if args.command == "render":
-            result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common))
+            result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common), overrides=set(given))
+        elif args.command == "revise":
+            from .pipeline import revise
+
+            notes = "\n\n".join(t.strip() for t in (args.notes, _read(args.notes_file)) if t.strip())
+            if not (notes or args.keep or args.avoid or args.target):
+                raise ValueError('Say what to change, e.g.  roughcut revise <folder> "tighter hook, more drone over the intro"')
+            model = args.model
+            if model and args.provider in (None, "anthropic", "claude-code"):
+                from .providers.anthropic_provider import resolve_model
+
+                model = resolve_model(model)
+            result = revise(
+                Path(args.out_dir),
+                notes,
+                Options(inputs=[], workers=args.workers, **common),
+                keep=args.keep,
+                avoid=args.avoid,
+                overrides=set(given),
+                provider=args.provider,
+                model=model,
+                effort=args.effort,
+                target_seconds=parse_duration(args.target) if args.target else None,
+                graphics=args.graphics,
+            )
         else:
             if args.provider in ("anthropic", "claude-code"):
                 from .providers.anthropic_provider import resolve_model
@@ -515,22 +659,40 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = build(opts)
     except (ProviderError, ValueError, RuntimeError, OSError) as e:
+        hint = resume_hint(e)
         print(f"roughcut: {e}", file=sys.stderr)
-        progress.emit("error", message=str(e))
-        _log_end(f"STOPPED: {e}")
+        if hint:
+            print(hint, file=sys.stderr)
+        progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}), **_error_kind(e))
+        _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
+        _OUTCOME["text"] = f"Stopped: {e}"
         return 1
-    except KeyboardInterrupt:
-        _log_end("STOPPED: interrupted (Ctrl-C)")
+    except KeyboardInterrupt as e:
+        hint = resume_hint(e)
+        if hint:
+            print(f"\n{hint}", file=sys.stderr)
+        _log_end("STOPPED: interrupted (Ctrl-C)" + (f"\n{hint}" if hint else ""))
         raise
     except Exception as e:  # a bug: tell the app, then show the traceback
         progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}")
         import traceback
 
-        _log_end("STOPPED by a bug:\n" + traceback.format_exc())
+        hint = resume_hint(e)
+        if hint:
+            print(hint, file=sys.stderr)
+        _log_end("STOPPED by a bug:\n" + traceback.format_exc() + (f"\n{hint}" if hint else ""))
+        _OUTCOME["text"] = f"Stopped by an unexpected error ({type(e).__name__}); details in roughcut.log"
         raise
     _log_end(f"FINISHED: {result.fcpxml.name} and {result.report.name} written")
+    _OUTCOME["text"] = (
+        f"Only the stringout: the AI step failed ({seconds_to_clock(result.timeline.seconds)})" if result.fell_back
+        else f"{result.project or result.timeline.name} is ready ({seconds_to_clock(result.timeline.seconds)})"
+    )
+    opened = open_in_final_cut(result.fcpxml) if args.open else None
 
     if json_mode:
+        if opened:
+            progress.emit("log", message=opened)
         progress.emit("done", result=result_summary(result))
         return 3 if result.fell_back else 0
 
@@ -549,14 +711,136 @@ def main(argv: list[str] | None = None) -> int:
     for w in result.warnings:
         if "almost no pauses" in w:
             print(f"  ! {w}")
+    for line in summary_lines(result.summary):
+        print(line)
     print(f"FCPXML:    {result.fcpxml}")
-    print(f"Report:    {result.report}")
+    print(f"Report:    {result.report.with_suffix('.html')}  (Markdown: {result.report.name})")
     preview = result.out_dir / "graphics" / "preview.html"
     if any(c.kind == "graphic" for c in tl.connected) and preview.is_file():
         print(f"Graphics:  {preview}")
-    print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
-    print(f"Then open the project \"{tl.name}\" in the new event. The clip itself in the browser stays your untouched original.")
+    if result.version > 1:
+        print(f"This is version {result.version}; earlier cuts are in {result.out_dir / 'history'}.")
+    if opened:
+        print(f"\n{opened}")
+    else:
+        print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
+    print(f"Then open the project \"{result.project or tl.name}\" in the event \"{result.event}\". The clips in the browser stay your untouched originals.")
     return 3 if result.fell_back else 0
+
+
+def summary_lines(summary: dict) -> list[str]:
+    """What made it into the cut, what was left out, and what the model calls cost: before opening the report."""
+    from .providers import describe_cost
+
+    if not summary:
+        return []
+    made, left = [], []
+    vis = summary.get("visual_log")
+    if vis and vis.get("total"):
+        (made if vis["described"] == vis["total"] else left).append(
+            f"visual log {vis['described']} of {vis['total']} clips" + ("" if vis["described"] == vis["total"] else " described (the rest are in Warnings)")
+        )
+    g = summary.get("graphics")
+    if g is not None:
+        if g.get("note"):
+            left.append(f"graphics: {g['note']}")
+        elif g["planned"]:
+            text = f"graphics {g['rendered']} of {g['planned']} on the timeline"
+            why = []
+            if g["placed"] < g["planned"]:
+                why.append(f"{g['planned'] - g['placed']} couldn't be placed on their words")
+            if g["rendered"] < g["placed"]:
+                why.append(f"{g['placed'] - g['rendered']} didn't design or render")
+            (left if why else made).append(text + (f" ({'; '.join(why)}; see Warnings)" if why else ""))
+    skipped = summary.get("skipped") or {}
+    files = skipped.get("files") or []
+    if files:
+        shown = ", ".join(files[:3]) + (f" and {len(files) - 3} more" if len(files) > 3 else "")
+        left.append(f"{len(files)} file{'s' if len(files) != 1 else ''} couldn't be read ({shown})")
+    if skipped.get("plan_refs"):
+        n = skipped["plan_refs"]
+        left.append(f"{n} plan reference{'s' if n != 1 else ''} dropped or fixed (see Warnings)")
+    lines = []
+    if made:
+        lines.append("In the cut: " + "; ".join(made))
+    if left:
+        lines.append("Left out:   " + "; ".join(left))
+    cost = describe_cost(summary.get("usage") or {})
+    if cost:
+        lines.append("AI usage:   " + cost)
+    return lines
+
+
+def open_in_final_cut(path: Path, run=subprocess.run) -> str:
+    """--open: hand the new FCPXML to Final Cut Pro (macOS), else to whatever opens .fcpxml files."""
+    if sys.platform != "darwin":
+        return "--open only works on a Mac; import the .fcpxml with File > Import > XML... in Final Cut Pro."
+    for cmd, said in (
+        (["open", "-a", "Final Cut Pro", str(path)], "Opened in Final Cut Pro: pick a library in the import window."),
+        (["open", str(path)], "Opened with the app your Mac uses for .fcpxml files."),
+    ):
+        try:
+            if run(cmd, capture_output=True, timeout=60).returncode == 0:
+                return said
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return "Couldn't open Final Cut Pro automatically: import the .fcpxml with File > Import > XML..."
+
+
+def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
+    """Log how the run ended when the app cancels it (SIGTERM) or Terminal closes (SIGHUP).
+
+    Under the Mac app (--progress-json) roughcut leads its own process group,
+    so cancelling also stops the `claude`, ffmpeg and browser processes it started.
+    A signal the process was started ignoring (`nohup roughcut build ...`) stays ignored.
+    """
+    import signal
+
+    in_group = False
+    if json_mode and own_group and hasattr(os, "setpgrp"):
+        try:
+            os.setpgrp()
+            in_group = True
+        except OSError:
+            pass
+
+    def stop(signum, frame):  # noqa: ARG001
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)  # the group signal below reaches us too
+        except (ValueError, OSError):
+            pass
+        reason = "cancelled" if signum == signal.SIGTERM else "the Terminal window was closed"
+        _log_end(f"STOPPED: {reason}")
+        if in_group:
+            try:
+                os.killpg(0, signal.SIGTERM)
+            except OSError:
+                pass
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    previous = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            if signal.getsignal(sig) == signal.SIG_IGN:
+                continue  # started with nohup (or told to ignore it): closing Terminal must not stop the run
+            previous[sig] = signal.signal(sig, stop)
+        except (ValueError, OSError):  # not the main thread
+            pass
+    return previous
+
+
+def _restore_handlers(previous: dict) -> None:
+    import signal
+
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+        except (ValueError, OSError, TypeError):
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover

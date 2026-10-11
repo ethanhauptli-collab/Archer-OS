@@ -49,6 +49,8 @@ def test_build_progress_stream(footage, tmp_path, capsys, monkeypatch):
     assert r["title"] == "Mountain Day" and r["sections"][:3] == ["Cold open", "Heading out", "Wrap"]
     assert r["rough_seconds"] > 0 and r["stringout_seconds"] > 0 and r["edits"] > 0 and r["broll"] >= 1
     assert r["fell_back"] is False and any("V09.S001" in w for w in r["warnings"])
+    # result.json in the output folder is the same payload, for a recent-runs list in the app.
+    assert json.loads((out / "result.json").read_text()) == r and Path(r["report_html"]).is_file()
 
 
 def test_render_progress_stream(footage, tmp_path, capsys, monkeypatch):
@@ -126,6 +128,17 @@ def test_swift_fixture_matches_the_cli_contract():
 
     live = result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None))
     assert set(done["result"]) == set(live)
+
+
+def test_done_payload_additions_keep_their_shape():
+    """Keys added after the app's first version: what the Swift side should decode (all optional there)."""
+    fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "progress-sample.jsonl"
+    r = [json.loads(ln) for ln in fixture.read_text().splitlines() if ln.strip()][-1]["result"]
+    assert isinstance(r["version"], int) and r["project"].startswith("Trip - Rough Cut v") and r["event"].startswith("Trip (")
+    assert r["graphics"] is None or set(r["graphics"]) == {"planned", "placed", "rendered", "note"}
+    assert set(r["visual_log"]) == {"described", "total"}
+    assert set(r["skipped"]) == {"files", "plan_refs"}
+    assert set(r["usage"]) == {"calls", "dollars", "by_purpose", "calls_by_purpose", "subscription_calls", "unpriced_calls"}
 
 
 def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):

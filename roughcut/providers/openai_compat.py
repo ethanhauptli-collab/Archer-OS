@@ -10,6 +10,7 @@ import base64
 import json
 import time
 
+from .. import progress
 from .base import ImagePart, Part, ProviderAuthError, ProviderError, TextPart, Usage, UsageLog, extract_json
 
 
@@ -92,11 +93,12 @@ class OpenAICompatProvider:
         for sys_text, extra in attempts:
             t0 = time.monotonic()
             try:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "system", "content": sys_text}, {"role": "user", "content": content}],
-                    **extra,
-                )
+                with progress.doing(f"waiting for {self.model} ({purpose})", external=True):  # the client's own timeout bounds it
+                    resp = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "system", "content": sys_text}, {"role": "user", "content": content}],
+                        **extra,
+                    )
             except Exception as e:  # servers disagree on error types; try the next mode
                 if _is_auth_error(e):
                     raise ProviderAuthError(f"{self.name} rejected the API key: {e}") from e

@@ -95,27 +95,30 @@ def test_build_renders_graphics_above_the_footage_and_recut_reuses_them(footage,
     assert '"kind": "kinetic_caption"' in design["parts"][-1].text and "640x360" in design["parts"][-1].text
 
     movs = sorted((out / "graphics").glob("*.mov"))
-    assert [m.name for m in movs] == ["G01-kinetic-caption.mov", "G02-title-card.mov"]
+    assert [m.name.rsplit("-", 1)[0] for m in movs] == ["G01-kinetic-caption", "G02-title-card"]  # + design digest
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,pix_fmt,width,height", "-of", "json", str(movs[0])], capture_output=True, text=True)
     stream = json.loads(probe.stdout)["streams"][0]
     assert stream["codec_name"] == "prores" and stream["pix_fmt"].startswith("yuva") and stream["width"] == 640
 
     validate_dtd(result.fcpxml)
     xml = result.fcpxml.read_text()
-    assert 'name="G01-kinetic-caption"' in xml and "Graphics" in xml
+    assert 'name="G01-kinetic-caption-' in xml and "Graphics" in xml
     broll_lanes = [c.lane for c in result.timeline.connected if c.kind == "broll"]
     graphic_lanes = [c.lane for c in result.timeline.connected if c.kind == "graphic"]
     assert len(graphic_lanes) == 2 and min(graphic_lanes) > max(broll_lanes, default=0)
     report = result.report.read_text()
     assert "## Motion graphics" in report and "Heading Out" in report
 
-    # Hand-edit one design; a re-cut re-renders that one only.
+    # Hand-edit one design; a re-cut re-renders that one only, to a new file:
+    # the first version (now in history/) keeps the clip it was imported with.
     untouched = movs[0].stat().st_mtime_ns
     html = out / "graphics" / "G02-title-card.html"
     html.write_text(html.read_text().replace("#F26B21", "#2155F2"))
-    before = movs[1].stat().st_mtime_ns
     recut = pipeline.rerender(out, pipeline.Options(inputs=[], format="640x360"))
-    assert movs[0].stat().st_mtime_ns == untouched and movs[1].stat().st_mtime_ns != before
+    after = sorted((out / "graphics").glob("*.mov"))
+    assert movs[0].stat().st_mtime_ns == untouched and movs[1] in after
+    new = [m for m in after if m not in movs]
+    assert len(new) == 1 and new[0].name.startswith("G02-title-card-") and new[0].name in recut.fcpxml.read_text()
     validate_dtd(recut.fcpxml)
 
 

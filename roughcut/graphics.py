@@ -454,11 +454,14 @@ def _design_request(
 def design(
     provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     warnings: list[str], batch: int = 4, workers: int = 3, keep_out: dict[str, float] | None = None,
+    house_style: str = "", found: dict | None = None,
 ) -> dict[str, str]:
     """HTML for each graphic, by ID.
 
     The first batch is designed on its own and sets the look; the other batches are then
     designed in parallel, each given that house style and one finished design to match.
+    `house_style` is a design system already established for this video (a revision's new
+    graphics match it); the one in use at the end goes into found["house_style"].
     """
     from .providers import ImagePart, ProviderAuthError, ProviderError, TextPart
 
@@ -511,20 +514,22 @@ def design(
         return got
 
     # The look is set by the first batch that comes back; then the rest go out together.
-    house, reference = "", None
+    house, reference = house_style, None
     pending = list(groups)
     while pending:
         group = pending.pop(0)
-        answer = ask(group, "", None)
+        answer = ask(group, house_style, None)
         got = take(*answer)
         if got:
-            house = str(answer[1].get("style") or "")
+            house = house_style or str(answer[1].get("style") or "")
             first = next((g for g in group if g.id in got and g.spec.kind != "title_card"), None) or next(g for g in group if g.id in got)
             reference = (first.id, first.spec.kind, got[first.id])
             break
     for answer in _in_background(lambda group: ask(group, house, reference), pending, workers):
         take(*answer)
     log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
+    if found is not None and house:
+        found["house_style"] = house
     return html
 
 
@@ -835,25 +840,28 @@ def _digest(html: str, frames: int, rate: str, width: int, height: int) -> str:
 def unchanged(placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, previous: dict) -> dict[str, Path]:
     """Rendered clips that still match their design and length, by graphic ID.
 
-    A clip counts when the previous manifest says this very file was rendered ("rendered") from
-    the same digest. Manifests from before "rendered" existed used another digest, so their
-    graphics re-render once.
+    A clip's file name carries the digest of the design, length, size and renderer it was made
+    from, and a render only gets that name once it's complete, so an existing file is reusable.
+    Clips from before digest names re-render once (their old files stay for cuts already in
+    Final Cut).
     """
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
-    old = {g.get("id"): g for g in previous.get("graphics", []) if isinstance(g, dict)}
     found = {}
     for g in placed:
-        out = folder / f"{g.slug}.mov"
-        entry = old.get(g.id) or {}
-        if (
-            g.id in html
-            and out.exists()
-            and entry.get("file") == f"graphics/{out.name}"
-            and entry.get("rendered") == _digest(html[g.id], g.frames, rate, tl.width, tl.height)
-        ):
+        if g.id not in html:
+            continue
+        digest = _digest(html[g.id], g.frames, rate, tl.width, tl.height)
+        out = clip_path(folder, g, digest)
+        if out.exists():
             found[g.id] = out
     return found
+
+
+def clip_path(folder: Path, g: PlacedGraphic, digest: str) -> Path:
+    """The digest is in the name: a changed graphic is a new file, so a cut already imported into
+    Final Cut keeps the clip it was made with."""
+    return folder / f"{g.slug}-{digest[:6]}.mov"
 
 
 def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path) -> None:
@@ -917,7 +925,8 @@ def render(
         notes[gid] = [str(n) for n in old.get(gid, {}).get("notes") or []]
     jobs = [
         {"id": g.id, "slug": g.slug, "kind": g.spec.kind, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
-         "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "keep_out": keep_out, "out": str(folder / f"{g.slug}.mov")}
+         "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "keep_out": keep_out,
+         "out": str(clip_path(folder, g, _digest(html[g.id], g.frames, rate, tl.width, tl.height)))}
         for g in placed
         if g.id in html and g.id not in done
     ]
@@ -1073,9 +1082,11 @@ def _read_manifest(out_dir: Path) -> dict:
 
 def write_manifest(
     out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str,
-    notes: dict[str, list[str]] | None = None,
+    notes: dict[str, list[str]] | None = None, house_style: str = "",
 ) -> None:
-    """graphics.json: every placed graphic, its design, and the clip rendered from it (if any)."""
+    """graphics.json: every placed graphic, its design, and the clip rendered from it (if any).
+
+    `house_style` is the designer's description of its design system, for later designs to match."""
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
     entries = []
@@ -1092,9 +1103,10 @@ def write_manifest(
         if notes and notes.get(g.id):
             entry["notes"] = notes[g.id]
         entries.append(entry)
-    tmp = out_dir / (MANIFEST + ".tmp")
-    tmp.write_text(json.dumps({"style": style, "graphics": entries}, indent=1))
-    tmp.replace(out_dir / MANIFEST)
+    from .versions import atomic_write
+
+    data = {"style": style, **({"house_style": house_style} if house_style else {}), "graphics": entries}
+    atomic_write(out_dir / MANIFEST, json.dumps(data, indent=1))
 
 
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
@@ -1134,12 +1146,14 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
 def make(
     provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
+    house_style: str = "",
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 
     keep_out overrides the strips of a vertical frame that designs stay out of (VERTICAL_KEEP_OUT).
     With a `logo`, designs may show it as <img src="brand:logo">; the saved HTML carries it inline.
     `look` is approved designs (.html) from an earlier run for new ones to match.
+    `house_style`: the design system described when this video's graphics were first designed (kept in graphics.json).
     """
     from .presets import design_style, inline_logo
 
@@ -1149,6 +1163,7 @@ def make(
         return [], [], warnings
     look_under(placed, tl, analysis)
     folder = out_dir / "graphics"
+    found = {"house_style": house_style}
     if saved_html is not None:
         progress.stage("graphics", f"Re-timing {len(placed)} graphics")
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
@@ -1159,7 +1174,7 @@ def make(
         progress.stage("graphics", f"Designing {len(placed)} graphics")
         html = design(
             provider, placed, analysis, tl.frame_duration, brief=brief, style=design_style(style, logo, look), width=tl.width, height=tl.height,
-            warnings=warnings, keep_out=keep_out,
+            warnings=warnings, keep_out=keep_out, house_style=house_style, found=found,
         )
         html = {k: inline_logo(v, logo) for k, v in html.items()}
     # Every design is on disk before rendering starts, and each render is recorded as it finishes:
@@ -1169,14 +1184,14 @@ def make(
     save_designs(placed, html, folder)
     kept = unchanged(placed, html, folder, tl, previous)
     notes: dict[str, list[str]] = {k: v for k, v in _old_notes(previous).items() if k in kept}
-    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes)
+    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"])
 
     def record(done: dict[str, Path]) -> None:
-        write_manifest(out_dir, placed, done, html, tl, style, notes=notes)
+        write_manifest(out_dir, placed, done, html, tl, style, notes=notes, house_style=found["house_style"])
 
     files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
     clips = attach(tl, placed, files, warnings)
-    write_manifest(out_dir, placed, files, html, tl, style, notes=notes)
+    write_manifest(out_dir, placed, files, html, tl, style, notes=notes, house_style=found["house_style"])
     _put_aside_old_designs(folder, placed, html)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     try:
