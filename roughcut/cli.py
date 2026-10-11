@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, progress
@@ -367,10 +368,61 @@ def main(argv: list[str] | None = None) -> int:
     progress.enable(json_mode)
     # Only a real command line (not a test calling main()) takes over the process group.
     restore = _install_stop_handlers(json_mode, own_group=argv is None)
+    awake = keep_awake()  # after setpgrp, so a cancel from the app stops it too
+    started = time.monotonic()
+    _OUTCOME.clear()
     try:
         return _run(args, json_mode)
     finally:
+        if awake is not None:
+            _stop(awake)
         _restore_handlers(restore)
+        if _OUTCOME and not json_mode and _interactive() and time.monotonic() - started >= NOTIFY_AFTER:
+            signal_done(_OUTCOME["text"])
+
+
+# ------------------------------------------------------------------ walking away from a long run
+
+NOTIFY_AFTER = 60.0  # seconds: shorter runs finish while you're still watching
+_OUTCOME: dict = {}  # how the run ended, for the notification
+
+
+def keep_awake(popen=subprocess.Popen):
+    """macOS: keep the Mac from idle-sleeping (and from sleeping on power) until this process exits.
+
+    A MacBook that sleeps partway through drops the Claude request and wastes the run.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        return popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def _stop(proc) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:  # noqa: BLE001 - it exits with us anyway (-w)
+        pass
+
+
+def _applescript(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def signal_done(text: str, run=subprocess.run) -> None:
+    """The end of a long Terminal run: a bell (the Dock icon bounces) and, on a Mac, a notification banner."""
+    sys.stdout.write("\a")
+    sys.stdout.flush()
+    if sys.platform != "darwin":
+        return
+    script = f"display notification {_applescript(text[:220])} with title \"roughcut\""
+    try:
+        run(["osascript", "-e", script], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _run(args, json_mode: bool) -> int:
@@ -459,6 +511,7 @@ def _run(args, json_mode: bool) -> int:
             print(hint, file=sys.stderr)
         progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}), **_error_kind(e))
         _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
+        _OUTCOME["text"] = f"Stopped: {e}"
         return 1
     except KeyboardInterrupt as e:
         hint = resume_hint(e)
@@ -474,8 +527,13 @@ def _run(args, json_mode: bool) -> int:
         if hint:
             print(hint, file=sys.stderr)
         _log_end("STOPPED by a bug:\n" + traceback.format_exc() + (f"\n{hint}" if hint else ""))
+        _OUTCOME["text"] = f"Stopped by an unexpected error ({type(e).__name__}); details in roughcut.log"
         raise
     _log_end(f"FINISHED: {result.fcpxml.name} and {result.report.name} written")
+    _OUTCOME["text"] = (
+        f"Only the stringout: the AI step failed ({seconds_to_clock(result.timeline.seconds)})" if result.fell_back
+        else f"{result.project or result.timeline.name} is ready ({seconds_to_clock(result.timeline.seconds)})"
+    )
     opened = open_in_final_cut(result.fcpxml) if args.open else None
 
     if json_mode:

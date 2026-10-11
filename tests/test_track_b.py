@@ -893,3 +893,64 @@ def test_the_report_page_in_a_browser(footage, tmp_path, fake, shared_cache):
                 page.close()
         finally:
             browser.close()
+
+
+# ---------------------------------------------------------------- T19: keep the Mac awake, say when it's done
+
+
+class _FakeCaffeinate:
+    started: list = []
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd, self.terminated = cmd, False
+        _FakeCaffeinate.started.append(self)
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_a_run_on_a_mac_keeps_it_awake_and_says_when_it_is_done(footage, tmp_path, monkeypatch, capsys, shared_cache):
+    import os
+    import sys
+
+    from roughcut import cli
+
+    _FakeCaffeinate.started = []
+    notified = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    real_keep_awake, real_signal_done = cli.keep_awake, cli.signal_done
+    monkeypatch.setattr(cli, "keep_awake", lambda: real_keep_awake(popen=_FakeCaffeinate))
+    monkeypatch.setattr(cli, "signal_done", lambda text: real_signal_done(text, run=lambda cmd, **k: notified.append(cmd)))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli, "NOTIFY_AFTER", 0.0)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--name", "f", "--provider", "none", "--transcriber", "none", "--cache-dir", str(shared_cache)]) == 0
+    (awake,) = _FakeCaffeinate.started
+    assert awake.cmd == ["caffeinate", "-i", "-s", "-w", str(os.getpid())] and awake.terminated
+    assert capsys.readouterr().out.endswith("\a")  # the bell: Terminal bounces its Dock icon
+    (cmd,) = notified
+    assert cmd[:2] == ["osascript", "-e"] and 'display notification "f - Rough Cut v1 (medium, no AI) is ready (0:' in cmd[2]
+
+    notified.clear()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert main(["build", str(empty), "-o", str(tmp_path / "o2"), "--provider", "none", "--transcriber", "none"]) == 1
+    assert 'display notification "Stopped: No media files found.' in notified[0][2]
+
+
+def test_no_bell_for_the_app_or_a_quick_run(footage, tmp_path, monkeypatch, capsys, shared_cache):
+    from roughcut import cli
+
+    notified = []
+    monkeypatch.setattr(cli, "signal_done", lambda text: notified.append(text))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(shared_cache)]) == 0
+    monkeypatch.setattr(cli, "NOTIFY_AFTER", 0.0)
+    assert main(["render", str(out), "--progress-json"]) == 0  # the app has its own notification
+    assert notified == []
+    assert cli.keep_awake() is None  # not a Mac: nothing to start
+    assert cli._applescript('say "hi" \\ there') == '"say \\"hi\\" \\\\ there"'
