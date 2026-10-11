@@ -7,6 +7,10 @@ designs every graphic as a self-contained HTML/CSS animation in one
 consistent style. A headless browser then renders each one frame by frame
 (every animation is paused and seeked to the frame's time) and ffmpeg
 encodes ProRes 4444 with alpha, which Final Cut layers above the footage.
+Every browser step has a deadline: a design that freezes is left out with
+a warning instead of hanging the run. The designs and graphics.json are
+saved before rendering starts, so `roughcut render` can finish a run that
+stopped there without asking the model again.
 
 The HTML is saved next to each rendered clip. Edit it and run
 `roughcut render` to re-render only what changed.
@@ -14,6 +18,7 @@ The HTML is saved next to each rendered clip. Edit it and run
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -21,7 +26,10 @@ import re
 import shlex
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -33,6 +41,15 @@ from .timeline import ConnectedClip, Timeline
 
 LEAD = 0.12  # a graphic starts animating in just before its words
 MANIFEST = "graphics.json"
+
+# ProRes 4444 with alpha, which Final Cut layers above the footage.
+ENCODER = ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]
+
+# Every browser step has a deadline, so a design that freezes is left out instead of hanging the run.
+FRAME_TIMEOUT = 15.0  # seconds one frame's seek may take
+STEP_TIMEOUT = 30.0  # loading the design, drawing a frame
+BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BUDGET_PER_FRAME x frames) seconds
+PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
 _SEEK_JS = "t => { document.getAnimations().forEach(a => { a.pause(); a.currentTime = t * 1000; }); if (typeof window.seek === 'function') window.seek(t); }"
 
 
@@ -244,16 +261,22 @@ def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fracti
 
     html: dict[str, str] = {}
     house = ""
+    t_all = time.monotonic()
+    batches = (len(placed) + batch - 1) // batch
+    log(f"designing {len(placed)} graphics in {batches} request(s)")
     for n in range(0, len(placed), batch):
         group = placed[n : n + batch]
+        ids = _ids(group)
         progress.stage("graphics", f"Designing {len(placed)} graphics", current=n, total=len(placed))
         request = _design_request(group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house)
+        t0 = time.monotonic()
         try:
             raw = provider.complete_json(DESIGN_SYSTEM, [TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
         except ProviderAuthError:
             raise
         except ProviderError as e:
             warnings.append(f"graphics design failed for {', '.join(g.id for g in group)}: {e}")
+            log(f"designing {ids} failed after {_took(time.monotonic() - t0)}: {e}")
             continue
         house = house or str(raw.get("style") or "")
         for entry in raw.get("graphics") or []:
@@ -262,7 +285,13 @@ def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fracti
         missing = [g.id for g in group if g.id not in html]
         if missing:
             warnings.append(f"no design came back for {', '.join(missing)}; skipped")
+        log(f"designed {ids} in {_took(time.monotonic() - t0)}" + (f" ({', '.join(missing)} missing)" if missing else ""))
+    log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
     return html
+
+
+def _ids(group: list[PlacedGraphic]) -> str:
+    return group[0].id if len(group) == 1 else f"{group[0].id}-{group[-1].id}"
 
 
 # ------------------------------------------------------------------ rendering
@@ -281,20 +310,35 @@ def _chromium_paths() -> list[str]:
     return [p for p in paths if p and os.path.isfile(p) and os.access(p, os.X_OK)]
 
 
-def launch_browser(p):
+def _launch_options():
     """Playwright's own Chromium, then an installed Chrome/Edge, then known paths."""
-    errors = []
-    for kwargs in ({}, {"channel": "chrome"}, {"channel": "msedge"}):
+    yield {}
+    yield {"channel": "chrome"}
+    yield {"channel": "msedge"}
+    for path in _chromium_paths():
+        yield {"executable_path": path}
+
+
+def _no_browser() -> GraphicsError:
+    return GraphicsError(f"No browser to render graphics with. Install Google Chrome, or run:  {_PY} -m playwright install chromium")
+
+
+def launch_browser(p):
+    for kwargs in _launch_options():
         try:
             return p.chromium.launch(**kwargs)
-        except Exception as e:  # noqa: BLE001 - try the next browser
-            errors.append(str(e).strip().splitlines()[0][:160])
-    for path in _chromium_paths():
+        except Exception:  # noqa: BLE001 - try the next browser
+            continue
+    raise _no_browser()
+
+
+async def _launch_browser_async(p):
+    for kwargs in _launch_options():
         try:
-            return p.chromium.launch(executable_path=path)
-        except Exception as e:  # noqa: BLE001
-            errors.append(str(e).strip().splitlines()[0][:160])
-    raise GraphicsError(f"No browser to render graphics with. Install Google Chrome, or run:  {_PY} -m playwright install chromium")
+            return await p.chromium.launch(**kwargs)
+        except Exception:  # noqa: BLE001 - try the next browser
+            continue
+    raise _no_browser()
 
 
 # Spelled with this interpreter's path: `pip` alone isn't on PATH when the venv isn't activated.
@@ -318,86 +362,239 @@ def renderer_problem() -> str | None:
     return None
 
 
-def _render_one(job: dict) -> dict:
-    """Render one graphic to ProRes 4444 with alpha. Runs in a worker thread with its own browser."""
-    from playwright.sync_api import sync_playwright
+class _Stuck(Exception):
+    """A browser step didn't finish in time."""
 
+
+class _Stopped(Exception):
+    """The run was interrupted (Ctrl-C)."""
+
+
+_STOP = threading.Event()  # set on Ctrl-C: every render stops at its next frame
+
+
+def _first_line(e: BaseException) -> str:
+    return (str(e).strip().splitlines() or [type(e).__name__])[0][:300]
+
+
+def _note(notes: list[str], text: str) -> None:
+    text = " ".join(str(text).split())[:200]
+    if text and text not in notes and len(notes) < 20:
+        notes.append(text)
+
+
+async def _bounded(awaitable, seconds: float, what: str):
+    """Await with a deadline kept on our side, so a page whose main thread is stuck can't hang us."""
+    try:
+        return await asyncio.wait_for(awaitable, seconds)
+    except Exception as e:
+        if isinstance(e, asyncio.TimeoutError) or type(e).__name__ == "TimeoutError":  # ours, or Playwright's own deadline
+            raise _Stuck(what) from None
+        raise
+
+
+async def _evaluate(cdp, expression: str, seconds: float, what: str):
+    """Run JS in the page. Chrome stops it after `seconds`; if the page never answers, so do we."""
+    try:
+        reply = await _bounded(
+            cdp.send("Runtime.evaluate", {"expression": expression, "returnByValue": True, "timeout": int(seconds * 1000)}), seconds + 5, what
+        )
+    except _Stuck:
+        raise
+    except Exception as e:  # noqa: BLE001 - Chrome reports the stopped script as a protocol error
+        if "terminated" in str(e).lower():
+            raise _Stuck(what) from None
+        raise
+    if reply.get("exceptionDetails"):
+        d = reply["exceptionDetails"]
+        raise RuntimeError(((d.get("exception") or {}).get("description") or d.get("text") or "script error").splitlines()[0][:200])
+    return (reply.get("result") or {}).get("value")
+
+
+async def _block(route) -> None:
+    await route.abort()  # designs may not fetch anything
+
+
+async def _render_async(job: dict) -> dict:
+    from playwright.async_api import async_playwright
+
+    gid, frames, fps = job["id"], job["frames"], job["fps"]
     out = Path(job["out"])
     tmp = out.with_suffix(".partial.mov")
-    console: list[str] = []
     cw, ch, scale = job["canvas"]
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "image2pipe", "-framerate", job["rate"], "-i", "-",
-        "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0",
-        "-r", job["rate"], str(tmp),
-    ]
-    try:
-        with sync_playwright() as p:
-            browser = launch_browser(p)
-            try:
-                page = browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
-                page.route("**/*", lambda route: route.abort())  # designs may not fetch anything
-                page.on("pageerror", lambda e: console.append(str(e)[:200]))
-                page.set_content(job["html"], wait_until="load")
-                ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    frame_timeout = job.get("frame_timeout") or FRAME_TIMEOUT
+    budget = job.get("budget") or max(BUDGET_MIN, BUDGET_PER_FRAME * frames)
+    notes: list[str] = []  # script errors from the page, deduplicated
+    result = {"id": gid, "error": None, "notes": notes, "seconds": 0.0}
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "image2pipe", "-framerate", job["rate"], "-i", "-", *ENCODER, "-r", job["rate"], str(tmp)]
+    t0 = time.monotonic()
+    ff = None
+    # A file, not a pipe: ffmpeg can't block on a full stderr pipe while we're still feeding it frames.
+    with tempfile.TemporaryFile() as ff_err:
+        try:
+            async with async_playwright() as p:
+                browser = await _launch_browser_async(p)
                 try:
-                    for i in range(job["frames"]):
-                        page.evaluate(_SEEK_JS, i / job["fps"])
-                        ff.stdin.write(page.screenshot(omit_background=True, type="png", caret="hide"))
+                    page = await browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
+                    page.set_default_timeout(STEP_TIMEOUT * 1000)
+                    await page.route("**/*", _block)
+                    page.on("pageerror", lambda e: _note(notes, f"script error: {e}"))
+                    page.on("console", lambda m: m.type == "error" and _note(notes, f"console error: {m.text}"))
+                    cdp = await page.context.new_cdp_session(page)
+                    await _bounded(page.set_content(job["html"], wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
+                    ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=ff_err)
+                    last_note = t0
+                    for frame in range(frames):
+                        if _STOP.is_set():
+                            raise _Stopped()
+                        now = time.monotonic()
+                        if now - t0 > budget:
+                            raise _Stuck(f"was still rendering after {budget:.0f}s, at frame {frame} of {frames}")
+                        if now - last_note >= PROGRESS_EVERY:
+                            log(f"{job.get('slug', gid)}: frame {frame} of {frames} ({_took(now - t0)})")
+                            last_note = now
+                        await _evaluate(cdp, f"({_SEEK_JS})({frame / fps!r})", frame_timeout, f"froze at frame {frame} (window.seek never returned)")
+                        png = await _bounded(page.screenshot(omit_background=True, type="png", caret="hide"), STEP_TIMEOUT + 5, f"froze at frame {frame} (the page stopped drawing)")
+                        try:
+                            ff.stdin.write(png)
+                        except (BrokenPipeError, OSError):
+                            raise RuntimeError("ffmpeg stopped taking frames") from None
                 finally:
-                    ff.stdin.close()
-                    err = ff.stderr.read().decode(errors="replace")
-                    ff.wait()
-            finally:
-                browser.close()
-        if ff.returncode != 0 or not tmp.exists():
-            return {"id": job["id"], "error": f"ffmpeg failed: {err.strip()[:300]}", "console": console}
-        tmp.replace(out)
-        return {"id": job["id"], "error": None, "console": console}
-    except Exception as e:  # noqa: BLE001 - report, don't kill the run
-        tmp.unlink(missing_ok=True)
-        return {"id": job["id"], "error": str(e).strip().splitlines()[0][:300], "console": console}
+                    try:
+                        await _bounded(browser.close(), 20, "didn't close")
+                    except Exception:  # noqa: BLE001 - leaving async_playwright stops the browser anyway
+                        pass
+            try:
+                ff.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            ff.wait(timeout=300)
+            if ff.returncode != 0 or not tmp.exists():
+                ff_err.seek(0)
+                raise RuntimeError(f"ffmpeg failed: {ff_err.read().decode(errors='replace').strip()[:300]}")
+            tmp.replace(out)
+        except _Stuck as e:
+            result["error"] = f"{e}; left out. Fix graphics/{out.with_suffix('.html').name} and run `roughcut render`"
+        except _Stopped:
+            result["error"] = "stopped"
+        except Exception as e:  # noqa: BLE001 - report, don't kill the run
+            result["error"] = f"didn't render: {_first_line(e)}"
+        finally:
+            if ff is not None and ff.poll() is None:
+                ff.kill()
+                ff.wait()
+            if result["error"]:
+                tmp.unlink(missing_ok=True)
+    result["seconds"] = time.monotonic() - t0
+    return result
+
+
+def _render_one(job: dict) -> dict:
+    """Render one graphic to ProRes 4444 with alpha.
+
+    Runs in a worker thread with its own event loop, Playwright and browser (one per
+    thread; never processes). Every browser step has a deadline, so a design that
+    freezes is reported instead of hanging the run.
+    """
+    try:
+        return asyncio.run(_render_async(job))
+    except Exception as e:  # noqa: BLE001 - e.g. no browser could start
+        return {"id": job["id"], "error": f"didn't render: {_first_line(e)}", "notes": [], "seconds": 0.0}
 
 
 def _digest(html: str, frames: int, rate: str, width: int, height: int) -> str:
     return hashlib.sha256(f"{frames}|{rate}|{width}x{height}|{html}".encode()).hexdigest()[:16]
 
 
-def render(placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, *, workers: int, warnings: list[str]) -> dict[str, Path]:
-    """Render what's new or changed; reuse clips whose design and length are the same."""
-    folder.mkdir(parents=True, exist_ok=True)
+def _rendered_digest(entry: dict | None) -> str | None:
+    """Digest of the design a manifest entry's .mov was rendered from (None if it wasn't)."""
+    if not entry:
+        return None
+    if "rendered" in entry:
+        return entry["rendered"]
+    return entry.get("digest") if entry.get("file") else None  # manifests written only after rendering
+
+
+def unchanged(placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, previous: dict) -> dict[str, Path]:
+    """Rendered clips that still match their design and length, by graphic ID."""
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
-    old = {g["id"]: g for g in _read_manifest(folder.parent).get("graphics", [])}
-    jobs, done = [], {}
+    old = {g.get("id"): g for g in previous.get("graphics", []) if isinstance(g, dict)}
+    found = {}
     for g in placed:
-        if g.id not in html:
-            continue
-        digest = _digest(html[g.id], g.frames, rate, tl.width, tl.height)
         out = folder / f"{g.slug}.mov"
-        (folder / f"{g.slug}.html").write_text(html[g.id], encoding="utf-8")
-        if out.exists() and old.get(g.id, {}).get("digest") == digest:
-            done[g.id] = out
-            continue
-        jobs.append(
-            {"id": g.id, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
-             "canvas": canvas(tl.width, tl.height), "out": str(out), "digest": digest}
-        )
+        if g.id in html and out.exists() and _rendered_digest(old.get(g.id)) == _digest(html[g.id], g.frames, rate, tl.width, tl.height):
+            found[g.id] = out
+    return found
+
+
+def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for g in placed:
+        if g.id in html:
+            (folder / f"{g.slug}.html").write_text(html[g.id], encoding="utf-8")
+
+
+def render(
+    placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, *, workers: int, warnings: list[str],
+    previous: dict | None = None, notes: dict[str, list[str]] | None = None,
+) -> dict[str, Path]:
+    """Render what's new or changed; reuse clips whose design and length are the same.
+
+    `previous` is the manifest from before this run (read from disk when not given);
+    `notes` collects what each graphic's render reported, for the manifest.
+    """
+    save_designs(placed, html, folder)
+    fd = tl.frame_duration
+    rate = f"{fd.denominator}/{fd.numerator}"
+    if previous is None:
+        previous = _read_manifest(folder.parent)
+    old = {g.get("id"): g for g in previous.get("graphics", []) if isinstance(g, dict)}
+    notes = {} if notes is None else notes
+    done = unchanged(placed, html, folder, tl, previous)
+    for gid in done:
+        notes[gid] = [str(n) for n in old.get(gid, {}).get("notes") or []]
+    jobs = [
+        {"id": g.id, "slug": g.slug, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
+         "canvas": canvas(tl.width, tl.height), "out": str(folder / f"{g.slug}.mov")}
+        for g in placed
+        if g.id in html and g.id not in done
+    ]
     if jobs:
-        log(f"rendering {len(jobs)} graphic(s) at {tl.width}x{tl.height}")
+        t0 = time.monotonic()
+        log(f"rendering {len(jobs)} graphic(s) at {tl.width}x{tl.height}" + (f" ({len(done)} unchanged)" if done else ""))
+        _STOP.clear()
         # One Playwright instance and browser per thread (Playwright's rule); the browsers do the work.
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
-            for n, result in enumerate(pool.map(_render_one, jobs), 1):
+        pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs))))
+        try:
+            futures = {pool.submit(_render_one, job): job for job in jobs}
+            for n, future in enumerate(as_completed(futures), 1):
+                job, result = futures[future], future.result()
                 progress.stage("graphics", f"Rendering {len(jobs)} graphics", current=n, total=len(jobs))
-                job = next(j for j in jobs if j["id"] == result["id"])
-                if result["console"]:
-                    warnings.append(f"graphic {result['id']}: script error in the design ({result['console'][0]})")
+                notes[job["id"]] = result["notes"]
                 if result["error"]:
-                    warnings.append(f"graphic {result['id']} didn't render: {result['error']}")
+                    warnings.append(f"graphic {job['id']} {result['error']}")
+                    log(f"{job['slug']}: {result['error']}")
                 else:
-                    done[result["id"]] = Path(job["out"])
+                    done[job["id"]] = Path(job["out"])
+                    log(f"rendered {job['slug']} ({job['frames']} frames) in {_took(result['seconds'])} [{n}/{len(jobs)}]")
+        except KeyboardInterrupt:
+            _STOP.set()  # the workers stop at their next frame and clean up
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown()
+        log(f"rendered {sum(1 for j in jobs if j['id'] in done)} of {len(jobs)} graphic(s) in {_took(time.monotonic() - t0)}")
+    for g in placed:
+        said = notes.get(g.id) or []
+        if said:
+            more = f" (and {len(said) - 3} more)" if len(said) > 3 else ""
+            warnings.append(f"graphic {g.id}: {'; '.join(said[:3])}{more}")
     return done
+
+
+def _took(seconds: float) -> str:
+    seconds = round(seconds)
+    return f"{seconds // 60}m{seconds % 60:02d}s" if seconds >= 60 else f"{seconds}s"
 
 
 # ------------------------------------------------------------------ timeline + manifest
@@ -436,7 +633,11 @@ def _read_manifest(out_dir: Path) -> dict:
         return {}
 
 
-def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str) -> None:
+def write_manifest(
+    out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str,
+    notes: dict[str, list[str]] | None = None,
+) -> None:
+    """graphics.json: every placed graphic, its design, and the clip rendered from it (if any)."""
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
     entries = []
@@ -447,8 +648,13 @@ def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, 
             entry["digest"] = _digest(html[g.id], g.frames, rate, tl.width, tl.height)
         if g.id in files:
             entry["file"] = f"graphics/{files[g.id].name}"
+            entry["rendered"] = entry.get("digest")  # the design that file was rendered from
+        if notes and notes.get(g.id):
+            entry["notes"] = notes[g.id]
         entries.append(entry)
-    (out_dir / MANIFEST).write_text(json.dumps({"style": style, "graphics": entries}, indent=1))
+    tmp = out_dir / (MANIFEST + ".tmp")
+    tmp.write_text(json.dumps({"style": style, "graphics": entries}, indent=1))
+    tmp.replace(out_dir / MANIFEST)
 
 
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
@@ -485,13 +691,26 @@ def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, o
     placed = place(specs, tl, analysis, warnings)
     if not placed:
         return [], [], warnings
-    progress.stage("graphics", f"Designing {len(placed)} graphics")
+    folder = out_dir / "graphics"
     if saved_html is not None:
+        progress.stage("graphics", f"Re-timing {len(placed)} graphics")
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
     else:
+        progress.stage("graphics", f"Designing {len(placed)} graphics")
         html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings)
-    files = render(placed, html, out_dir / "graphics", tl, workers=workers, warnings=warnings)
+    # Every design is on disk before rendering starts: if rendering fails or is stopped,
+    # `roughcut render` re-renders them without asking the model again.
+    previous = _read_manifest(out_dir)
+    save_designs(placed, html, folder)
+    kept = unchanged(placed, html, folder, tl, previous)
+    write_manifest(out_dir, placed, kept, html, tl, style, notes={k: v for k, v in _old_notes(previous).items() if k in kept})
+    notes: dict[str, list[str]] = {}
+    files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes)
     clips = attach(tl, placed, files, warnings)
-    write_manifest(out_dir, placed, files, html, tl, style)
+    write_manifest(out_dir, placed, files, html, tl, style, notes=notes)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     return clips, placed, warnings
+
+
+def _old_notes(manifest: dict) -> dict[str, list[str]]:
+    return {g["id"]: list(g["notes"]) for g in manifest.get("graphics", []) if isinstance(g, dict) and g.get("id") and g.get("notes")}
