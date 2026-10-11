@@ -90,6 +90,16 @@ struct BuildForm: View {
                 } else if model.phase == .cancelled {
                     Section {
                         Label("\(model.runKind.noun) cancelled.", systemImage: "stop.circle")
+                        if model.resumeFolder != nil {
+                            HStack {
+                                Text("The edit plan was saved before you cancelled.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Finish without AI") { model.finishWithoutAI() }
+                                    .help("Cuts from the saved plan with its own settings and no model call (roughcut render)")
+                            }
+                        }
                     }
                 }
 

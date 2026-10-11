@@ -251,9 +251,10 @@ final class AppModel {
             endActivity()
             discardNotesFile()
             if phase == .running {
-                if !cancelRequested && lastResult == nil {
+                if lastResult == nil {
+                    // A cancelled run whose plan was saved can be finished too: the CLI sends `resume` on SIGTERM.
                     resumeFolder = ResumeCommand.outputFolder(from: lastResume)
-                    failureKind = lastKind
+                    failureKind = cancelRequested ? nil : lastKind
                 }
                 let tail = log.suffix(6).joined(separator: "\n")
                 let error = lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)"
