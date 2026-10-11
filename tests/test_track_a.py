@@ -306,3 +306,120 @@ def test_first_design_batch_sets_the_look_and_the_rest_run_in_parallel():
     first, second, third = sorted(provider.spans)
     assert first[1] <= second[0] and first[1] <= third[0]  # batch 1 finished before the others started
     assert second[0] < third[1] and third[0] < second[1]  # the others overlapped
+
+
+# ------------------------------------------------------------------ T1: seek-started animations, script errors, fonts, QC
+
+FADE = "@keyframes f{from{opacity:0}to{opacity:1}}"
+SEEK_CASES = {
+    # A transition started by a class window.seek adds at 0.5 s is halfway through 0.5 s later.
+    "class toggle": (
+        "<style>#b{opacity:0;transition:opacity 1s linear}#b.on{opacity:1}</style><div id=b>Hi</div>"
+        "<script>window.seek=t=>document.getElementById('b').classList.toggle('on',t>=0.5)</script>",
+        1.0, "getComputedStyle(document.getElementById('b')).opacity", 0.5,
+    ),
+    "inserted element": (
+        f"<style>{FADE}.w{{animation:f 1s linear both}}</style><div id=box></div>"
+        "<script>window.seek=t=>{if(t>=0.5&&!document.querySelector('.w')){const s=document.createElement('span');"
+        "s.className='w';s.textContent='word';document.getElementById('box').appendChild(s)}}</script>",
+        1.0, "getComputedStyle(document.querySelector('.w')).opacity", 0.5,
+    ),
+    "element.animate": (
+        "<div id=b>Hi</div><script>window.seek=t=>{if(t>=0.5&&!window.started){window.started=true;"
+        "document.getElementById('b').animate([{opacity:0},{opacity:1}],{duration:1000,fill:'both'})}}</script>",
+        1.0, "getComputedStyle(document.getElementById('b')).opacity", 0.5,
+    ),
+    # Plain keyframes present from the start behave exactly as before.
+    "keyframes at load": (
+        f"<style>{FADE}#b{{animation:f 2s linear both}}</style><div id=b>Hi</div>",
+        1.0, "getComputedStyle(document.getElementById('b')).opacity", 0.5,
+    ),
+    # A design that rebuilds its words every frame must still show them (it would never progress otherwise).
+    "rebuilt every frame": (
+        f"<style>{FADE}.w{{animation:f .3s linear both}}</style><div id=box></div>"
+        "<script>const words=[['one',0.2],['two',0.6]];window.seek=t=>{document.getElementById('box').innerHTML="
+        "words.filter(w=>t>=w[1]).map(w=>'<span class=w>'+w[0]+'</span>').join(' ')}</script>",
+        1.5, "Math.min(...[...document.querySelectorAll('.w')].map(e=>+getComputedStyle(e).opacity))", 1.0,
+    ),
+    "element.animate every frame": (
+        "<div id=b>Hi</div><script>window.seek=t=>document.getElementById('b').animate([{opacity:0},{opacity:1}],{duration:300,fill:'both'})</script>",
+        1.0, "getComputedStyle(document.getElementById('b')).opacity", 1.0,
+    ),
+}
+
+
+@needs_renderer
+@pytest.mark.parametrize("case", list(SEEK_CASES))
+def test_animations_started_during_playback_play_from_when_they_start(case):
+    from playwright.sync_api import sync_playwright
+
+    html, until, probe, want = SEEK_CASES[case]
+    with sync_playwright() as p:
+        browser = graphics.launch_browser(p)
+        page = browser.new_page(viewport={"width": 320, "height": 180})
+        page.set_content(html, wait_until="load")
+        for frame in range(round(until * 30) + 1):
+            assert page.evaluate(f"({graphics._SEEK_JS})({frame / 30!r})") is None
+        got = float(page.evaluate(probe))
+        browser.close()
+    assert got == pytest.approx(want, abs=0.05)
+
+
+def _plate(css="left:10%;top:40%", extra="", exits=True):
+    out = "animation:out .2s linear .6s both;" if exits else ""
+    return (f"<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}@keyframes out{{to{{opacity:0}}}}"
+            f".p{{position:absolute;{css};padding:8px;background:#c00;color:#fff;font:40px sans-serif;{out}}}</style></head>"
+            f"<body><div class=p>Plate</div>{extra}</body></html>")
+
+
+@needs_renderer
+def test_script_errors_blocked_loads_and_missing_fonts_are_reported(tmp_path):
+    html = _plate(extra=(
+        "<div style=\"position:absolute;left:30%;top:30%;font:40px 'Gotham Test Font',sans-serif;color:#fff\">Brand</div>"
+        "<img src=\"https://example.com/logo.png\" style=\"position:absolute;left:40%;top:40%\">"
+        "<script>console.error('bad thing'); undefinedFunction();</script>"
+        "<script>window.seek=function(t){if(t>0.2){null.x}}</script>"
+    ))
+    result = graphics._render_one(job_for(tmp_path, html, frames=24, kind="lower_third"))
+    assert result["error"] is None  # rendered anyway
+    notes = result["notes"]
+    assert "console error: bad thing" in notes and "script error: undefinedFunction is not defined" in notes
+    assert "tried to load https://example.com/logo.png (blocked: designs must be self-contained)" in notes
+    assert any(n.startswith("its window.seek failed at 0.23s (Cannot read properties of null") and "rendered anyway" in n for n in notes)
+    assert any("asks for the font Gotham Test Font, which isn't installed" in n for n in notes)
+    assert not any("sans-serif" in n for n in notes)  # generic families are never "missing"
+
+
+@needs_renderer
+def test_renders_are_checked_for_blank_stuck_on_and_outside_the_safe_area(tmp_path):
+    def notes(html, kind="lower_third", gid="G01"):
+        result = graphics._render_one(job_for(tmp_path, html, frames=30, gid=gid, kind=kind, size=(320, 180)))
+        assert result["error"] is None
+        return result["notes"]
+
+    assert notes(_plate()) == []  # in the safe area, gone by the end
+    assert notes("<!doctype html><html><body style='margin:0;background:transparent'></body></html>", gid="G02") == [
+        "came out blank: nothing is visible in any frame"
+    ]
+    assert notes(_plate(exits=False), gid="G03") == ["is still on screen in its last frame, so it cuts off instead of animating out"]
+    assert notes(_plate("left:0;top:40%"), gid="G04") == ["reaches outside the title-safe area (5% in from the edges)"]
+    assert notes(_plate("left:0;top:40%"), kind="title_card", gid="G05") == []  # title cards may fill the frame
+    # A plate that slides in from off-frame is judged on its hold, not its entrance.
+    slide = _plate(extra="").replace(".p{", ".p{animation:in .3s ease-out both,out .2s linear .6s both;").replace(
+        "@keyframes out", "@keyframes in{from{transform:translateX(-200%)}}@keyframes out")
+    assert notes(slide, gid="G06") == []
+
+
+def test_the_same_note_on_several_graphics_is_one_warning():
+    from roughcut.graphics import PlacedGraphic
+    from roughcut.plan import GraphicSpec
+
+    placed = [PlacedGraphic(id=f"G0{n}", spec=GraphicSpec(kind="stat", segment="", words="", text=""), index=n, start=0, frames=30) for n in (1, 2, 3)]
+    font = "asks for the font Gotham, which isn't installed on this computer, so it rendered in a fallback font"
+    notes = {"G01": [font], "G02": [font, "came out blank: nothing is visible in any frame"], "G03": [f"console error: {n}" for n in range(5)]}
+    assert graphics.note_warnings(placed, notes) == [
+        f"graphics G01, G02: {font}",
+        "graphic G02: came out blank: nothing is visible in any frame",
+        "graphic G03: console error: 0", "graphic G03: console error: 1", "graphic G03: console error: 2",
+        "graphic G03: 2 more messages from its scripts",
+    ]

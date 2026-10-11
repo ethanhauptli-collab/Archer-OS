@@ -54,7 +54,56 @@ STEP_TIMEOUT = 30.0  # loading the design, drawing a frame
 BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BUDGET_PER_FRAME x frames) seconds
 PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
 REFERENCE_CHARS = 40_000  # longest finished design sent along as the reference for the other batches
-_SEEK_JS = "t => { document.getAnimations().forEach(a => { a.pause(); a.currentTime = t * 1000; }); if (typeof window.seek === 'function') window.seek(t); }"
+# Sets the page to time t (seconds); called for every frame, in order, from 0. Animations that exist at
+# the start play on the graphic's clock; ones that window.seek starts later (a class it adds, an element
+# it inserts, element.animate()) play from the frame they start, as in a browser. A design that rebuilds
+# its elements every frame would restart them every frame, so for those new animations keep the
+# graphic's clock. Returns the error window.seek threw, or null.
+_SEEK_JS = """t => {
+  const rc = window.__roughcut || (window.__roughcut = {last: [], streak: 0, shared: false});
+  for (const a of document.getAnimations()) {
+    if (a.__t0 !== undefined) { a.pause(); a.currentTime = Math.max(0, t - a.__t0) * 1000; }
+  }
+  let error = null;
+  if (typeof window.seek === 'function') {
+    try { window.seek(t); } catch (e) { error = String((e && e.message) || e); }
+  }
+  const fresh = document.getAnimations().filter(a => a.__t0 === undefined);
+  if (t > 0 && fresh.length) {
+    const rebuilt = rc.last.length > 0 && rc.last.every(a => a.effect && a.effect.target && !a.effect.target.isConnected);
+    rc.streak += 1;
+    if (rebuilt || rc.streak >= 6) rc.shared = true;
+  } else {
+    rc.streak = 0;
+  }
+  for (const a of fresh) {
+    a.__t0 = rc.shared ? 0 : t;
+    a.pause();
+    a.currentTime = (t - a.__t0) * 1000;
+  }
+  rc.last = t > 0 ? fresh : [];
+  return error;
+}"""
+
+# Font families that text asks for first and this computer doesn't have (canvas width test).
+_FONTS_JS = """(() => {
+  const generic = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-serif', 'ui-sans-serif',
+    'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong', '-apple-system', 'blinkmacsystemfont', 'inherit', 'initial']);
+  const ctx = document.createElement('canvas').getContext('2d');
+  const width = font => { ctx.font = '72px ' + font; return ctx.measureText('mmmmmmmmmmlli1WQ@#&').width; };
+  const missing = new Set(), seen = new Set();
+  for (const el of document.querySelectorAll('body, body *')) {
+    if (![...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim())) continue;
+    const family = getComputedStyle(el).fontFamily;
+    if (seen.has(family)) continue;
+    seen.add(family);
+    const first = family.split(',')[0].trim().replace(/^["']|["']$/g, '');
+    if (!first || generic.has(first.toLowerCase())) continue;
+    const q = JSON.stringify(first);
+    if (width(q + ', monospace') === width('monospace') && width(q + ', serif') === width('serif')) missing.add(first);
+  }
+  return [...missing];
+})()"""
 
 
 class GraphicsError(RuntimeError):
@@ -185,7 +234,9 @@ completely gone (opacity 0 or off-frame) by the end.
 - Animate only with CSS @keyframes/transitions (explicit durations and delays in seconds, \
 animation-fill-mode both) or the Web Animations API. The renderer pauses every animation and \
 seeks it to each frame's time, so never rely on setTimeout, setInterval, requestAnimationFrame, \
-Date or performance.now. For what CSS can't do (counting a number up, typing text out), define \
+Date or performance.now. Animations that start later (a class or element your window.seek adds, or \
+element.animate() called from it) play from the frame they start, as they would in a browser. \
+For what CSS can't do (counting a number up, typing text out), define \
 window.seek = function (t) { ... } that sets the DOM for time t in seconds; it is called for \
 every frame, in order, starting at 0, and must be deterministic.
 - Words come with the time they are spoken, in seconds from the graphic's start. Kinetic captions \
@@ -480,8 +531,17 @@ def _png_size(png: bytes) -> tuple[int, int]:
     return struct.unpack(">II", png[16:24]) if png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) >= 24 else (0, 0)
 
 
-async def _block(route) -> None:
-    await route.abort()  # designs may not fetch anything
+def _blocker(notes: list[str]):
+    async def block(route) -> None:  # designs may not fetch anything
+        _note(notes, f"tried to load {route.request.url[:120]} (blocked: designs must be self-contained)")
+        await route.abort()
+
+    return block
+
+
+def _console(notes: list[str], message) -> None:
+    if message.type == "error" and not message.text.startswith("Failed to load resource"):  # blocked loads are noted by URL
+        _note(notes, f"console error: {message.text}")
 
 
 async def _render_async(job: dict) -> dict:
@@ -506,15 +566,16 @@ async def _render_async(job: dict) -> dict:
                 try:
                     page = await browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
                     page.set_default_timeout(STEP_TIMEOUT * 1000)
-                    await page.route("**/*", _block)
+                    await page.route("**/*", _blocker(notes))
                     page.on("pageerror", lambda e: _note(notes, f"script error: {e}"))
-                    page.on("console", lambda m: m.type == "error" and _note(notes, f"console error: {m.text}"))
+                    page.on("console", lambda m: _console(notes, m))
                     cdp = await page.context.new_cdp_session(page)
                     # Transparent page background, set once (page.screenshot sets and resets it every frame).
                     await _bounded(cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}}), STEP_TIMEOUT, "didn't start")
                     await _bounded(page.set_content(job["html"], wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
                     size = tuple(job.get("size") or (round(cw * scale), round(ch * scale)))
                     fast = True
+                    seek_error, fonts = None, []
                     ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=ff_err)
                     last_note = t0
                     for frame in range(frames):
@@ -526,7 +587,12 @@ async def _render_async(job: dict) -> dict:
                         if now - last_note >= PROGRESS_EVERY:
                             log(f"{job.get('slug', gid)}: frame {frame} of {frames} ({_took(now - t0)})")
                             last_note = now
-                        await _evaluate(cdp, f"({_SEEK_JS})({frame / fps!r})", frame_timeout, f"froze at frame {frame} (window.seek never returned)")
+                        error = await _evaluate(cdp, f"({_SEEK_JS})({frame / fps!r})", frame_timeout, f"froze at frame {frame} (window.seek never returned)")
+                        if error and seek_error is None:
+                            seek_error = f"its window.seek failed at {frame / fps:.2f}s ({' '.join(str(error).split())[:160]}); rendered anyway, check it"
+                        if frame == frames // 2:  # most of the graphic is on screen by now
+                            for font in await _evaluate(cdp, _FONTS_JS, STEP_TIMEOUT, "froze while checking fonts") or []:
+                                fonts.append(f"asks for the font {str(font)[:60]}, which isn't installed on this computer, so it rendered in a fallback font")
                         drawing = f"froze at frame {frame} (the page stopped drawing)"
                         png = await _frame_png(page, cdp, (cw, ch, scale), fast, drawing)
                         if fast and frame == 0 and _png_size(png) != size:
@@ -550,6 +616,8 @@ async def _render_async(job: dict) -> dict:
                 ff_err.seek(0)
                 raise RuntimeError(f"ffmpeg failed: {ff_err.read().decode(errors='replace').strip()[:300]}")
             tmp.replace(out)
+            for note in ([seek_error] if seek_error else []) + fonts + inspect(out, job.get("kind", ""), size):
+                _note(notes, note)
         except _Stuck as e:
             result["error"] = f"{e}; left out. Fix graphics/{out.with_suffix('.html').name} and run `roughcut render`"
         except _Stopped:
@@ -634,7 +702,7 @@ def render(
     for gid in done:
         notes[gid] = [str(n) for n in old.get(gid, {}).get("notes") or []]
     jobs = [
-        {"id": g.id, "slug": g.slug, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
+        {"id": g.id, "slug": g.slug, "kind": g.spec.kind, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
          "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "out": str(folder / f"{g.slug}.mov")}
         for g in placed
         if g.id in html and g.id not in done
@@ -663,12 +731,77 @@ def render(
             raise
         pool.shutdown()
         log(f"rendered {sum(1 for j in jobs if j['id'] in done)} of {len(jobs)} graphic(s) in {_took(time.monotonic() - t0)}")
+    warnings += note_warnings(placed, notes)
+    return done
+
+
+def note_warnings(placed: list[PlacedGraphic], notes: dict[str, list[str]]) -> list[str]:
+    """One warning per distinct note (up to 3 per graphic), naming every graphic it applies to."""
+    grouped: dict[str, list[str]] = {}
     for g in placed:
         said = notes.get(g.id) or []
-        if said:
-            more = f" (and {len(said) - 3} more)" if len(said) > 3 else ""
-            warnings.append(f"graphic {g.id}: {'; '.join(said[:3])}{more}")
-    return done
+        for note in said[:3] + ([f"{len(said) - 3} more messages from its scripts"] if len(said) > 3 else []):
+            grouped.setdefault(note, []).append(g.id)
+    return [f"{'graphics' if len(ids) > 1 else 'graphic'} {', '.join(ids)}: {note}" for note, ids in grouped.items()]
+
+
+# ------------------------------------------------------------------ checking a render
+
+TITLE_SAFE = 0.05  # title-safe margin, as a fraction of the frame
+QC_GRACE = 0.01  # soft shadows and glows may reach this much past it
+
+
+QC_WIDTH = 320  # the alpha channel is checked at this width
+QC_ALPHA = 8  # of 255: anything more opaque than this counts as visible
+
+
+def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float, float, float] | None] | None:
+    """Per frame, the box holding everything visible (x0, y0, x1, y1 as fractions of the frame), or None when blank.
+
+    One ffmpeg pass reads the alpha channel, area-averaged down to QC_WIDTH so thin
+    strokes still count. None when the file can't be read.
+    """
+    w = QC_WIDTH
+    h = max(2, round(w * size[1] / size[0] / 2) * 2) if size[0] and size[1] else w * 9 // 16
+    cmd = ["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"alphaextract,scale={w}:{h}:flags=area,format=gray", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    boxes: list[tuple[float, float, float, float] | None] = []
+    size_ = w * h
+    for n in range(len(proc.stdout) // size_):
+        frame = proc.stdout[n * size_ : (n + 1) * size_]
+        rows = [r for r in range(h) if max(frame[r * w : (r + 1) * w]) > QC_ALPHA]
+        if not rows:
+            boxes.append(None)
+            continue
+        x0 = next(c for c in range(w) if max(frame[c::w]) > QC_ALPHA)
+        x1 = next(c for c in range(w - 1, -1, -1) if max(frame[c::w]) > QC_ALPHA)
+        boxes.append((x0 / w, rows[0] / h, (x1 + 1) / w, (rows[-1] + 1) / h))
+    return boxes
+
+
+def inspect(path: Path, kind: str, size: tuple[int, int]) -> list[str]:
+    """What a viewer would notice: blank, never animating off, or outside the title-safe area."""
+    boxes = visible_boxes(path, size)
+    if not boxes:
+        return []
+    if not any(boxes):
+        return ["came out blank: nothing is visible in any frame"]
+    notes = []
+    if boxes[-1] is not None:
+        notes.append("is still on screen in its last frame, so it cuts off instead of animating out")
+    n = len(boxes)
+    hold = [b for b in boxes[n // 3 : max(n // 3 + 1, 2 * n // 3)] if b]  # the middle third: not entering or leaving
+    if kind != "title_card" and hold:  # title cards may fill the frame
+        m = TITLE_SAFE - QC_GRACE
+        outside = [b for b in hold if b[0] < m or b[1] < m or b[2] > 1 - m or b[3] > 1 - m]
+        if len(outside) * 2 > len(hold):
+            notes.append("reaches outside the title-safe area (5% in from the edges)")
+    return notes
 
 
 def _took(seconds: float) -> str:
