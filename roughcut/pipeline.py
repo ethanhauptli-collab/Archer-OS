@@ -644,7 +644,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
-    plan.target_seconds = saved["plan"].get("target_seconds")
+    plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     # The next render starts from this one's settings.

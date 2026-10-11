@@ -80,3 +80,34 @@ def test_a_brand_font_renders_without_the_missing_font_warning(monkeypatch, tmp_
     result = graphics._render_one(job_for(tmp_path, html, frames=12, kind="lower_third"))
     assert result["error"] is None
     assert not any("isn't installed" in n for n in result["notes"]), result["notes"]
+
+
+@pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
+def test_brand_font_is_drawn_from_the_first_frame(monkeypatch, tmp_path):
+    """Text a later animation reveals still renders in the brand font on its first frame, not a fallback."""
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    html = brand_fonts.embed(
+        "<html><head><style>span{font-size:80px}</style></head><body>"
+        "<span id=a style=\"font-family:'Fraunces',monospace\">Venture OC wiiiimmmm</span></body></html>"
+    )
+
+    async def width_after_load() -> tuple[bool, float]:
+        async with async_playwright() as p:
+            browser = await graphics._launch_browser_async(p)
+            page = await browser.new_page()
+            await page.route("**/*", lambda route: route.abort())
+            await page.set_content(html, wait_until="load")
+            await graphics.load_fonts(page)
+            loaded = await page.evaluate("document.fonts.check('80px Fraunces')")
+            width = await page.evaluate("a.getBoundingClientRect().width")
+            await browser.close()
+            return loaded, width
+
+    loaded, width = asyncio.run(width_after_load())
+    assert loaded
+    assert width < 1000  # Fraunces draws it about 800 px wide; the monospace fallback about 1130 px

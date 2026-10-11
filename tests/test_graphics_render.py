@@ -271,6 +271,7 @@ def test_fast_frame_capture_matches_playwrights_screenshot():
             cdp = await page.context.new_cdp_session(page)
             await cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
             await page.set_content(GRAPHIC_HTML.replace("TEXT", "Match"), wait_until="load")
+            await graphics.load_fonts(page)
             await graphics._evaluate(cdp, f"({graphics._SEEK_JS})(1.0)", 5, "seek")
             fast = await graphics._frame_png(page, cdp, (cw, ch, scale), True, "fast")
             slow = await graphics._frame_png(page, cdp, (cw, ch, scale), False, "slow")
