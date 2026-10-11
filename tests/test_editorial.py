@@ -765,6 +765,29 @@ def test_fill_never_leaves_a_few_frames_after_a_short_clip(style):
     assert _gaps_without_picture(tl, a) == [] and not _adjacent_replays(tl)
 
 
+@pytest.mark.parametrize("seconds", [2.9, 3.0, 3.1, 3.2])
+@pytest.mark.parametrize("last", [20.0, 8.4])
+def test_a_capped_still_moved_up_for_a_short_clip_never_leaves_black_after_it(seconds, last):
+    """A clip a few frames short of the gap before a still at its longest moves the still up.
+    Its end moves up too, and those frames must be filled (with more narration after it, or none)."""
+    from roughcut.timeline import _gaps_without_picture
+
+    lines = [(0.3, 3.2, "The pier wakes up early."), (3.5, 15.0 if last > 10 else last, "Over forty chefs are cooking along the boardwalk with fresh fish and tacos and music all afternoon long.")]
+    if last > 10:
+        lines.append((15.3, last, "Come hungry and stay late."))
+    vo = make_clip("A01", kind="audio", seconds=last + 1, sentences=lines, role="voiceover")
+    a = Analysis(clips=[vo, make_clip("I01", kind="image"), make_clip("V01", seconds=seconds)])
+    raw = {"sections": [{"name": "x", "items": [s.id for s in vo.segments], "broll": [
+        {"clip": "I01", "over": ["A01.S002"], "words": "", "source_in": -1, "reason": ""},
+    ]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["tight"], name="t")
+    assert _gaps_without_picture(tl, a) == [], [(c.clip_id, c.start, c.end) for c in sorted(tl.connected, key=lambda c: c.start)]
+    first = min(tl.connected, key=lambda c: c.start)
+    assert first.clip_id == "V01" and first.start == 0
+    still = next(c for c in tl.connected if c.clip_id == "I01")
+    assert still.start == first.end  # moved up to meet the short clip, not a flash between them
+
+
 def test_render_media_needs_the_run_style():
     from roughcut.prompts import render_media
 

@@ -1150,7 +1150,19 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
                 return _video_window(m, want, fd, Fraction(at).limit_denominator(1000))
         return src_in, frames
 
-    for g0, g1 in gaps:
+    def rounds():
+        """The gaps, and again until none is left: moving a capped still earlier
+        (_extend_shot_after) uncovers a few frames at its tail after the list was made,
+        and the next round closes such a sliver by holding the still a little longer."""
+        nonlocal gaps
+        for _ in range(4):
+            yield from gaps
+            gaps = _gaps_without_picture(tl, analysis)
+            if not gaps:
+                return
+            lanes.sync(tl)
+
+    for g0, g1 in rounds():
         if not pool:
             break
         if g1 - g0 < tiny and _extend_shot_before(tl, analysis, g0, g1):
