@@ -89,7 +89,7 @@ def build_report(
     if plan.logline:
         L += [f"_{plan.logline}_", ""]
     L += [
-        f"- **Rough cut:** {seconds_to_clock(tl.seconds)} ({tl.width}x{tl.height}, {tl.frame_duration.denominator / tl.frame_duration.numerator:.3f} fps)",
+        f"- **Rough cut:** {tl.review.length_line() if tl.review else seconds_to_clock(tl.seconds)} ({tl.width}x{tl.height}, {tl.frame_duration.denominator / tl.frame_duration.numerator:.3f} fps)",
         f"- **Raw media:** {seconds_to_clock(raw)} across {sum(1 for c in analysis.clips if c.role != 'graphic')} clips; {seconds_to_clock(speech)} of transcribed speech",
     ]
     if stringout is not None and stringout.spine:
@@ -112,6 +112,8 @@ def build_report(
     notes = list(analysis.notes) + list(tl.notes)
     if notes:
         L += ["## Notes", ""] + [f"- {n}" for n in notes] + [""]
+    if tl.review is not None:
+        L += ["## Cut check", ""] + [f"- {line}" for line in tl.review.lines(tl.frame_duration)] + [""]
 
     if len(tl.section_starts) > 1:
         L += ["## Chapters", "", "```"]

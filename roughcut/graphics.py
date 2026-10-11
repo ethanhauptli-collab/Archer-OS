@@ -150,43 +150,8 @@ class PlacedGraphic:
 # ------------------------------------------------------------------ placement
 
 
-def _tokens(text: str) -> list[str]:
-    return [t for t in (re.sub(r"[^\w$%]", "", w.lower()) for w in text.split()) if t]
-
-
-def _find_phrase(words, phrase: str) -> tuple[int, int]:
-    """Indexes of the first and last segment word matching `phrase` (whole segment if not found)."""
-    want = _tokens(phrase)
-    have = [(_tokens(w.text) or [""])[0] for w in words]
-    if want:
-        n = len(want)
-        for i in range(len(have) - n + 1):
-            if have[i : i + n] == want:
-                return i, i + n - 1
-        # Partial: the longest run of the phrase's words found in order.
-        best = None
-        for i in range(len(have)):
-            k = 0
-            while i + k < len(have) and k < n and have[i + k] == want[k]:
-                k += 1
-            if k and (best is None or k > best[1] - best[0] + 1):
-                best = (i, i + k - 1)
-        if best:
-            return best
-    return 0, len(words) - 1
-
-
-def _frame_at(tl: Timeline, clip_id: str, t: float) -> int | None:
-    """Timeline frame showing source time `t` of a clip, or None if it was cut."""
-    fd = tl.frame_duration
-    for s in tl.spine:
-        if s.clip_id != clip_id:
-            continue
-        a = float(s.src_in)
-        b = a + float(s.frames * fd)
-        if a <= t < b:
-            return s.offset + int((t - a) / float(fd))
-    return None
+# Shared with B-roll placement, which anchors cutaways on words the same way.
+from .phrases import find_phrase as _find_phrase, frame_at as _frame_at  # noqa: E402
 
 
 def _first_kept(tl: Timeline, clip_id: str, t0: float, t1: float) -> int | None:

@@ -262,7 +262,7 @@ def default_out_dir(inputs: list[Path]) -> Path:
 def style_for(opts: Options) -> Style:
     base = STYLES[opts.style]
     if opts.keep_fillers:
-        return Style(base.pad_in, base.pad_out, base.max_gap, remove_fillers=False, min_broll=base.min_broll)
+        return replace(base, remove_fillers=False)  # keeps the style's B-roll pacing too
     return base
 
 
@@ -299,14 +299,15 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
     return analysis
 
 
-def media_part(analysis: Analysis) -> TextPart:
-    """The footage inventory, a prompt-cache breakpoint: build and revise send it byte for byte the same."""
-    return TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True)
+def media_part(analysis: Analysis, style: Style) -> TextPart:
+    """The footage inventory, a prompt-cache breakpoint: build and revise send it byte for byte the same
+    (for the same cut style: each line shows what that style keeps of it)."""
+    return TextPart("<media>\n" + render_media(analysis, style) + "\n</media>", cache=True)
 
 
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
     parts = [
-        media_part(analysis),
+        media_part(analysis, style_for(opts)),
         TextPart(render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)),
     ]
     # Thinking counts against max_tokens; a long narration plan needs the room.
@@ -319,9 +320,11 @@ def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tu
 def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> tuple[Timeline, Timeline | None]:
     progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
+    plan.target_seconds = opts.target_seconds or plan.target_seconds  # saved with the plan, so `render` reports it too
     rough = build_timeline(
         plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
         dialogue_level=opts.dialogue_level, fades=opts.fades,
+        target_seconds=plan.target_seconds,
     )
     stringout = None
     if opts.stringout:
@@ -496,7 +499,7 @@ def build(opts: Options) -> Result:
             visual_log = visual_coverage(analysis)
 
     prompt = (
-        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n"
+        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n"
         + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)
     )
 
@@ -641,6 +644,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    plan.target_seconds = saved["plan"].get("target_seconds")
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     # The next render starts from this one's settings.
@@ -863,7 +867,7 @@ def revise(
     try:
         with progress.doing(f"revising the edit with {p.model}"):
             raw = p.complete_json(
-                PLANNER_SYSTEM, [media_part(analysis), TextPart(request)], plan_schema(opts.graphics),
+                PLANNER_SYSTEM, [media_part(analysis, style_for(opts)), TextPart(request)], plan_schema(opts.graphics),
                 schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
             )
     except ProviderAuthError:
@@ -901,7 +905,7 @@ def revise(
     record["notes_history"] = history + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
         record["revision_of"] = prev_n
-    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n" + request
+    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n" + request
     save_checkpoint(out_dir, analysis, prompt, record)
     if opts.graphics:
         versions.adopt_old_graphics(out_dir)  # unchanged graphics from an older release's folder: reuse their clips

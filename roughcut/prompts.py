@@ -7,8 +7,13 @@ different brief only pays for the brief.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .analyze import ROLE_LABELS, Analysis, Clip
 from .timecode import seconds_to_clock
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .timeline import Style
 
 PLANNER_SYSTEM = """\
 You are an experienced documentary and YouTube editor acting as an assistant editor. You receive an \
@@ -39,15 +44,20 @@ setup talk, and off-topic chatter. If the brief asks for a candid or raw feel, k
 unscripted moments.
 4. Keep dependent lines together. Don't strand a "because..." without its setup, or a punchline \
 without its setup.
-5. Length: if a target is given, hit it within about 10%. Each segment's duration is shown; the \
-cut is roughly the sum of selected segments and ranges (slightly shorter after pause trimming).
+5. Length: if a target is given, hit it within about 10%. Each segment shows its length as \
+recorded, then after the arrow how long it plays in the cut once its pauses and um/uh are \
+trimmed (and how many edits that takes). The cut is the sum of those kept lengths and your ranges.
 6. B-roll: cover jump cuts and illustrate what is being said. Each cutaway sits "over" one or more \
 consecutive segments of the same section. Several cutaways with the same "over" play one after \
 another and share that time, so a 20-second line can get four 5-second shots. Hold shots about \
 3-6 seconds (stills 3-5). Choose clips by their visual descriptions and file names, matching \
 what the line is about: when the narration names a place, project or person, show that. Prefer \
 variety; don't repeat a shot. source_in is where to start inside the B-roll clip in seconds, or \
--1 to let the software pick a good spot.
+-1 to let the software pick a good spot. Long clips list timed Moments: set source_in to the \
+time of the usable moment that fits the line. "words": when a shot belongs on a name, place or \
+list item, copy those exact words from the line, and the shot comes in as they are spoken; \
+otherwise "", and it follows the shot before it (or starts with the line). On long lines, add \
+enough shots to cover the whole line.
 6b. Narration (Voiceover clips) has no picture of its own. When the piece is carried by \
 narration, use one read of it as the backbone, bring in interview soundbites where they back up \
 what was just said, and cover every narrated segment with B-roll or stills from start to end. \
@@ -58,7 +68,9 @@ is a fallback, not a substitute for your choices.
 the 0-based section range it should run under.
 8. Flags: when unsure (a cut line that might matter, a coin-flip between takes, a missing shot you \
 would want), add a flag. Flags become to-do markers in Final Cut.
-9. Use only IDs that appear in the inventory. Each segment can be used once.
+9. Use only IDs that appear in the inventory. Each segment can be used once, and so can each line: \
+the same words from another read or another export of a promo play only once (a later repeat is \
+dropped).
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.
@@ -97,6 +109,48 @@ VISION_SCHEMA: dict = {
 }
 
 
+MOMENTS_SYSTEM = """\
+You are logging long B-roll clips for a video editor, so a cutaway can start on the good part \
+instead of a fixed spot. Each clip comes with frames sampled through it, each labelled with its \
+time in the clip. For every frame, write a short note of what it shows (subject, shot size, \
+camera movement, anything distinctive an editor would search for) and say whether it is usable \
+as a cutaway: false when it is shaky, blurred, blocked, badly exposed, or shows nothing. "at" is \
+the frame's time in seconds, as labelled.
+"""
+
+MOMENTS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "moments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": {"type": "number", "description": "The frame's time in the clip, in seconds."},
+                                "note": {"type": "string"},
+                                "usable": {"type": "boolean"},
+                            },
+                            "required": ["at", "note", "usable"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["id", "moments"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["clips"],
+    "additionalProperties": False,
+}
+
+
 def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     m = clip.media
     bits = [f'{clip.id} "{m.name}"', m.kind]
@@ -116,6 +170,12 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
         copies = [c for c in analysis.clips if c.duplicate_of == clip.id]
         if copies:
             bits.append("also exported as " + ", ".join(c.id for c in copies) + " (hidden; use this one)")
+    if clip.bed == "music":
+        finished = "a finished edit, " if (clip.cuts_per_min or 0) >= 4 else ""
+        bits.append(
+            f"{finished}speech over a music bed: take consecutive lines together so the music flows "
+            "(every jump in the music gets a to-do marker); B-roll optional"
+        )
     if clip.take_of:
         kind = "another take" if clip.same_words >= 0.9 else "a different version"
         bits.append(
@@ -125,7 +185,14 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     return ", ".join(bits)
 
 
-def render_media(analysis: Analysis) -> str:
+def render_media(analysis: Analysis, style: "Style") -> str:
+    """The media inventory the planner reads. Deterministic for a given analysis and style.
+
+    `style` is the run's (pipeline.style_for): each line's kept length depends on
+    its padding and pause limits, so there's deliberately no default.
+    """
+    from .timeline import kept_length
+
     clips = [c for c in analysis.clips if not c.hidden]
     total = sum(float(c.media.duration) for c in clips)
     speech = sum(c.speech_seconds for c in clips if c.has_transcript)
@@ -139,17 +206,28 @@ def render_media(analysis: Analysis) -> str:
     ]
     for clip in clips:
         lines.append("## " + _clip_header(clip, analysis))
-        if clip.visual:
+        if clip.visual and clip.visual.get("description"):
             v = clip.visual
             tags = ", ".join(v.get("tags", []))
             q = v.get("quality", "")
             q_note = f" Quality: {q}." if q and q.lower() != "good" else ""
             desc = v.get("description", "").strip().rstrip(".")
             lines.append(f"Visual: {desc}. Shot: {v.get('shot', '')}. Tags: {tags}.{q_note}")
+        if clip.visual and clip.visual.get("moments"):
+            lines.append(
+                "Moments: "
+                + "; ".join(
+                    f"{mo['at']:g}s {mo['note']}" + ("" if mo.get("usable", True) else " (not usable)")
+                    for mo in clip.visual["moments"]
+                )
+            )
         if clip.has_transcript:
             for s in clip.segments:
+                kept, cuts = kept_length(s, clip, analysis, style)
+                edits = f", {cuts} edit{'s' if cuts > 1 else ''}" if cuts else ""
                 lines.append(
-                    f"{s.id} [{seconds_to_clock(s.start, millis=True)}-{seconds_to_clock(s.end, millis=True)} | {s.duration:.1f}s] {s.text}"
+                    f"{s.id} [{seconds_to_clock(s.start, millis=True)}-{seconds_to_clock(s.end, millis=True)} | "
+                    f"{s.duration:.1f}s \u2192 {kept:.1f}s{edits}] {s.text}"
                 )
         lines.append("")
     return "\n".join(lines)

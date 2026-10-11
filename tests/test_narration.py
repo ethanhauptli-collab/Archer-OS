@@ -184,14 +184,14 @@ def test_narration_takes_are_linked_not_hidden(tmp_path):
     sections = [s.name for s in heuristic_plan(a).sections]
     assert sections.count("A01") + sections.count("A02") + sections.count("A03") == 1
     # The planner sees them as alternatives.
-    media = render_media(a)
+    media = render_media(a, STYLES["medium"])
     assert "of the narration script in" in media and "never use the same line twice" in media
 
 
 def test_hidden_versions_are_left_out_of_the_prompt(tmp_path):
     clips = [promo("V18", 2160, 3840), promo("V19", 3840, 2160)]
     mark_duplicates(clips, Cache(tmp_path))
-    media = render_media(Analysis(clips=clips))
+    media = render_media(Analysis(clips=clips), STYLES["medium"])
     assert "## V19" in media and "## V18" not in media
     assert "also exported as V18" in media
 
