@@ -463,6 +463,8 @@ def _glue_levels(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Only a real command line (not a test calling main()) takes over the process group.
+    command_line = argv is None
     argv = _glue_levels(list(sys.argv[1:] if argv is None else argv))
     args = build_parser().parse_args(argv)
     if args.command == "update":
@@ -499,8 +501,7 @@ def main(argv: list[str] | None = None) -> int:
 
     json_mode = bool(args.progress_json)
     progress.enable(json_mode)
-    # Only a real command line (not a test calling main()) takes over the process group.
-    restore = _install_stop_handlers(json_mode, own_group=argv is None)
+    restore = _install_stop_handlers(json_mode, own_group=command_line)
     awake = keep_awake()  # after setpgrp, so a cancel from the app stops it too
     started = time.monotonic()
     _OUTCOME.clear()
