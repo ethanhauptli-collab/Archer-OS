@@ -739,10 +739,10 @@ def _place_broll(
                     if m.kind == "image":
                         src_in, frames = Fraction(0), min(want, max_still)
                     else:
-                        on_screen = next((o for o in tl.connected if o.end == cursor and o.clip_id == clip.id), None)
                         hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
                         if hint is None:  # "let the software choose": the logged moment that fits the line
                             said = " ".join(seg.text for seg in (analysis.segment(o) for o in b.over) if seg)
+                            on_screen = next((o for o in tl.connected if o.end == cursor and o.clip_id == clip.id), None)
                             at = _pick_moment(tl, clip, _tokens(said), _tokens(b.words), on_screen=on_screen, length=float(want * fd))
                             hint = Fraction(at).limit_denominator(1000) if at is not None else None
                             if hint is None and on_screen is not None:
@@ -767,12 +767,12 @@ def _place_broll(
                                 src_in = tc.ceil_frames(start_at, grid) * grid
                                 frames = max(0, min(want, tc.floor_frames(m.duration - src_in, fd)))
                                 near = [o for o, _ in _replays_near(tl, clip.id, src_in, frames, cursor)] if frames > 0 else []
-                            said = f"B-roll {b.clip_id}" + (f" from {b.source_in:g}s" if b.source_in >= 0 else "") + " would replay a shot of it a moment away"
+                            why = f"B-roll {b.clip_id}" + (f" from {b.source_in:g}s" if b.source_in >= 0 else "") + " would replay a shot of it a moment away"
                             if frames < min(min_frames, want):
-                                warnings.append(f"{said}, and too little of it is left after that; skipped")
+                                warnings.append(f"{why}, and too little of it is left after that; skipped")
                                 continue
                             if b.source_in >= 0:  # the planner's in-point moved
-                                warnings.append(f"{said}, so it carries on from {float(src_in):.1f}s")
+                                warnings.append(f"{why}, so it carries on from {float(src_in):.1f}s")
                     if frames < min(min_frames, want):
                         warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
                         continue
