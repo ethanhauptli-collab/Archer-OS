@@ -2,9 +2,10 @@
 
 The planner picks the moments: which segment, the exact words a graphic
 belongs to, and what it says. As with the cut itself, the model never
-writes a timestamp; the transcript gives the frames. A second request
-designs every graphic as a self-contained HTML/CSS animation in one
-consistent style. A headless browser then renders each one frame by frame
+writes a timestamp; the transcript gives the frames. Only one graphic is
+on screen at a time. A second request designs every graphic as a
+self-contained HTML/CSS animation in one consistent style, knowing the
+shot it sits over (and, on vertical video, the platform's button areas). A headless browser then renders each one frame by frame
 (every animation is paused and seeked to the frame's time) and ffmpeg
 encodes ProRes 4444 with alpha, which Final Cut layers above the footage.
 Every browser step has a deadline: a design that freezes is left out with
@@ -36,12 +37,14 @@ from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
-from . import progress
-from .analyze import Analysis, Clip, log
+from . import ffmpeg_ops, progress
+from .analyze import ROLE_LABELS, Analysis, Clip, log
 from .plan import DEFAULT_SECONDS, GraphicSpec
 from .timeline import ConnectedClip, Timeline
 
 LEAD = 0.12  # a graphic starts animating in just before its words
+GAP_FRAMES = 2  # between one graphic leaving and the next arriving: one graphic on screen at a time
+MIN_SECONDS = 1.5  # shortest a graphic is held when it's shortened to make room for the next
 MANIFEST = "graphics.json"
 
 # ProRes 4444 with alpha, which Final Cut layers above the footage. A fixed quantizer encodes
@@ -54,6 +57,12 @@ STEP_TIMEOUT = 30.0  # loading the design, drawing a frame
 BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BUDGET_PER_FRAME x frames) seconds
 PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
 REFERENCE_CHARS = 40_000  # longest finished design sent along as the reference for the other batches
+PICTURE_WIDTH = 512  # frame of the shot under each graphic, shown to the designer
+
+# On a vertical (9:16) video, Reels, TikTok and Shorts cover these strips of the frame with their
+# buttons, caption and header (fractions of the frame). Designs keep out of them and the render
+# check flags anything under them. Pass keep_out= to make() to use other strips.
+VERTICAL_KEEP_OUT = {"top": 0.14, "bottom": 0.20, "right": 0.12}
 # Sets the page to time t (seconds); called for every frame, in order, from 0. Animations that exist at
 # the start play on the graphic's clock; ones that window.seek starts later (a class it adds, an element
 # it inserts, element.animate()) play from the frame they start, as in a browser. A design that rebuilds
@@ -118,6 +127,8 @@ class PlacedGraphic:
     start: int  # timeline frame
     frames: int
     word_times: list[tuple[str, float]] = field(default_factory=list)  # (word, seconds from the graphic's start)
+    over: str = ""  # what's on screen under it, for the designer
+    under: tuple[str, float] | None = None  # (clip id, source seconds) of that picture at its middle
 
     @property
     def slug(self) -> str:
@@ -213,8 +224,34 @@ def place(specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, warnings: 
         if frames < round(fps):  # less than a second left on the timeline
             warnings.append(f"graphic {spec.text!r}: too close to the end of the cut; skipped")
             continue
-        placed.append(PlacedGraphic(id=f"G{len(placed) + 1:02d}", spec=spec, index=index, start=start, frames=frames, word_times=times))
+        placed.append(PlacedGraphic(id="", spec=spec, index=index, start=start, frames=frames, word_times=times))
+    placed = one_at_a_time(placed, fps, warnings)
+    for n, g in enumerate(placed, 1):  # numbered in the order they appear
+        g.id = f"G{n:02d}"
     return placed
+
+
+def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) -> list[PlacedGraphic]:
+    """Never two graphics on screen at once: shorten the earlier one, or leave the later one out.
+
+    The earlier one ends GAP_FRAMES before the next starts, if that leaves it at least
+    MIN_SECONDS and (for a kinetic caption) time to show its last word.
+    """
+    kept: list[PlacedGraphic] = []
+    for g in sorted(placed, key=lambda g: (g.start, g.index)):
+        prev = kept[-1] if kept else None
+        if prev is None or g.start >= prev.start + prev.frames:
+            kept.append(g)
+            continue
+        room = g.start - GAP_FRAMES - prev.start
+        last_word = prev.word_times[-1][1] if prev.spec.kind == "kinetic_caption" and prev.word_times else 0.0
+        if room >= round(MIN_SECONDS * fps) and room / fps >= last_word + 0.5:
+            warnings.append(f"graphic {prev.spec.text!r} shortened to {room / fps:.1f}s so it's gone before {g.spec.text!r}")
+            prev.frames = room
+            kept.append(g)
+        else:
+            warnings.append(f"graphic {g.spec.text!r} would cover {prev.spec.text!r}; left out (one graphic at a time)")
+    return kept
 
 
 # ------------------------------------------------------------------ design
@@ -243,7 +280,10 @@ every frame, in order, starting at 0, and must be deterministic.
 reveal each word at its time; other kinds may use the times to land emphasis.
 - Keep everything inside the title-safe area (5% in from every edge). Lower thirds and stats sit \
 in the lower third or a corner, away from the center of frame where faces usually are. Only title \
-cards may fill the frame.
+cards may fill the frame. On a vertical video the canvas block lists the areas the app's buttons \
+and captions cover: keep all text and plates out of them (a lower third sits just above the bottom one).
+- Each graphic says what it sits over ("over"), and there may be a frame of that picture: make the \
+text read clearly over it, and keep plates off faces and the main subject.
 - Legibility over unknown footage: main text at least 48 px on a 1080-line canvas (scale for other \
 sizes), with a solid or semi-opaque plate, or a strong shadow.
 - Fonts: the font named in the style direction if there is one (it is installed on the editor's \
@@ -282,28 +322,100 @@ def canvas(width: int, height: int) -> tuple[int, int, float]:
     return round(width / scale), round(height / scale), scale
 
 
+def platform_zones(width: int, height: int) -> dict[str, float]:
+    """Strips of the frame that platform buttons and captions cover: VERTICAL_KEEP_OUT on 9:16-like video, else none."""
+    return dict(VERTICAL_KEEP_OUT) if width and height >= 1.6 * width else {}
+
+
+def _canvas_block(width: int, height: int, fd: Fraction, zones: dict[str, float]) -> str:
+    cw, ch, _ = canvas(width, height)
+    lines = [f"{cw}x{ch} CSS pixels, rendered at {width}x{height}, {1 / float(fd):.3f} fps."]
+    if zones:
+        lines.append(
+            "This is a vertical video for Reels, TikTok and Shorts. The app's buttons, caption and header cover "
+            "these areas, so keep every graphic's text and plates out of them:"
+        )
+        for side, part in zones.items():
+            px = round((ch if side in ("top", "bottom") else cw) * part)
+            span = {"top": f"y 0-{px}", "bottom": f"y {ch - px}-{ch}", "left": f"x 0-{px}", "right": f"x {cw - px}-{cw}"}.get(side)
+            if span:
+                lines.append(f"- {side} {px} px ({span})")
+    return "<canvas>\n" + "\n".join(lines) + "\n</canvas>"
+
+
+# ------------------------------------------------------------------ what's under each graphic
+
+
+def picture_under(tl: Timeline, analysis: Analysis, frame: int) -> tuple[Clip | None, float]:
+    """The clip on screen at a timeline frame (the topmost B-roll, else the spine clip) and the source second shown."""
+    fd = tl.frame_duration
+    covering = sorted((c for c in tl.connected if c.kind == "broll" and c.lane > 0 and c.start <= frame < c.end), key=lambda c: -c.lane)
+    for c in covering:
+        clip = analysis.clip(c.clip_id)
+        if clip is not None and clip.media.has_video:
+            return clip, float(c.src_in + (frame - c.start) * fd)
+    sc = tl.spine_at(frame)
+    clip = analysis.clip(sc.clip_id) if sc is not None else None
+    if clip is not None and clip.media.has_video:
+        return clip, float(sc.src_in + (frame - sc.offset) * fd)
+    return None, 0.0
+
+
+def describe_picture(clip: Clip | None) -> str:
+    """'V05 drone_pier.mov (B-Roll): <visual description>; <shot>', for the designer."""
+    if clip is None:
+        return "black: no picture under it"
+    shape = ", vertical" if clip.media.height > clip.media.width else ""
+    v = clip.visual or {}
+    detail = "; ".join(str(x) for x in (v.get("description"), v.get("shot")) if x)
+    return f"{clip.id} {clip.media.name} ({ROLE_LABELS.get(clip.role, clip.role)}{shape})" + (f": {detail[:300]}" if detail else "")
+
+
+def look_under(placed: list[PlacedGraphic], tl: Timeline, analysis: Analysis) -> None:
+    """Note what each graphic sits over, at its middle frame."""
+    for g in placed:
+        clip, at = picture_under(tl, analysis, g.start + g.frames // 2)
+        g.over = describe_picture(clip)
+        g.under = (clip.id, 0.0 if clip.media.kind == "image" else at) if clip is not None else None
+
+
+def _pictures(placed: list[PlacedGraphic], analysis: Analysis, workers: int = 4) -> dict[str, bytes]:
+    """A JPEG of the picture under each graphic (where one can be grabbed), by graphic ID."""
+    todo = [g for g in placed if g.under is not None and analysis.clip(g.under[0]) is not None]
+    if not todo:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="roughcut-under-") as tmp:
+
+        def grab(g: PlacedGraphic):
+            clip = analysis.clip(g.under[0])
+            return g.id, ffmpeg_ops.extract_frame(Path(clip.media.path), g.under[1], Path(tmp) / f"{g.id}.jpg", width=PICTURE_WIDTH)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return {gid: path.read_bytes() for gid, path in pool.map(grab, todo) if path is not None}
+
+
 def _design_request(
     placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
-    house_style: str = "", reference: tuple[str, str, str] | None = None,
+    house_style: str = "", reference: tuple[str, str, str] | None = None, keep_out: dict[str, float] | None = None,
 ) -> str:
-    cw, ch, _ = canvas(width, height)
     items = []
     for g in placed:
         seg = analysis.segment(g.spec.segment)
-        items.append(
-            {
-                "id": g.id,
-                "kind": g.spec.kind,
-                "seconds": round(float(g.frames * fd), 3),
-                "text": g.spec.text,
-                "subtext": g.spec.subtext,
-                "direction": g.spec.direction,
-                "said": seg.text if seg is not None else "",
-                "words": [{"word": w, "at": t} for w, t in g.word_times],
-            }
-        )
+        item = {
+            "id": g.id,
+            "kind": g.spec.kind,
+            "seconds": round(float(g.frames * fd), 3),
+            "text": g.spec.text,
+            "subtext": g.spec.subtext,
+            "direction": g.spec.direction,
+            "said": seg.text if seg is not None else "",
+            "words": [{"word": w, "at": t} for w, t in g.word_times],
+        }
+        if g.over:
+            item["over"] = g.over
+        items.append(item)
     parts = [
-        f"<canvas>{cw}x{ch} CSS pixels, rendered at {width}x{height}, {1 / float(fd):.3f} fps</canvas>",
+        _canvas_block(width, height, fd, platform_zones(width, height) if keep_out is None else keep_out),
         "<brief>\n" + (brief.strip() or "No brief given.") + "\n</brief>",
         "<style_direction>\n" + (style.strip() or "None given: use the default look.") + "\n</style_direction>",
     ]
@@ -322,29 +434,36 @@ def _design_request(
 
 def design(
     provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
-    warnings: list[str], batch: int = 4, workers: int = 3,
+    warnings: list[str], batch: int = 4, workers: int = 3, keep_out: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """HTML for each graphic, by ID.
 
     The first batch is designed on its own and sets the look; the other batches are then
     designed in parallel, each given that house style and one finished design to match.
     """
-    from .providers import ProviderAuthError, ProviderError, TextPart
+    from .providers import ImagePart, ProviderAuthError, ProviderError, TextPart
 
     html: dict[str, str] = {}
     if not placed:
         return html
+    pictures = _pictures(placed, analysis) if getattr(provider, "supports_vision", False) else {}
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()
     tried = 0
-    log(f"designing {len(placed)} graphics in {len(groups)} request(s)")
+    log(f"designing {len(placed)} graphics in {len(groups)} request(s)" + (f", with a frame of the shot under {len(pictures)}" if pictures else ""))
     progress.stage("graphics", f"Designing {len(placed)} graphics", current=0, total=len(placed))
 
     def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None):
-        request = _design_request(group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference)
+        request = _design_request(
+            group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference, keep_out=keep_out
+        )
+        parts: list = []
+        for g in group:  # the shot under each graphic, then the request
+            if g.id in pictures:
+                parts += [TextPart(f"{g.id} sits over {g.over}"), ImagePart(pictures[g.id], "image/jpeg")]
         t0 = time.monotonic()
         try:
-            raw = provider.complete_json(DESIGN_SYSTEM, [TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
+            raw = provider.complete_json(DESIGN_SYSTEM, [*parts, TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
         except ProviderAuthError:
             raise
         except ProviderError as e:
@@ -616,7 +735,7 @@ async def _render_async(job: dict) -> dict:
                 ff_err.seek(0)
                 raise RuntimeError(f"ffmpeg failed: {ff_err.read().decode(errors='replace').strip()[:300]}")
             tmp.replace(out)
-            for note in ([seek_error] if seek_error else []) + fonts + inspect(out, job.get("kind", ""), size):
+            for note in ([seek_error] if seek_error else []) + fonts + inspect(out, job.get("kind", ""), size, job.get("keep_out")):
                 _note(notes, note)
         except _Stuck as e:
             result["error"] = f"{e}; left out. Fix graphics/{out.with_suffix('.html').name} and run `roughcut render`"
@@ -684,7 +803,7 @@ def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path
 
 def render(
     placed: list[PlacedGraphic], html: dict[str, str], folder: Path, tl: Timeline, *, workers: int, warnings: list[str],
-    previous: dict | None = None, notes: dict[str, list[str]] | None = None,
+    previous: dict | None = None, notes: dict[str, list[str]] | None = None, keep_out: dict[str, float] | None = None,
 ) -> dict[str, Path]:
     """Render what's new or changed; reuse clips whose design and length are the same.
 
@@ -703,7 +822,7 @@ def render(
         notes[gid] = [str(n) for n in old.get(gid, {}).get("notes") or []]
     jobs = [
         {"id": g.id, "slug": g.slug, "kind": g.spec.kind, "html": html[g.id], "frames": g.frames, "fps": 1 / float(fd), "rate": rate,
-         "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "out": str(folder / f"{g.slug}.mov")}
+         "canvas": canvas(tl.width, tl.height), "size": (tl.width, tl.height), "keep_out": keep_out, "out": str(folder / f"{g.slug}.mov")}
         for g in placed
         if g.id in html and g.id not in done
     ]
@@ -784,8 +903,8 @@ def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float,
     return boxes
 
 
-def inspect(path: Path, kind: str, size: tuple[int, int]) -> list[str]:
-    """What a viewer would notice: blank, never animating off, or outside the title-safe area."""
+def inspect(path: Path, kind: str, size: tuple[int, int], keep_out: dict[str, float] | None = None) -> list[str]:
+    """What a viewer would notice: blank, never animating off, outside the title-safe area, under platform buttons."""
     boxes = visible_boxes(path, size)
     if not boxes:
         return []
@@ -801,7 +920,18 @@ def inspect(path: Path, kind: str, size: tuple[int, int]) -> list[str]:
         outside = [b for b in hold if b[0] < m or b[1] < m or b[2] > 1 - m or b[3] > 1 - m]
         if len(outside) * 2 > len(hold):
             notes.append("reaches outside the title-safe area (5% in from the edges)")
+        zones = platform_zones(*size) if keep_out is None else keep_out
+        under = [side for side, part in zones.items() if len([b for b in hold if _covers(b, side, part)]) * 2 > len(hold)]
+        if under:
+            notes.append(f"sits under the app's buttons and captions on a vertical video ({', '.join(f'{s} {zones[s]:.0%}' for s in under)})")
     return notes
+
+
+def _covers(box: tuple[float, float, float, float], side: str, part: float) -> bool:
+    """Whether a visible box reaches into a strip along one side of the frame."""
+    x0, y0, x1, y1 = box
+    g = QC_GRACE
+    return {"top": y0 < part - g, "bottom": y1 > 1 - part + g, "left": x0 < part - g, "right": x1 > 1 - part + g}.get(side, False)
 
 
 def _took(seconds: float) -> str:
@@ -855,6 +985,8 @@ def write_manifest(
     entries = []
     for g in placed:
         entry = {"id": g.id, "index": g.index, **asdict(g.spec), "start_frame": g.start, "frames": g.frames}
+        if g.over:
+            entry["over"] = g.over
         if g.id in html:
             entry["html"] = f"graphics/{g.slug}.html"
             entry["digest"] = _digest(html[g.id], g.frames, rate, tl.width, tl.height)
@@ -897,19 +1029,28 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
     return specs, html, str(data.get("style", ""))
 
 
-def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int, saved_html: dict[int, str] | None = None) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
-    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings)."""
+def make(
+    provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
+    saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None,
+) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
+    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
+
+    keep_out overrides the strips of a vertical frame that designs stay out of (VERTICAL_KEEP_OUT).
+    """
     warnings: list[str] = []
     placed = place(specs, tl, analysis, warnings)
     if not placed:
         return [], [], warnings
+    look_under(placed, tl, analysis)
     folder = out_dir / "graphics"
     if saved_html is not None:
         progress.stage("graphics", f"Re-timing {len(placed)} graphics")
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
     else:
         progress.stage("graphics", f"Designing {len(placed)} graphics")
-        html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings)
+        html = design(
+            provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings, keep_out=keep_out
+        )
     # Every design is on disk before rendering starts: if rendering fails or is stopped,
     # `roughcut render` re-renders them without asking the model again.
     previous = _read_manifest(out_dir)
@@ -917,7 +1058,7 @@ def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, o
     kept = unchanged(placed, html, folder, tl, previous)
     write_manifest(out_dir, placed, kept, html, tl, style, notes={k: v for k, v in _old_notes(previous).items() if k in kept})
     notes: dict[str, list[str]] = {}
-    files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes)
+    files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out)
     clips = attach(tl, placed, files, warnings)
     write_manifest(out_dir, placed, files, html, tl, style, notes=notes)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")

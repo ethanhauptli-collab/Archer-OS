@@ -423,3 +423,105 @@ def test_the_same_note_on_several_graphics_is_one_warning():
         "graphic G03: console error: 0", "graphic G03: console error: 1", "graphic G03: console error: 2",
         "graphic G03: 2 more messages from its scripts",
     ]
+
+
+# ------------------------------------------------------------------ T11: one at a time, safe zones, the shot underneath
+
+
+def spec(kind, seg, words, text, seconds):
+    return {"kind": kind, "segment": seg, "words": words, "text": text, "subtext": "", "seconds": seconds, "direction": ""}
+
+
+def placed_for(specs):
+    a, plan, tl = small_cut(specs)
+    warnings: list[str] = []
+    return graphics.place(plan.graphics, tl, a, warnings), warnings, 1 / float(tl.frame_duration)
+
+
+def test_an_overlapping_graphic_shortens_the_one_before_it():
+    (lower, stat), warnings, fps = placed_for([spec("lower_third", "V01.S003", "Today", "Lower", 4), spec("stat", "V01.S004", "long day", "Stat", 2)])
+    assert lower.start + lower.frames == stat.start - graphics.GAP_FRAMES and lower.frames >= graphics.MIN_SECONDS * fps
+    assert warnings == [f"graphic 'Lower' shortened to {lower.frames / fps:.1f}s so it's gone before 'Stat'"]
+
+
+def test_an_overlapping_graphic_is_left_out_when_the_one_before_cant_make_room():
+    caption = spec("kinetic_caption", "V01.S003", "Today we're heading up the mountain", "Today we're heading up the mountain", 0)
+    # Too little room left for the caption.
+    placed, warnings, _ = placed_for([caption, spec("stat", "V01.S003", "heading", "Stat", 2)])
+    assert [g.spec.text for g in placed] == [caption["text"]] and placed[0].frames == round(3.0 * 30000 / 1001)
+    assert warnings == ['graphic \'Stat\' would cover "Today we\'re heading up the mountain"; left out (one graphic at a time)']
+    # Room enough in seconds, but the caption would still be revealing its words.
+    long_caption = spec("kinetic_caption", "V01.S005", "The kids have been asking about this trip for weeks", "The kids", 0)
+    placed, warnings, fps = placed_for([long_caption, spec("stat", "V01.S005", "this trip", "Trip", 2)])
+    (only,) = placed
+    assert only.spec.kind == "kinetic_caption" and warnings == ["graphic 'Trip' would cover 'The kids'; left out (one graphic at a time)"]
+    assert only.word_times[-1][1] > 2.5  # "weeks." comes well after the stat would have started
+
+
+def test_graphics_are_numbered_in_the_order_they_appear():
+    placed, warnings, _ = placed_for([spec("stat", "V01.S005", "asking", "Later", 2), spec("lower_third", "V01.S003", "Today", "Earlier", 2)])
+    assert [(g.id, g.index, g.spec.text) for g in placed] == [("G01", 1, "Earlier"), ("G02", 0, "Later")] and not warnings
+
+
+def test_vertical_designs_are_told_where_the_platform_buttons_are():
+    a, plan, tl = small_cut(fmt="1080x1920")
+    placed = graphics.place(plan.graphics, tl, a, [])
+    vertical = graphics._design_request(placed, a, tl.frame_duration, brief="", style="", width=1080, height=1920)
+    assert "1080x1920 CSS pixels, rendered at 1080x1920" in vertical
+    for line in ("- top 269 px (y 0-269)", "- bottom 384 px (y 1536-1920)", "- right 130 px (x 950-1080)"):
+        assert line in vertical
+    assert "Reels, TikTok and Shorts" in vertical and "keep all text and plates out of them" in graphics.DESIGN_SYSTEM
+    custom = graphics._design_request(placed, a, tl.frame_duration, brief="", style="", width=1080, height=1920, keep_out={"bottom": 0.25})
+    assert "- bottom 480 px (y 1440-1920)" in custom and "- top" not in custom
+    landscape = graphics._design_request(placed, a, tl.frame_duration, brief="", style="", width=1920, height=1080)
+    assert "Reels" not in landscape and "- bottom" not in landscape
+    assert graphics.platform_zones(1080, 1350) == {}  # 4:5 feed posts have no button strips
+
+
+@needs_renderer
+def test_a_graphic_under_the_platform_buttons_is_flagged(tmp_path):
+    def notes(css, gid):
+        job = job_for(tmp_path, _plate(css), frames=30, gid=gid, kind="lower_third", size=(180, 320))
+        job["canvas"] = graphics.canvas(180, 320)
+        result = graphics._render_one(job)
+        assert result["error"] is None
+        return result["notes"]
+
+    assert notes("left:8%;bottom:8%", "G01") == ["sits under the app's buttons and captions on a vertical video (bottom 20%)"]
+    assert notes("left:8%;top:45%", "G02") == []
+
+
+def test_designers_are_told_what_each_graphic_sits_over(footage, tmp_path):
+    from roughcut.analyze import Clip
+    from roughcut.media import probe
+    from roughcut.providers import ImagePart
+
+    talk = make_clip("V01", seconds=20, sentences=SPEECH)
+    broll = Clip(id="V02", media=probe(footage / "broll.mp4"), role="broll", visual={"description": "Test pattern bars", "shot": "wide"})
+    a = Analysis(clips=[talk, broll])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S003", "V01.S004", "V01.S005"], "broll": [{"clip": "V02", "over": ["V01.S004"], "source_in": 1, "reason": "cover"}]}],
+        "graphics": [spec("lower_third", "V01.S003", "Today", "On camera", 1.5), spec("stat", "V01.S004", "It's going", "Over B-roll", 1.5)],
+    }
+    plan = normalize(raw, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", format_override="640x360")
+    placed = graphics.place(plan.graphics, tl, a, [])
+    graphics.look_under(placed, tl, a)
+    on_camera, over_broll = placed
+    assert on_camera.over == "V01 V01.mov (A-Roll)" and on_camera.under[0] == "V01"
+    assert over_broll.over == "V02 broll.mp4 (B-Roll): Test pattern bars; wide" and over_broll.under[0] == "V02"
+    clip, at = graphics.picture_under(tl, a, over_broll.start + over_broll.frames // 2)
+    assert clip is broll and 1.0 <= at < broll.duration
+
+    provider = FakeProvider()
+    graphics.design(provider, placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=[])
+    parts = provider.calls[-1]["parts"]
+    assert '"over": "V02 broll.mp4 (B-Roll): Test pattern bars; wide"' in parts[-1].text
+    # V01's media path is made up, so only V02's frame could be grabbed.
+    assert [p.text for p in parts[:-1] if hasattr(p, "text")] == ["G02 sits over V02 broll.mp4 (B-Roll): Test pattern bars; wide"]
+    images = [p for p in parts if isinstance(p, ImagePart)]
+    assert len(images) == 1 and images[0].data[:2] == b"\xff\xd8"
+
+    provider.supports_vision = False  # a model that can't see gets the words only
+    graphics.design(provider, placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=[])
+    assert len(provider.calls[-1]["parts"]) == 1
