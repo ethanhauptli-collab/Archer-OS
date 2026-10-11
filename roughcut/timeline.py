@@ -1102,6 +1102,13 @@ def _shown(tl: Timeline, clip_id: str) -> list[tuple[Fraction, Fraction]]:
     return merged
 
 
+def _unseen(tl: Timeline, clip: Clip, want: int) -> bool:
+    """Does the clip still have `want` frames in a row that the cut hasn't shown?"""
+    need = want * tl.frame_duration
+    edges = [Fraction(0)] + [x for span in _shown(tl, clip.id) for x in span] + [clip.media.duration]
+    return any(edges[i + 1] - edges[i] >= need for i in range(0, len(edges), 2))
+
+
 def _fresh_in(tl: Timeline, clip: Clip, want: int, prefer: Fraction) -> Fraction:
     """In-point for `want` frames of a clip that shows as little as possible of what's already in the cut.
 
@@ -1109,11 +1116,6 @@ def _fresh_in(tl: Timeline, clip: Clip, want: int, prefer: Fraction) -> Fraction
     then from the head; failing that, the part that repeats least. A part the
     visual log calls unusable only when nothing else will do.
     """
-    return _fresh_window(tl, clip, want, prefer)[0]
-
-
-def _fresh_window(tl: Timeline, clip: Clip, want: int, prefer: Fraction) -> tuple[Fraction, Fraction]:
-    """_fresh_in, and the seconds of footage already in the cut that part shows again."""
     m, fd = clip.media, tl.frame_duration
     grid = m.frame_duration or fd
     need = want * fd
@@ -1126,8 +1128,7 @@ def _fresh_window(tl: Timeline, clip: Clip, want: int, prefer: Fraction) -> tupl
     def repeat(s: Fraction) -> Fraction:
         return sum((max(Fraction(0), min(b, s + need) - max(a, s)) for a, b in shown), Fraction(0))
 
-    best = min(starts, key=lambda s: (_shows_unusable(clip, s, want, fd), repeat(s), s < prefer, s))
-    return best, repeat(best)
+    return min(starts, key=lambda s: (_shows_unusable(clip, s, want, fd), repeat(s), s < prefer, s))
 
 
 def _away_from(tl: Timeline, clip: Clip, on_screen: ConnectedClip, want: int) -> Fraction:
@@ -1296,10 +1297,7 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
             said, names = said_during(cursor, cursor + want)
 
             # Videos with a part the cut hasn't shown yet (all of them, until they run short).
-            new_video = {
-                c.id for c in pool
-                if c.media.kind == "video" and (not uses.get(c.id, 0) or not _fresh_window(tl, c, want, Fraction(0))[1])
-            }
+            new_video = {c.id for c in pool if c.media.kind == "video" and (not uses.get(c.id, 0) or _unseen(tl, c, want))}
 
             def rank(c: Clip) -> tuple:
                 # Long videos can be revisited (a new part each time); a still shown again, or
