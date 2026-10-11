@@ -609,6 +609,34 @@ def _extend_shot_before(tl: Timeline, analysis: Analysis, g0: int, g1: int) -> b
             return True
     return False
 
+
+def _extend_shot_after(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_still: int) -> bool:
+    """Close a sliver of a gap by starting the next shot a little earlier.
+
+    A video starts earlier in its source; a still grows, or, already at its
+    longest, moves earlier when nothing follows it (the fill covers its tail).
+    """
+    fd = tl.frame_duration
+    for c in tl.connected:
+        m = analysis.clip(c.clip_id).media
+        if c.start != g1 or not m.has_video or c.kind != "broll":
+            continue
+        if m.kind == "image":
+            if c.frames + g1 - g0 <= max_still:
+                c.frames += g1 - g0
+            elif any(o is not c and o.start <= c.end < o.end and analysis.clip(o.clip_id).media.has_video for o in tl.connected):
+                continue
+            c.start = g0
+            return True
+        grid = m.frame_duration or fd
+        src_in = tc.floor_frames(c.src_in - (g1 - g0) * fd, grid) * grid
+        if src_in < 0:
+            continue
+        c.src_in, c.start, c.frames = src_in, g0, c.frames + g1 - g0
+        return True
+    return False
+
+
 _STOP = set(
     """the and for are but not you all any can had her was one our out day get has him his how man new now old see two
     way who boy did its let put say she too use this that with have from they will what when your there their them than
@@ -703,6 +731,17 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
     shot = max(1, tc.round_frames(Fraction(style.fill_shot).limit_denominator(1000), fd))
     tiny = tc.round_frames(Fraction(1, 2), fd)
     order = {c.id: i for i, c in enumerate(analysis.clips)}
+    max_still = tc.floor_frames(Fraction(style.max_still).limit_denominator(1000), fd)
+
+    # A few frames of another clip would flash: close slivers with the shots beside them first.
+    placed_frames = 0
+    for g0, g1 in gaps:
+        if g1 - g0 < tiny and (_extend_shot_before(tl, analysis, g0, g1) or _extend_shot_after(tl, analysis, g0, g1, max_still)):
+            placed_frames += g1 - g0
+    gaps = _gaps_without_picture(tl, analysis)
+    lanes.used = {}
+    for c in tl.connected:
+        lanes.used.setdefault(c.lane, []).append((c.start, c.end))
 
     docs = {c.id: _clip_tokens(c) for c in pool}
     df: dict[str, int] = {}
@@ -715,9 +754,7 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
     for c in tl.connected:
         uses[c.clip_id] = uses.get(c.clip_id, 0) + 1
     video_cursor: dict[str, Fraction] = {}
-    placed_frames = 0
     placed_shots = 0
-    last_clip = None
 
     def said_during(f0: int, f1: int) -> tuple[set[str], list[set[str]]]:
         text = []
@@ -754,7 +791,11 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
                 # With nothing to match, moving footage beats a random still.
                 return (fit, c.media.kind == "video", -uses.get(c.id, 0), -order[c.id])
 
-            candidates = [c for c in pool if c.id != last_clip] or pool
+            # Never cut to the shot already on screen (or the one coming next), and never show
+            # a still twice: another part of a video that's next door reads better than that.
+            beside = {c.clip_id for c in tl.connected if c.end == cursor or (want == remaining and c.start == g1)}
+            fresh = [c for c in pool if not (c.media.kind == "image" and uses.get(c.id, 0))]
+            candidates = [c for c in fresh if c.id not in beside] or fresh or [c for c in pool if c.id not in beside] or pool
             best = max(candidates, key=rank)
             m = best.media
             if m.kind == "image":
@@ -782,7 +823,6 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
                 )
             )
             uses[best.id] = uses.get(best.id, 0) + 1
-            last_clip = best.id
             cursor += frames
             placed_frames += frames
             placed_shots += 1

@@ -113,3 +113,27 @@ def test_lead_is_about_two_frames():
     lead = _word_frame(tl, a, "A01.S003", "parks") - i04.start
     assert 1 <= lead <= 3
     assert Fraction(lead) * tl.frame_duration < Fraction(1, 8)
+
+
+def _no_flashes_or_repeated_stills(tl, a):
+    fd = tl.frame_duration
+    tiny = round(Fraction(1, 2) / fd)
+    assert all(c.frames >= tiny for c in tl.connected), [(c.clip_id, c.start, c.frames) for c in tl.connected]
+    stills = [c.clip_id for c in tl.connected if a.clip(c.clip_id).media.kind == "image"]
+    assert len(stills) == len(set(stills)), stills
+    shots = sorted(tl.connected, key=lambda c: c.start)
+    assert not [(p.clip_id, q.start) for p, q in zip(shots, shots[1:]) if p.clip_id == q.clip_id and p.end == q.start and q.note == "auto-fill"]
+
+
+def test_fill_never_flashes_a_few_frames_or_repeats_a_still():
+    a = narration_project()
+    for words in (("", "Honda Center", "two hotels", "parks"), ("", "", "", "")):
+        tl = build_timeline(normalize(_honda_plan(words), a), a, style=STYLES["medium"], name="t")
+        _no_flashes_or_repeated_stills(tl, a)
+        assert min(c.start for c in tl.connected) == 0  # the first shot starts with the narration's padding
+    # A capped still at the start moves up rather than leaving a sliver for a flash shot.
+    raw = {"sections": [{"name": "Plan", "items": ["A01.S003"], "broll": [{"clip": "I02", "over": ["A01.S003"], "words": "", "source_in": -1, "reason": ""}]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    _no_flashes_or_repeated_stills(tl, a)
+    first = min(tl.connected, key=lambda c: c.start)
+    assert first.clip_id == "I02" and first.start == 0
