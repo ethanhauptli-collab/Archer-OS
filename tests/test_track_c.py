@@ -235,3 +235,87 @@ def test_a_short_uh_is_cut_from_narration_and_left_on_camera():
     assert any(n.startswith("Left 1 short um/uh on camera") for n in tl.notes)
     keep = build_timeline(heuristic_plan(a), a, style=STYLES["medium"].__class__(0.1, 0.2, 0.6, remove_fillers=False), name="t")
     assert not any("um/uh" in n for n in keep.notes)
+
+
+# ------------------------------------------------------------ T14: length and review
+
+
+@pytest.mark.parametrize("style", ["tight", "medium", "loose"])
+def test_the_kept_length_shown_to_the_planner_is_what_gets_built(style):
+    from conftest import SPEECH
+
+    from roughcut.prompts import render_media
+    from roughcut.timeline import kept_length
+
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH)])
+    clip = a.clip("V01")
+    for seg in clip.segments:
+        kept, cuts = kept_length(seg, clip, a, STYLES[style])
+        tl = build_timeline(normalize({"sections": [{"name": "x", "items": [seg.id]}]}, a), a, style=STYLES[style], name="t")
+        assert abs(tl.seconds - kept) <= 2 * len(tl.spine) * float(tl.frame_duration), seg.id
+        assert cuts == len(tl.spine) - 1, seg.id
+    media = render_media(a, STYLES[style])
+    uh = clip.segments[5]  # "And honestly, uh, I needed it too.": the uh is cut
+    kept, _ = kept_length(uh, clip, a, STYLES[style])
+    assert f"{uh.id} [0:15.4-0:18.0 | 2.6s → {kept:.1f}s, 1 edit] And honestly" in media
+    assert render_media(a, STYLES[style]) == media  # deterministic, so the prompt cache still hits
+
+
+def test_review_finds_an_uncovered_jump_cut_and_marks_it():
+    from conftest import SPEECH
+
+    from roughcut.plan import heuristic_plan
+
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH), make_clip("V02", seconds=10)])
+    raw = {"sections": [{"name": "Open", "items": ["V01.S003", "V01.S005"]}, {"name": "End", "items": ["V01.S006"]}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t", target_seconds=10)
+    rv = tl.review
+    assert rv.target == 10 and "target 0:10" in rv.length_line() and "under" in rv.length_line()
+    assert [s for s, _ in rv.sections] == ["Open", "End"] and sum(sec for _, sec in rv.sections) == pytest.approx(tl.seconds)
+    lines = [(j.before, j.after) for j in rv.jump_cuts]
+    assert (["V01.S003"], ["V01.S005"]) in lines and (["V01.S005"], ["V01.S006"]) in lines
+    jump = next(j for j in rv.jump_cuts if j.before == ["V01.S003"])
+    todo = [m for m in tl.markers if m.kind == "todo" and m.value.startswith("Jump cut")]
+    assert jump.frame in [m.frame for m in todo] and "V01.S003" in todo[0].note
+    assert any("Jump cuts on camera with no B-roll over them: " in x for x in rv.lines(tl.frame_duration))
+
+    # A cutaway over the next line hides the jump: it starts on the edit, not after the padding.
+    raw["sections"][0]["broll"] = [{"clip": "V02", "over": ["V01.S005"], "words": "", "source_in": -1, "reason": ""}]
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    assert (["V01.S003"], ["V01.S005"]) not in [(j.before, j.after) for j in tl.review.jump_cuts]
+    v02 = next(c for c in tl.connected if c.clip_id == "V02")
+    edit = next(sc.offset for sc in tl.spine if "V01.S005" in sc.seg_ids)
+    assert v02.start == edit
+
+    # The stringout is all jump cuts by design: reviewed, not marked.
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    assert tl.review.jump_cuts and not [m for m in tl.markers if m.value.startswith("Jump cut")]
+
+
+def test_review_counts_fill_and_repeated_stills():
+    a = narration_project()
+    raw = {"sections": [{"name": "x", "items": ["A01.S002", "I02@0-3", "A01.S003"], "broll": [
+        {"clip": "I02", "over": ["A01.S002"], "words": "", "source_in": -1, "reason": ""},
+    ]}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    assert tl.review.repeated_stills == {"I02": 2}
+    assert tl.review.filled_shots > 0 and tl.review.filled_seconds > 10
+
+
+def test_report_and_render_say_how_long_against_the_target(footage, tmp_path, monkeypatch, capsys):
+    from conftest import FakeProvider
+
+    from roughcut import pipeline
+    from roughcut.cli import main
+
+    provider = FakeProvider()
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "-t", "1m", "--no-menu", "--name", "f"]) == 0
+    printed = capsys.readouterr().out
+    assert "Rough cut: 0:" in printed and ", target 1:00 (" in printed
+    report = (out / "edit_report.md").read_text()
+    assert "target 1:00" in report and "## Cut check" in report
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert ", target 1:00 (" in capsys.readouterr().out
+    assert "target 1:00" in (out / "edit_report.md").read_text()

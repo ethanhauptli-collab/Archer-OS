@@ -403,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
         for w in result.warnings:
             if "planning failed" in w or "no usable sections" in w:
                 print(f"*** {w}")
-    print(f"\nRough cut: {seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
+    print(f"\nRough cut: {tl.review.length_line() if tl.review else seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
     if result.stringout is not None:
         print(f"Stringout: {seconds_to_clock(result.stringout.seconds)}")
     if result.dead_air and result.dead_air[0] > 0:

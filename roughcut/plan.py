@@ -221,6 +221,7 @@ class Plan:
     source: str = ""
     warnings: list[str] = field(default_factory=list)
     graphics: list[GraphicSpec] = field(default_factory=list)
+    target_seconds: float | None = None  # the length the brief asked for (not the model's)
 
     def to_json(self) -> dict:
         return {
@@ -248,6 +249,7 @@ class Plan:
             "source": self.source,
             "warnings": self.warnings,
             "graphics": [asdict(g) for g in self.graphics],
+            "target_seconds": self.target_seconds,
         }
 
 

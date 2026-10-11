@@ -92,6 +92,8 @@ class Timeline:
     seg_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    target_seconds: float | None = None  # the length the brief asked for
+    review: "Review | None" = None  # length vs target, uncovered jump cuts, fill, repeated stills
 
     @property
     def total_frames(self) -> int:
@@ -364,6 +366,7 @@ def build_timeline(
     broll_db: float | None = -20.0,
     music_db: float = -14.0,
     fill: bool = True,
+    target_seconds: float | None = None,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -451,6 +454,10 @@ def build_timeline(
     if fill:
         _fill_picture(tl, analysis, style, broll_db, lanes)
     _place_music(tl, plan, analysis, music_db, warnings)
+    tl.target_seconds = target_seconds
+    tl.review = review(tl, plan, analysis, target_seconds)
+    if plan.source != "heuristic":  # a stringout is all jump cuts by design
+        _mark_jump_cuts(tl, tl.review)
     _place_markers(tl, plan, analysis)
     tl.warnings = warnings
     return tl
@@ -491,6 +498,7 @@ def _place_broll(
     fd = tl.frame_duration
     min_frames = tc.ceil_frames(Fraction(style.min_broll).limit_denominator(1000), fd)
     max_still = tc.floor_frames(Fraction(style.max_still).limit_denominator(1000), fd)
+    reach = tc.round_frames(Fraction(1, 2), fd)
     for section in plan.sections:
         # Consecutive entries over the same lines play one after another, so a
         # long narrated sentence can get several shots.
@@ -504,8 +512,7 @@ def _place_broll(
             ranges = [tl.seg_ranges[s] for s in group[0].over if s in tl.seg_ranges]
             if not ranges:
                 continue
-            start = min(r[0] for r in ranges)
-            end = max(r[1] for r in ranges)
+            start, end = _snap_to_edits(tl, min(r[0] for r in ranges), max(r[1] for r in ranges), reach)
             if end - start < min_frames:
                 end = min(tl.total_frames, start + min_frames)
             # A shot named on words comes in as they're spoken; the others share the time between.
@@ -540,6 +547,22 @@ def _place_broll(
                         )
                     )
                     cursor += frames
+
+
+def _snap_to_edits(tl: Timeline, start: int, end: int, reach: int) -> tuple[int, int]:
+    """Start and end a cutaway on the edit next to its lines, not a few frames of padding away.
+
+    Starting three frames after a cut would flash the speaker (or show the
+    jump the cutaway is there to hide). The very start and end of the
+    timeline aren't edits, so they're left alone.
+    """
+    head = tl.spine_at(start)
+    if head is not None and head.offset > 0 and 0 < start - head.offset <= reach:
+        start = head.offset
+    tail = tl.spine_at(end - 1)
+    if tail is not None and tail.end < tl.total_frames and 0 < tail.end - end <= reach:
+        end = tail.end
+    return start, end
 
 
 BROLL_LEAD = 0.07  # a cutaway named on words comes in about two frames before them
@@ -905,6 +928,123 @@ def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:
             frame = rng[0]
         tl.markers.append(Marker(frame=frame, value=flag["note"][:120], kind="todo", note=flag["note"]))
     tl.markers.sort(key=lambda mk: mk.frame)
+
+
+# ------------------------------------------------------------------ review
+
+
+def kept_length(seg: Segment, clip: Clip, analysis: Analysis, style: Style) -> tuple[float, int]:
+    """(seconds, cuts): how long a segment plays on its own in the cut, and the edits inside it.
+
+    The same pause and filler trimming the timeline does, so the planner's
+    sums match what gets built.
+    """
+    pieces = _cut_silences(_merge(speech_pieces(seg, clip, style, 0), style.max_gap), analysis, style)
+    return sum(p.b - p.a for p in pieces), max(0, len(pieces) - 1)
+
+
+@dataclass
+class JumpCut:
+    frame: int  # timeline frame of the edit
+    clip_id: str
+    before: list[str]  # segment IDs on each side
+    after: list[str]
+    src_from: float  # clip-local seconds where the picture jumps from / to
+    src_to: float
+
+    @property
+    def between_lines(self) -> bool:
+        return set(self.before) != set(self.after)
+
+
+@dataclass
+class Review:
+    seconds: float
+    target: float | None
+    sections: list[tuple[str, float]]
+    jump_cuts: list[JumpCut]  # same-clip edits on camera with no B-roll over them
+    filled_seconds: float
+    filled_shots: int
+    repeated_stills: dict[str, int]  # clip ID -> times shown
+
+    def length_line(self) -> str:
+        line = tc.seconds_to_clock(self.seconds)
+        if self.target:
+            off = (self.seconds - self.target) / self.target
+            how = "on target" if abs(off) < 0.005 else f"{abs(off):.0%} {'over' if off > 0 else 'under'}"
+            line += f", target {tc.seconds_to_clock(self.target)} ({how})"
+        return line
+
+    def lines(self, frame_duration: Fraction) -> list[str]:
+        out = [f"Length: {self.length_line()}" + ("" if self.target else ", no target given")]
+        if len(self.sections) > 1:
+            out.append("Sections: " + ", ".join(f"{name} {tc.seconds_to_clock(sec)}" for name, sec in self.sections))
+        if self.jump_cuts:
+            shown = [
+                f"{tc.seconds_to_clock(float(j.frame * frame_duration))} {j.clip_id} "
+                f"({', '.join(j.before) or 'range'} \u2192 {', '.join(j.after) or 'range'})"
+                for j in self.jump_cuts[:12]
+            ]
+            more = f" and {len(self.jump_cuts) - 12} more" if len(self.jump_cuts) > 12 else ""
+            out.append(f"Jump cuts on camera with no B-roll over them: {len(self.jump_cuts)}: " + "; ".join(shown) + more)
+        else:
+            out.append("Jump cuts on camera with no B-roll over them: none")
+        if self.filled_shots:
+            out.append(f"Auto-filled: {tc.seconds_to_clock(self.filled_seconds)} of narration ({self.filled_shots} shot{'s' if self.filled_shots != 1 else ''} the plan didn't name)")
+        if self.repeated_stills:
+            out.append("Stills shown more than once: " + ", ".join(f"{cid} ({n}x)" for cid, n in sorted(self.repeated_stills.items())))
+        return out
+
+
+def review(tl: Timeline, plan: Plan, analysis: Analysis, target_seconds: float | None = None) -> Review:
+    """Measure a built cut: length against the target, and what an editor would fix first."""
+    fd = tl.frame_duration
+    starts = list(tl.section_starts) + [(tl.total_frames, "")]
+    sections = [(name, float((nxt - frame) * fd)) for (frame, name), (nxt, _) in zip(starts, starts[1:])]
+    pictures = [c for c in tl.connected if c.kind == "broll" and analysis.clip(c.clip_id).media.has_video]
+    jumps = []
+    for a, b in zip(tl.spine, tl.spine[1:]):
+        m = analysis.clip(b.clip_id).media
+        if a.clip_id != b.clip_id or m.kind != "video" or a.src_in + a.frames * fd == b.src_in:
+            continue
+        if any(c.start <= b.offset <= c.end for c in pictures):
+            continue  # a cutaway hides it
+        jumps.append(JumpCut(b.offset, b.clip_id, list(a.seg_ids), list(b.seg_ids), float(a.src_in + a.frames * fd), float(b.src_in)))
+    shown: Counter = Counter()
+    for sc in tl.spine:
+        if analysis.clip(sc.clip_id).media.kind == "image":
+            shown[sc.clip_id] += 1
+    for c in pictures:
+        if analysis.clip(c.clip_id).media.kind == "image":
+            shown[c.clip_id] += 1
+    filled = [c for c in pictures if c.note == "auto-fill"]
+    return Review(
+        seconds=tl.seconds,
+        target=target_seconds,
+        sections=sections,
+        jump_cuts=jumps,
+        filled_seconds=float(sum(c.frames for c in filled) * fd),
+        filled_shots=len(filled),
+        repeated_stills={cid: n for cid, n in shown.items() if n > 1},
+    )
+
+
+MAX_JUMP_MARKERS = 10
+
+
+def _mark_jump_cuts(tl: Timeline, rv: Review) -> None:
+    """To-do markers on the uncovered jump cuts that matter most: between lines first, then pause trims."""
+    worst = sorted(rv.jump_cuts, key=lambda j: (not j.between_lines, -(abs(j.src_to - j.src_from))))[:MAX_JUMP_MARKERS]
+    for j in sorted(worst, key=lambda j: j.frame):
+        what = f"{', '.join(j.before) or 'range'} \u2192 {', '.join(j.after) or 'range'}"
+        tl.markers.append(
+            Marker(
+                frame=j.frame,
+                value="Jump cut: cover with B-roll or smooth it",
+                kind="todo",
+                note=f"{j.clip_id} jumps from {tc.seconds_to_clock(j.src_from, millis=True)} to {tc.seconds_to_clock(j.src_to, millis=True)} ({what})",
+            )
+        )
 
 
 def timeline_stats(tl: Timeline) -> dict:

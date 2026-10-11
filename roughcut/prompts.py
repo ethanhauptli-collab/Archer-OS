@@ -7,8 +7,13 @@ different brief only pays for the brief.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .analyze import ROLE_LABELS, Analysis, Clip
 from .timecode import seconds_to_clock
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .timeline import Style
 
 PLANNER_SYSTEM = """\
 You are an experienced documentary and YouTube editor acting as an assistant editor. You receive an \
@@ -39,8 +44,9 @@ setup talk, and off-topic chatter. If the brief asks for a candid or raw feel, k
 unscripted moments.
 4. Keep dependent lines together. Don't strand a "because..." without its setup, or a punchline \
 without its setup.
-5. Length: if a target is given, hit it within about 10%. Each segment's duration is shown; the \
-cut is roughly the sum of selected segments and ranges (slightly shorter after pause trimming).
+5. Length: if a target is given, hit it within about 10%. Each segment shows its length as \
+recorded, then after the arrow how long it plays in the cut once its pauses and um/uh are \
+trimmed (and how many edits that takes). The cut is the sum of those kept lengths and your ranges.
 6. B-roll: cover jump cuts and illustrate what is being said. Each cutaway sits "over" one or more \
 consecutive segments of the same section. Several cutaways with the same "over" play one after \
 another and share that time, so a 20-second line can get four 5-second shots. Hold shots about \
@@ -130,7 +136,11 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     return ", ".join(bits)
 
 
-def render_media(analysis: Analysis) -> str:
+def render_media(analysis: Analysis, style: "Style | None" = None) -> str:
+    """The media inventory the planner reads. Deterministic for a given analysis and style."""
+    from .timeline import STYLES, kept_length
+
+    style = style or STYLES["medium"]
     clips = [c for c in analysis.clips if not c.hidden]
     total = sum(float(c.media.duration) for c in clips)
     speech = sum(c.speech_seconds for c in clips if c.has_transcript)
@@ -153,8 +163,11 @@ def render_media(analysis: Analysis) -> str:
             lines.append(f"Visual: {desc}. Shot: {v.get('shot', '')}. Tags: {tags}.{q_note}")
         if clip.has_transcript:
             for s in clip.segments:
+                kept, cuts = kept_length(s, clip, analysis, style)
+                edits = f", {cuts} edit{'s' if cuts > 1 else ''}" if cuts else ""
                 lines.append(
-                    f"{s.id} [{seconds_to_clock(s.start, millis=True)}-{seconds_to_clock(s.end, millis=True)} | {s.duration:.1f}s] {s.text}"
+                    f"{s.id} [{seconds_to_clock(s.start, millis=True)}-{seconds_to_clock(s.end, millis=True)} | "
+                    f"{s.duration:.1f}s \u2192 {kept:.1f}s{edits}] {s.text}"
                 )
         lines.append("")
     return "\n".join(lines)

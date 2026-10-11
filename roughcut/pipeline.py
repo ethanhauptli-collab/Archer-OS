@@ -134,7 +134,7 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
 
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
     parts = [
-        TextPart("<media>\n" + render_media(analysis) + "\n</media>", cache=True),
+        TextPart("<media>\n" + render_media(analysis, style_for(opts)) + "\n</media>", cache=True),
         TextPart(render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)),
     ]
     # Thinking counts against max_tokens; a long narration plan needs the room.
@@ -147,8 +147,10 @@ def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tu
 def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> tuple[Timeline, Timeline | None]:
     progress.stage("cut", f"Cutting ({opts.style})")
     style = style_for(opts)
+    plan.target_seconds = opts.target_seconds or plan.target_seconds  # saved with the plan, so `render` reports it too
     rough = build_timeline(
-        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill
+        plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
+        target_seconds=plan.target_seconds,
     )
     stringout = None
     if opts.stringout:
@@ -236,7 +238,7 @@ def build(opts: Options) -> Result:
             analysis.save(out_dir / "analysis.json")
 
     (out_dir / "prompt.md").write_text(
-        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n"
+        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n"
         + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)
     )
 
@@ -306,6 +308,7 @@ def rerender(out_dir: Path, opts: Options) -> Result:
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    plan.target_seconds = saved["plan"].get("target_seconds")
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     rough, stringout = make_timelines(plan, analysis, opts, name)
