@@ -13,13 +13,15 @@ ffmpeg -loglevel error -y -f lavfi -i "testsrc2=size=1920x1080:rate=24" -i speec
     -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest talk.mp4
 ffmpeg -loglevel error -y -f lavfi -i "mandelbrot=size=1920x1080:rate=24" -t 6 -c:v libx264 -pix_fmt yuv420p broll_park.mp4
 ffmpeg -loglevel error -y -f lavfi -i "color=c=orange:size=1600x1200" -frames:v 1 still_festival.jpg
+ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=220:duration=40:sample_rate=48000" -c:a aac ../bed.m4a
 rm part1.aiff part2.aiff speech.wav
 cd ..
 echo "$DUR" > source_seconds.txt
 python -m roughcut doctor --offline || true
-python -m roughcut build Footage --provider none --whisper-model mlx-community/whisper-tiny --no-menu
+python -m roughcut build Footage --provider none --whisper-model mlx-community/whisper-tiny --no-menu --music bed.m4a --preset venture-oc
 OUT=Footage_roughcut
-ls -la "$OUT"
+python -m roughcut render "$OUT" --style loose --format vertical
+ls -la "$OUT" "$OUT/history"
 python - "$OUT" <<'PY'
 import sys
 from fractions import Fraction
@@ -27,10 +29,14 @@ from pathlib import Path
 from lxml import etree
 
 out = Path(sys.argv[1])
-fcpxml = next(out.glob("*.fcpxml"))
 dtd = etree.DTD(str(Path("..") / "tests" / "fixtures" / "FCPXMLv1_10.dtd"))
+for f in [out / "Footage v2.fcpxml", *out.glob("history/*/Footage v1.fcpxml")]:
+    assert dtd.validate(etree.parse(str(f))), (f, dtd.error_log.filter_from_errors())
+fcpxml = next(out.glob("history/*/Footage v1.fcpxml"))
 doc = etree.parse(str(fcpxml))
-assert dtd.validate(doc), dtd.error_log.filter_from_errors()
+assert "music" in etree.tostring(doc).decode(), "the --music bed isn't in the cut"
+vertical = etree.parse(str(out / "Footage v2.fcpxml")).find(".//format")
+assert int(vertical.get("height")) > int(vertical.get("width")), "render --format vertical didn't make a vertical sequence"
 analysis = (out / "analysis.json").read_text()
 assert "festival" in analysis.lower(), "mlx-whisper transcript is missing the spoken words"
 projects = doc.findall(".//project")

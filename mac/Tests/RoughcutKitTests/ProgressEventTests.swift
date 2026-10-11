@@ -34,6 +34,13 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNotNil(result.stringoutSeconds)
         XCTAssertFalse(result.fellBack)
         XCTAssertFalse(result.warnings.isEmpty)
+        // Keys added with numbered versions and the run summary.
+        XCTAssertEqual(result.version, 1)
+        XCTAssertTrue(result.project?.contains("Rough Cut v1") ?? false)
+        XCTAssertNotNil(result.event)
+        XCTAssertNotNil(result.visualLog)
+        XCTAssertNotNil(result.skipped)
+        XCTAssertTrue(result.reportHtml?.hasSuffix(".html") ?? false)
     }
 
     func testUnknownStageStillDecodes() throws {
