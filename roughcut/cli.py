@@ -111,10 +111,15 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("render", help="rebuild the FCPXML from a previous run's plan (no model calls)")
     r.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`")
     r.add_argument("--preset", help="use a preset's pacing and format; flags you type win")
+    r.add_argument(
+        "--design-missing", action="store_true",
+        help="also design the planned motion graphics that have no design yet (the run stopped or ran out of plan before designing them): "
+        "calls the run's model for those only; the cut isn't re-planned",
+    )
     _add_render_args(r)
 
     rv = sub.add_parser("revise", help="re-plan the latest cut from your notes, as a new version (no re-transcription)")
-    rv.add_argument("out_dir", help="a folder written by `roughcut build`")
+    rv.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`")
     rv.add_argument("notes", nargs="?", default="", help='what to change, e.g. "tighter hook, drop the second Roy Choi line, more drone over the intro"')
     rv.add_argument("--notes-file", help="read the notes from a text file")
     rv.add_argument("--keep", action="append", default=[], metavar="IDS", help="segment or clip IDs the new cut must keep (comma-separated or repeated)")
@@ -186,8 +191,8 @@ def _apply_preset(args, argv: list[str]):
 
 
 def _resolve_paths(args, argv: list[str]) -> str | None:
-    """Rejoin paths zsh split at spaces (build inputs, render's folder). Returns an error, or None."""
-    from .paths import PathInputError, resolve
+    """Rejoin paths zsh split at spaces (build inputs, render's and revise's folder). Returns an error, or None."""
+    from .paths import PathInputError, leading_folder, resolve
 
     note = lambda line: print(line, file=sys.stderr)  # noqa: E731
     try:
@@ -198,9 +203,23 @@ def _resolve_paths(args, argv: list[str]) -> str | None:
             if len(found) != 1:
                 return "render takes one output folder; put a path with spaces in quotes."
             args.out_dir = found[0]
+        elif args.command == "revise":
+            # The folder, then the notes: a folder path with spaces typed without quotes arrives in pieces.
+            pieces = list(args.out_dir) + ([args.notes] if args.notes else [])
+            args.out_dir, rest = leading_folder(pieces, wanted="plan.json", notify=note)
+            args.notes = " ".join(rest)
     except PathInputError as e:
         return str(e)
     return None
+
+
+def _music_problem(args) -> str | None:
+    """A --music file that's missing or not audio, found before the output folder is made."""
+    if args.command != "build":
+        return None
+    from .pipeline import music_problem
+
+    return next((p for p in (music_problem(song) for song in args.music) if p), None)
 
 
 def _key_command(action: str, openai: bool) -> int:
@@ -475,10 +494,10 @@ def main(argv: list[str] | None = None) -> int:
         from .presets import command
 
         return command(args)
-    if args.command in ("build", "render"):
+    if args.command in ("build", "render", "revise"):
         # Before anything runs or any folder is created.
-        args, problem = _apply_preset(args, argv)
-        problem = problem or _resolve_paths(args, argv)
+        args, problem = _apply_preset(args, argv) if args.command != "revise" else (args, None)
+        problem = problem or _resolve_paths(args, argv) or _music_problem(args)
         if problem:
             progress.enable(bool(args.progress_json))
             print(f"roughcut: {problem}", file=sys.stderr)
@@ -597,7 +616,9 @@ def _run(args, json_mode: bool) -> int:
     common = dict(name=args.name, **given)
     try:
         if args.command == "render":
-            result = rerender(Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common), overrides=set(given))
+            result = rerender(
+                Path(args.out_dir).expanduser().resolve(), Options(inputs=[], **common), overrides=set(given), design_missing=args.design_missing
+            )
         elif args.command == "revise":
             from .pipeline import revise
 
@@ -660,25 +681,26 @@ def _run(args, json_mode: bool) -> int:
             )
             result = build(opts)
     except (ProviderError, ValueError, RuntimeError, OSError) as e:
-        hint = resume_hint(e)
+        hint, command = resume_hint(e), resume_command(e)
         print(f"roughcut: {e}", file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
-        progress.emit("error", message=str(e), **({"resume": resume_command(e)} if hint else {}), **_error_kind(e))
+        progress.emit("error", message=str(e), **({"resume": command} if command else {}), **_error_kind(e))
         _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
         _OUTCOME["text"] = f"Stopped: {e}"
         return 1
     except KeyboardInterrupt as e:
+        # Ctrl-C isn't a crash: no traceback scrolling the hint away; it's the last thing printed.
         hint = resume_hint(e)
-        if hint:
-            print(f"\n{hint}", file=sys.stderr)
+        print("\nStopped (Ctrl-C)." + (f"\n{hint}" if hint else ""), file=sys.stderr)
         _log_end("STOPPED: interrupted (Ctrl-C)" + (f"\n{hint}" if hint else ""))
-        raise
+        return 130
     except Exception as e:  # a bug: tell the app, then show the traceback
-        progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}")
+        hint, command = resume_hint(e), resume_command(e)
+        # With the command, the app still offers to finish the paid-for plan without AI.
+        progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}", **({"resume": command} if command else {}), **_error_kind(e))
         import traceback
 
-        hint = resume_hint(e)
         if hint:
             print(hint, file=sys.stderr)
         _log_end("STOPPED by a bug:\n" + traceback.format_exc() + (f"\n{hint}" if hint else ""))
@@ -744,7 +766,8 @@ def summary_lines(summary: dict) -> list[str]:
     g = summary.get("graphics")
     if g is not None:
         if g.get("note"):
-            left.append(f"graphics: {g['note']}")
+            # As the app shows it: the count, then why.
+            left.append(f"graphics {g['rendered']} of {g['planned']} on the timeline ({g['note']})" if g.get("planned") else f"graphics: {g['note']}")
         elif g["planned"]:
             text = f"graphics {g['rendered']} of {g['planned']} on the timeline"
             why = []
@@ -811,7 +834,17 @@ def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
         except (ValueError, OSError):
             pass
         reason = "cancelled" if signum == signal.SIGTERM else "the Terminal window was closed"
-        _log_end(f"STOPPED: {reason}")
+        # A signal isn't an exception: nothing marks it with the saved plan, so ask the pipeline.
+        saved = getattr(sys.modules.get(f"{__package__}.pipeline"), "PLAN_SAVED", None)
+        command = f"roughcut render {shlex.quote(str(saved))}" if saved else None
+        hint = f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}" if command else None
+        _log_end(f"STOPPED: {reason}" + (f"\n{hint}" if hint else ""))
+        if hint:
+            _write_fd(2, f"\n{hint}\n")
+        if json_mode:
+            # Straight to the file descriptor: print() from a signal handler can collide with a write in progress.
+            event = {"event": "error", "message": f"Stopped: {reason}.", "kind": "cancelled", **({"resume": command} if command else {})}
+            _write_fd(1, json.dumps(event) + "\n")
         if in_group:
             try:
                 os.killpg(0, signal.SIGTERM)
@@ -832,6 +865,13 @@ def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
         except (ValueError, OSError):  # not the main thread
             pass
     return previous
+
+
+def _write_fd(fd: int, text: str) -> None:
+    try:
+        os.write(fd, text.encode("utf-8"))
+    except OSError:  # the app or Terminal has gone already
+        pass
 
 
 def _restore_handlers(previous: dict) -> None:

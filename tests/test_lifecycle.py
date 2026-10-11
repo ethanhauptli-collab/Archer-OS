@@ -995,9 +995,9 @@ def test_graphics_of_a_cut_already_in_final_cut_outlive_its_history(tmp_path):
     out = tmp_path / "out"
     (out / "graphics").mkdir(parents=True)
     uri = (out / "graphics").as_uri()
-    # A folder from before versions: one cut, a graphic named without its digest.
+    # A folder from before versions: one cut (named after the run, as plan.json says), a graphic named without its digest.
     (out / "f.fcpxml").write_text(f'<media-rep src="{uri}/G01-title-card.mov"/>')
-    (out / "plan.json").write_text("{}")
+    (out / "plan.json").write_text('{"name": "f"}')
     (out / "graphics" / "G01-title-card.mov").write_bytes(b"x")
     for n in range(2, 10):  # every re-cut changes the graphic's length, so it renders anew
         for name in (f"G01-title-card-{n:06d}.mov", f"G02-stat-{n:06d}.partial.mov"):

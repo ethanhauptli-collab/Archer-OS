@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
+import shlex
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -21,7 +21,7 @@ from .report import build_report
 from .report_html import report_page
 from .timeline import DIALOGUE_LEVEL, STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
-from .versions import atomic_write, planner_label, safe_name
+from .versions import atomic_write, planner_label, safe_name, slug
 
 
 @dataclass
@@ -227,6 +227,17 @@ def plan_record(name: str, plan: Plan, raw_plan: dict | None, analysis: Analysis
     return record
 
 
+# The output folder whose plan this build or revise has saved, for a stop that arrives as a
+# signal (the app's cancel, a closed Terminal) and not as an exception: the CLI's signal
+# handler reads it to say how to finish the cut. None before the checkpoint.
+PLAN_SAVED: Path | None = None
+
+
+def _plan_saved_at(out_dir: Path | None) -> None:
+    global PLAN_SAVED
+    PLAN_SAVED = out_dir
+
+
 def save_checkpoint(out_dir: Path, analysis: Analysis, prompt: str, record: dict) -> None:
     """The paid-for part of a run, saved before anything that can still fail (cutting, graphics).
 
@@ -236,21 +247,22 @@ def save_checkpoint(out_dir: Path, analysis: Analysis, prompt: str, record: dict
     atomic_write(out_dir / "analysis.json", json.dumps(analysis.to_json(), indent=1))
     atomic_write(out_dir / "prompt.md", prompt)
     atomic_write(out_dir / "plan.json", json.dumps(record, indent=1))
+    _plan_saved_at(out_dir)
     if record.get("raw"):
         log("plan saved: `roughcut render` can finish this cut without calling the model again")
 
 
 def _mark_plan_saved(e: BaseException, out_dir: Path) -> None:
-    """Tell the CLI the plan survived, so it can print how to finish the cut."""
+    """Tell the CLI the plan survived, so it can print how to finish the cut.
+
+    Not for a stop whose cut is already written (`e.cut_written`): `render` would only make it again.
+    """
+    if getattr(e, "cut_written", False):
+        return
     try:
         e.plan_saved = out_dir  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - some exception types refuse attributes
         pass
-
-
-def slug(text: str) -> str:
-    s = re.sub(r"[^\w\s-]", "", text).strip()
-    return re.sub(r"\s+", " ", s) or "Roughcut"
 
 
 def default_out_dir(inputs: list[Path]) -> Path:
@@ -266,13 +278,43 @@ def style_for(opts: Options) -> Style:
     return base
 
 
+def music_problem(song: Path | str) -> str | None:
+    """What's wrong with a --music file, or None: one that isn't there is told apart from one roughcut can't read."""
+    path = Path(song).expanduser()
+    if not path.exists():
+        return f"--music {song}: can't find that file (moved, renamed, or a typo in the path?)"
+    if not path.is_file() or path.suffix.lower() not in AUDIO_EXTS:
+        return f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})"
+    return None
+
+
+def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
+    """Clips a cut uses whose files are gone from where the footage was read.
+
+    `render` and `revise` reuse that reading, so a song taken out of Downloads or a moved
+    footage folder would otherwise only show up as missing media in Final Cut.
+    """
+    used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
+    gone = [c for c in analysis.clips if c.id in used and not Path(c.media.path).exists()]
+    if not gone:
+        return []
+    named = "; ".join(f"{c.media.name} ({'the music bed, ' if c.music_bed else ''}was at {c.media.path})" for c in gone[:3])
+    more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
+    return [
+        f"{len(gone)} file{'s' if len(gone) != 1 else ''} this cut uses {'are' if len(gone) != 1 else 'is'} no longer where the footage was read: "
+        f"{named}{more}. Final Cut will show {'them' if len(gone) != 1 else 'it'} as missing media: put {'them' if len(gone) != 1 else 'it'} back, "
+        "or relink in Final Cut (File > Relink Files)."
+    ]
+
+
 def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None) -> Analysis:
     """Scan, probe, map silence and transcribe. `skipped` collects the names of files that couldn't be read."""
     require_tools()
     progress.stage("scan", "Finding media")
     for song in opts.music:
-        if not song.expanduser().is_file() or song.suffix.lower() not in AUDIO_EXTS:
-            raise RoughcutError(f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})")
+        problem = music_problem(song)
+        if problem:
+            raise RoughcutError(problem)
     files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir])
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
@@ -452,6 +494,7 @@ def build(opts: Options) -> Result:
     timings: dict[str, float] = {}
     out_dir = (opts.out or default_out_dir(opts.inputs)).expanduser().resolve()
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
+    _plan_saved_at(None)
     start_log(out_dir, "build")
 
     # Check the key before spending minutes on transcription: a rejected key
@@ -558,16 +601,21 @@ def _finish_build(
     """Cut, make graphics, write the version. `carry` (revise): earlier graphic designs to reuse."""
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
+    extra_warnings += missing_media(analysis, rough, stringout)
     entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
     extra = report_extra(rough) if report_extra else {}
     placed, with_graphics = [], analysis
     graphics_note = None
+    limit_hit, limit_missing = None, 0
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
             from . import graphics
 
             # A complete cut without graphics first: if rendering stops, there's still a cut to open.
-            pending = ["Motion graphics were still being made when this cut was written; if the run stopped there, this cut has none. `roughcut render` adds any whose designs were saved."]
+            pending = [
+                "Motion graphics were still being made when this cut was written; if the run stopped there, this cut has none. "
+                "`roughcut render` adds any whose designs were saved, and `roughcut render --design-missing` designs the rest."
+            ]
             interim = write_outputs(
                 out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
                 version=version, command=command, entry=entry, quiet=True,
@@ -582,21 +630,28 @@ def _finish_build(
                 ),
             ), partial=True)
             t = time.monotonic()
+            designer = StopAtLimit(provider)
             with progress.doing(f"making {len(plan.graphics)} motion graphics (design, then render)"):
                 if carry is not None:
-                    saved_html, house = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
+                    saved_html, house = _carry_designs(designer, plan.graphics, rough, analysis, carry, opts, extra_warnings, out_dir)
                     g_clips, placed, g_warnings = graphics.make(
                         None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
                         saved_html=saved_html, house_style=house,
                     )
                 else:
                     g_clips, placed, g_warnings = graphics.make(
-                        provider, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
+                        designer, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
                         logo=opts.graphics_logo, look=opts.graphics_look,
                     )
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
             timings["graphics"] = time.monotonic() - t
+            limit_hit = designer.limit
+            if limit_hit is not None:
+                limit_missing = undesigned(out_dir)
+                if limit_missing:
+                    graphics_note = f"{limit_missing} not designed: the usage limit was reached"
+                    extra_warnings.append(design_missing_hint(out_dir, limit_missing, after_reset=True))
         else:
             extra_warnings.append("Motion graphics were on, but the plan didn't ask for any.")
             graphics_note = "the plan asked for none"
@@ -623,18 +678,25 @@ def _finish_build(
         plan, graphics_on=opts.graphics, placed=placed, with_graphics=with_graphics, usage=usage,
         skipped_files=base.get("skipped_files"), visual_log=base.get("visual_log"), graphics_note=graphics_note,
     )
-    return save_result(Result(
+    result = save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
         version=version, project=rough.name, event=event_name(name), summary=summary,
     ))
+    if limit_hit is not None:
+        raise graphics_limit_stop(limit_hit, result, limit_missing)
+    return result
 
 
-def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None) -> Result:
+def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None, design_missing: bool = False) -> Result:
     """Rebuild the FCPXML from a saved analysis + plan (no model calls).
 
     Cut settings (style, format, fillers, levels...) come from the saved run
     unless `overrides` (or, without it, a non-default value in `opts`) says otherwise.
+    `design_missing`: also design the planned graphics that have no saved design (a run
+    that stopped, or ran out of plan or credit, before designing them). That calls the
+    run's model for those graphics only; the cut itself isn't re-planned.
     """
+    _plan_saved_at(None)
     _require_output_folder(out_dir)
     start_log(out_dir, "render")
     analysis, saved = _load_saved(out_dir)
@@ -647,15 +709,27 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
+    have_manifest = (out_dir / "graphics.json").is_file()
+    # graphics.json appears once graphics are designed: a plan with graphics on and no
+    # graphics.json stopped before designing them (or none of them fit its cut).
+    planned_only = not have_manifest and bool(settings.get("graphics")) and bool(plan.graphics)
+    graphics_on = have_manifest or planned_only
+    if design_missing and not graphics_on:
+        raise RoughcutError(
+            "--design-missing: this cut has no motion graphics to design. To add some, revise it with graphics on, e.g.\n  "
+            f"roughcut revise {shlex.quote(str(out_dir))} --graphics {shlex.quote('add a title card and lower thirds')}"
+        )
     # The next render starts from this one's settings.
     record = {**saved, "name": name, "settings": {**settings, **{f: getattr(opts, f) for f in RENDER_FIELDS}}}
     version = versions.next_number(out_dir)
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
-    graphics_warnings: list[str] = []
+    graphics_warnings: list[str] = missing_media(analysis, rough, stringout)
     placed, with_graphics = [], analysis
-    graphics_on, planned_graphics, graphics_note = (out_dir / "graphics.json").is_file(), None, None
-    if (out_dir / "graphics.json").is_file():
+    planned_graphics, graphics_note = None, None
+    usage: list = []
+    limit_hit, undone = None, 0
+    if graphics_on:
         # Re-time the saved designs (and any hand edits) to the new cut; only changes re-render.
         from . import graphics
 
@@ -664,30 +738,57 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
             graphics_warnings.append(f"Graphics left out of this re-cut: {problem}")
             graphics_note = "left out: the renderer isn't available"
         else:
-            specs, html, style = graphics.saved_designs(out_dir)
+            if have_manifest:
+                specs, html, style = graphics.saved_designs(out_dir)
+                house = saved_house_style(out_dir)
+            else:
+                specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""
             planned_graphics = sum(1 for g in specs if g.text)
+            if design_missing:
+                missing = [g for g in graphics.place(specs, rough, analysis, []) if g.index not in html]
+                if missing:
+                    designer = StopAtLimit(_saved_provider(settings, source))
+                    usage.append(designer.usage)
+                    with progress.doing(f"designing {len(missing)} graphics that have no design yet"):
+                        html, house = _design_new(
+                            designer, missing, html, rough, analysis, house, warnings=graphics_warnings, brief=str(settings.get("context") or ""),
+                            style=style, logo=_saved_logo(settings, graphics_warnings), look=tuple(str(p) for p in settings.get("graphics_look") or ()),
+                        )
+                    limit_hit = designer.limit
+                else:
+                    log("--design-missing: no graphic placed in this cut is missing a design")
             # make() rewrites graphics.json and the designs: keep this version's copies first.
             versions.snapshot(out_dir, before=version)
             versions.adopt_old_graphics(out_dir)  # clips named before the digest was in the name are reused, not rendered again
             with progress.doing("rendering the saved motion graphics"):
                 g_clips, placed, g_warnings = graphics.make(
-                    None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=saved_house_style(out_dir)
+                    None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=house
                 )
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
+            undone = sum(1 for g in placed if g.index not in html)
+            if undone:
+                graphics_note = (
+                    f"{undone} not designed: the usage limit was reached" if limit_hit is not None
+                    else f"{undone} not designed yet; `roughcut render --design-missing` adds {'them' if undone > 1 else 'it'}"
+                )
+                graphics_warnings.append(design_missing_hint(out_dir, undone, after_reset=limit_hit is not None))
     fcpxml_path, report_path = write_outputs(
-        out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings},
+        out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings, "usage": usage},
         version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
     )
     warnings = plan.warnings + rough.warnings + graphics_warnings
     summary = run_summary(
         plan, graphics_on=graphics_on, placed=placed, with_graphics=with_graphics, planned_graphics=planned_graphics, graphics_note=graphics_note,
-        visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None,
+        visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None, usage=usage,
     )
-    return save_result(Result(
+    result = save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
         version=version, project=rough.name, event=event_name(name), summary=summary,
     ))
+    if limit_hit is not None:
+        raise graphics_limit_stop(limit_hit, result, undone)
+    return result
 
 
 # ------------------------------------------------------------------ revise
@@ -740,36 +841,181 @@ def saved_house_style(out_dir: Path) -> str:
         return ""
 
 
-def _carry_designs(provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str]) -> tuple[dict[int, str], str]:
+class StopAtLimit:
+    """The run's provider, for designing graphics: once a request hits the usage limit, the rest aren't sent.
+
+    Graphics design turns a failed request into a warning and carries on with the next batch;
+    after a used-up plan or credit every one would fail the same way. `limit` keeps the first
+    limit error, so the run can stop (after writing what it has) and say so.
+    """
+
+    def __init__(self, provider):
+        self._provider = provider
+        self.limit: ProviderLimitError | None = None
+
+    def __getattr__(self, name):
+        return getattr(self._provider, name)
+
+    def complete_json(self, *args, **kwargs):
+        if self.limit is not None:
+            raise ProviderLimitError("not sent: the usage limit was already reached")
+        try:
+            return self._provider.complete_json(*args, **kwargs)
+        except ProviderLimitError as e:
+            if self.limit is None:
+                self.limit = e
+            raise
+
+
+def undesigned(out_dir: Path) -> int:
+    """Graphics in this folder's graphics.json that have no saved design."""
+    try:
+        entries = json.loads((out_dir / "graphics.json").read_text()).get("graphics") or []
+    except (OSError, ValueError, AttributeError):
+        return 0
+    return sum(1 for g in entries if isinstance(g, dict) and g.get("text") and not g.get("html"))
+
+
+def design_missing_hint(out_dir: Path, n: int, *, after_reset: bool = False) -> str:
+    """How to get graphics that have no design yet, without re-planning the cut."""
+    them = "them" if n > 1 else "it"
+    return (
+        f"{n} graphic{'s' if n > 1 else ''} in the plan {'have' if n > 1 else 'has'} no design yet, so this cut leaves {them} out. "
+        + ("After the reset, " if after_reset else "")
+        + f"`roughcut render {shlex.quote(str(out_dir))} --design-missing` asks the model for {'those designs' if n > 1 else 'that design'} only "
+        f"and makes a new version with {them}; the cut and the other graphics stay as they are."
+    )
+
+
+def graphics_limit_stop(e: ProviderLimitError, result: Result, missing: int) -> ProviderLimitError:
+    """The plan or credit ran out while designing graphics: the cut is written; say with what, and how to finish it."""
+    rendered = sum(1 for c in result.timeline.connected if c.kind == "graphic")
+    rest = f"the other {missing}" if missing else "the rest"
+    stop = ProviderLimitError(
+        f"{e} {result.fcpxml.name} is written with {rendered} motion graphic{'s' if rendered != 1 else ''}; the plan and every design "
+        f"that came back are saved. After the reset, `roughcut render {shlex.quote(str(result.out_dir))} --design-missing` designs "
+        f"{rest} without re-planning the cut."
+    )
+    stop.cut_written = True  # type: ignore[attr-defined] - plain `render` would only make the same cut again
+    return stop
+
+
+def _saved_provider(settings: dict, source: str) -> Provider:
+    """The model that planned this cut (from plan.json), checked, for designing what's missing."""
+    name, model = _pick_provider(settings, source, None, None)
+    p = make_provider(name, model=model, base_url=settings.get("base_url"), api_key_env=settings.get("api_key_env"), effort=settings.get("effort") or "high")
+    if p is None:
+        raise RoughcutError("Designing graphics needs a model, and this cut was made with --provider none.")
+    log(f"checking {p.name} access ({p.model})")
+    p.verify()
+    return p
+
+
+def _design_new(
+    provider, new: list, saved_html: dict[int, str], rough: Timeline, analysis: Analysis, house: str, *,
+    warnings: list[str], brief: str, style: str, logo: str | None, look: tuple[str, ...], sample: str | None = None,
+) -> tuple[dict[int, str], str]:
+    """Design the placed graphics `new` in the look of the ones already made. Returns (html by plan index, house style)."""
+    from . import graphics
+    from .presets import design_style, inline_logo
+
+    saved_html = dict(saved_html)
+    sample = sample if sample is not None else next(iter(saved_html.values()), None)
+    if sample:
+        style = (style + "\n\n" if style else "") + (
+            "Match the graphics already made for this video exactly (type, colors, plates, corner radii, motion). One of them:\n" + sample[:8000]
+        )
+    found = {"house_style": house}
+    graphics.look_under(new, rough, analysis)
+    designed = graphics.design(
+        provider, new, analysis, rough.frame_duration, brief=brief, style=design_style(style, logo, look),
+        width=rough.width, height=rough.height, warnings=warnings, house_style=house, found=found,
+    )
+    for g in new:
+        if g.id in designed:
+            saved_html[g.index] = inline_logo(designed[g.id], logo)
+    return saved_html, found["house_style"]
+
+
+def _design_pool(out_dir: Path) -> dict:
+    """The current version's graphic designs, for a revision to reuse: by spec key, with where each is saved,
+    the house style, and each rendered clip's QC notes (by file name: they belong to that render)."""
+    from . import graphics
+
+    pool: dict = {"designs": {}, "paths": {}, "house_style": saved_house_style(out_dir), "notes": {}}
+    try:
+        manifest = json.loads((out_dir / "graphics.json").read_text())
+        entries = [g for g in manifest.get("graphics") or [] if isinstance(g, dict)]
+    except (OSError, ValueError, AttributeError):
+        return pool
+    specs, html, _ = graphics.saved_designs(out_dir)
+    for i, page in html.items():
+        if i < len(specs) and specs[i].text:
+            pool["designs"][_spec_key(specs[i])] = page
+    for g in entries:
+        try:
+            index = int(g.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(specs) and index in html and g.get("html"):
+            pool["paths"].setdefault(_spec_key(specs[index]), str(g["html"]))
+        if g.get("file") and g.get("notes"):
+            pool["notes"][Path(str(g["file"])).name] = [str(n) for n in g["notes"]]
+    return pool
+
+
+def _carried_manifest(out_dir: Path, specs: list, carry: dict, style: str) -> None:
+    """graphics.json for a revision until its graphics are placed: every planned graphic, with the earlier
+    design where it's unchanged. A run that stops before then leaves `roughcut render` the designs that
+    still apply, never the old texts of graphics the notes changed."""
+    entries = []
+    for i, spec in enumerate(specs):
+        entry = {"index": i, **asdict(spec)}
+        rel = (carry.get("paths") or {}).get(_spec_key(spec))
+        if rel:
+            entry["html"] = rel
+        entries.append(entry)
+    house = carry.get("house_style") or ""
+    atomic_write(out_dir / "graphics.json", json.dumps({"style": style, **({"house_style": house} if house else {}), "graphics": entries}, indent=1))
+
+
+def _provisional_manifest(out_dir: Path, placed: list, saved_html: dict[int, str], rough: Timeline, style: str, house: str, notes_by_file: dict) -> None:
+    """graphics.json for this version before any new design is asked for: the carried designs, the clips
+    they already have, and those clips' QC notes. If the run stops while new ones are designed,
+    `roughcut render` re-times these and says the rest have no design yet."""
+    from . import graphics
+
+    html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
+    folder = out_dir / "graphics"
+    graphics.save_designs(placed, html, folder)
+    kept = graphics.unchanged(placed, html, folder, rough, {})
+    notes = {gid: list(notes_by_file[path.name]) for gid, path in kept.items() if path.name in notes_by_file}
+    graphics.write_manifest(out_dir, placed, kept, html, rough, style, notes=notes, house_style=house)
+
+
+def _carry_designs(
+    provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str], out_dir: Path,
+) -> tuple[dict[int, str], str]:
     """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look.
 
-    `carry`: {"designs": {spec key: html}, "house_style": str}. Returns (html by plan index, house style).
+    `carry`: _design_pool() of the version being revised. Returns (html by plan index, house style).
+    graphics.json is rewritten with the carried designs before any model call.
     """
     from . import graphics
 
     designs, house = carry.get("designs") or {}, carry.get("house_style") or ""
     saved_html = {i: designs[_spec_key(spec)] for i, spec in enumerate(specs) if _spec_key(spec) in designs}
     placed = graphics.place(specs, rough, analysis, [])  # make() places again and reports what didn't fit
+    if placed:
+        _provisional_manifest(out_dir, placed, saved_html, rough, opts.graphics_style, house, carry.get("notes") or {})
+    else:
+        (out_dir / "graphics.json").unlink(missing_ok=True)  # none fit this cut: this version has no graphics
     new = [g for g in placed if g.index not in saved_html]
     if new and provider is not None:
-        style = opts.graphics_style
-        if designs:
-            sample = next(iter(designs.values()))
-            style = (style + "\n\n" if style else "") + (
-                "Match the graphics already made for this video exactly (type, colors, plates, corner radii, motion). One of them:\n" + sample[:8000]
-            )
-        from .presets import design_style, inline_logo
-
-        found = {"house_style": house}
-        graphics.look_under(new, rough, analysis)
-        designed = graphics.design(
-            provider, new, analysis, rough.frame_duration, brief=opts.context, style=design_style(style, opts.graphics_logo, opts.graphics_look),
-            width=rough.width, height=rough.height, warnings=warnings, house_style=house, found=found,
+        saved_html, house = _design_new(
+            provider, new, saved_html, rough, analysis, house, warnings=warnings, brief=opts.context, style=opts.graphics_style,
+            logo=opts.graphics_logo, look=opts.graphics_look, sample=next(iter(designs.values()), None),
         )
-        house = found["house_style"]
-        for g in new:
-            if g.id in designed:
-                saved_html[g.index] = inline_logo(designed[g.id], opts.graphics_logo)
     log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new)} new")
     return saved_html, house
 
@@ -811,6 +1057,7 @@ def revise(
 
     t_start = time.monotonic()
     out_dir = out_dir.expanduser().resolve()
+    _plan_saved_at(None)
     _require_output_folder(out_dir)
     start_log(out_dir, "revise")
     analysis, saved = _load_saved(out_dir)
@@ -884,15 +1131,7 @@ def revise(
     if not plan.sections:
         raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")
 
-    carry = None
-    if opts.graphics:
-        from . import graphics as gfx
-
-        specs, html, _ = gfx.saved_designs(out_dir)
-        carry = {
-            "designs": {_spec_key(specs[i]): h for i, h in html.items() if i < len(specs) and specs[i].text},
-            "house_style": saved_house_style(out_dir),
-        }
+    carry = _design_pool(out_dir) if opts.graphics else None
 
     before_seconds = prev_entry.get("rough_seconds")
     if before_seconds is None:
@@ -909,7 +1148,12 @@ def revise(
     save_checkpoint(out_dir, analysis, prompt, record)
     if opts.graphics:
         versions.adopt_old_graphics(out_dir)  # unchanged graphics from an older release's folder: reuse their clips
-    (out_dir / "graphics.json").unlink(missing_ok=True)  # the new version makes its own (reusing designs) or none
+    if carry is not None and plan.graphics:
+        # The new version's graphics, with the designs it keeps, from now on: a stop before they're
+        # made leaves `roughcut render` those designs (never the old texts of changed graphics).
+        _carried_manifest(out_dir, plan.graphics, carry, opts.graphics_style)
+    else:
+        (out_dir / "graphics.json").unlink(missing_ok=True)  # this version has no graphics
 
     def report_extra(rough: Timeline) -> dict:
         changes = describe_changes(previous, plan, analysis, before_seconds=before_seconds, after_seconds=rough.seconds, previous_version=prev_n)

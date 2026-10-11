@@ -78,16 +78,39 @@ def _save(out_dir: Path, entries: list[dict]) -> None:
     atomic_write(out_dir / VERSIONS, json.dumps({"versions": entries}, indent=1))
 
 
+def slug(text: str) -> str:
+    """A run's name as a file name: what `<name> v3.fcpxml` (and, before versions, `<name>.fcpxml`) starts with."""
+    s = re.sub(r"[^\w\s-]", "", text).strip()
+    return re.sub(r"\s+", " ", s) or "Roughcut"
+
+
+def _legacy_cut(out_dir: Path) -> Path | None:
+    """The cut an earlier release wrote into a folder from before versions: `<slug(name)>.fcpxml`.
+
+    Only that file is roughcut's. Any other FCPXML beside it (an export from Final Cut,
+    a hand-fixed copy) is the user's, and is never moved into history/ or deleted.
+    """
+    try:
+        name = json.loads((out_dir / "plan.json").read_text()).get("name")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+    cut = out_dir / f"{slug(name)}.fcpxml" if isinstance(name, str) and name.strip() else None
+    return cut if cut is not None and cut.is_file() else None
+
+
 def entries(out_dir: Path) -> list[dict]:
     """Every version, oldest first. A folder from before versions has one: its existing cut."""
     found = _read(out_dir)
     if found:
         return found
-    legacy = sorted(out_dir.glob("*.fcpxml"), key=lambda p: p.stat().st_mtime)
-    if legacy and (out_dir / "plan.json").is_file():
-        created = datetime.fromtimestamp(legacy[-1].stat().st_mtime).isoformat(timespec="seconds")
-        return [{"n": 1, "created": created, "command": "build", "fcpxml": legacy[-1].name, "files": [p.name for p in legacy], "legacy": True}]
-    return []
+    if not (out_dir / "plan.json").is_file() or not any(out_dir.glob("*.fcpxml")):
+        return []
+    cut = _legacy_cut(out_dir)
+    if cut is None:  # renamed or never written: still version 1, but no file of it to take off the top level
+        created = datetime.fromtimestamp((out_dir / "plan.json").stat().st_mtime).isoformat(timespec="seconds")
+        return [{"n": 1, "created": created, "command": "build", "fcpxml": None, "files": [], "legacy": True}]
+    created = datetime.fromtimestamp(cut.stat().st_mtime).isoformat(timespec="seconds")
+    return [{"n": 1, "created": created, "command": "build", "fcpxml": cut.name, "files": [cut.name], "legacy": True}]
 
 
 def current(out_dir: Path) -> dict | None:
@@ -157,10 +180,10 @@ def finish(out_dir: Path, n: int, *, prune: bool = True) -> None:
     for v in found:
         if v["n"] >= n or not v.get("snapshot"):
             continue  # only files already safe in history/ leave the top level
-        for name in v.get("files") or [v.get("fcpxml") or ""]:
-            path = out_dir / name
-            if name and name != keep_top and path.suffix == ".fcpxml" and path.is_file():
-                path.unlink()
+        name = str(v.get("fcpxml") or "")  # the version's own cut, never another file that happened to be there
+        path = out_dir / name
+        if name and name != keep_top and path.suffix == ".fcpxml" and path.parent == out_dir and path.is_file():
+            path.unlink()
     if prune:
         prune_history(out_dir)
         prune_graphics(out_dir)
