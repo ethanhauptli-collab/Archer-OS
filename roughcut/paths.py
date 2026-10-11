@@ -73,6 +73,41 @@ def _command(argv: list[str], pieces: list[str], paths: list[str]) -> str:
     return "roughcut " + " ".join(shlex.quote(a) for a in argv)
 
 
+def leading_folder(pieces: list[str], *, wanted: str = "", notify=print) -> tuple[str, list[str]]:
+    """A folder followed by other words (revise's notes, preset save's graphic IDs): (folder, the rest).
+
+    The folder is the shortest run of leading pieces that names a folder holding `wanted`
+    (else any existing folder), so a path typed without quotes is put back together and a
+    quoted one is left alone. Raises PathInputError when no leading pieces name a folder.
+    """
+    found = None
+    for k in range(1, min(len(pieces), MAX_PIECES) + 1):
+        joined = " ".join(pieces[:k])
+        try:
+            folder = Path(joined).expanduser()
+            is_dir = folder.is_dir()
+            has = is_dir and (not wanted or (folder / wanted).is_file())
+        except (OSError, ValueError):
+            continue
+        if has:
+            found = k
+            break
+        if is_dir and found is None:
+            found = -k  # a folder, but not the kind wanted: used only if no better one turns up
+    if found is None:
+        if len(pieces) > 1 and not _exists(pieces[0]):
+            raise PathInputError(
+                f"can't find a folder at {shlex.quote(pieces[0])}, or at that joined with the words after it. "
+                "If the folder's path has spaces, put it in quotes (or drag the folder into Terminal)."
+            )
+        return pieces[0], pieces[1:]
+    k = abs(found)
+    folder = " ".join(pieces[:k])
+    if k > 1:
+        notify(f"Read that as {shlex.quote(folder)}. Next time put the path in quotes, or drag the folder into Terminal.")
+    return folder, pieces[k:]
+
+
 def resolve(pieces: list[str], argv: list[str], *, notify=print) -> list[str]:
     """Inputs as the user meant them. Raises PathInputError when one can't be found."""
     joined = rejoin(pieces)

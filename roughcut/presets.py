@@ -575,7 +575,15 @@ def _command(args: argparse.Namespace) -> int:
     if args.no_look:
         preset.look = ()
     elif args.look_from:
-        preset.look = approved_from_run(Path(args.look_from[0]), args.look_from[1:])
+        from .paths import PathInputError, leading_folder
+
+        try:  # the output folder, then graphic IDs: a folder path with spaces typed without quotes arrives in pieces
+            folder, ids = leading_folder(args.look_from, wanted="graphics.json", notify=lambda line: print(line, file=sys.stderr))
+        except PathInputError as e:
+            raise PresetError(str(e)) from None
+        if not Path(folder).expanduser().is_dir():
+            raise PresetError(f"can't find the folder {folder} (put a path with spaces in quotes, or drag the folder into Terminal).")
+        preset.look = approved_from_run(Path(folder), ids)
     if args.no_logo:
         preset.logo = None
     elif args.logo:
