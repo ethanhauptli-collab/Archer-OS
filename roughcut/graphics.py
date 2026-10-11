@@ -239,11 +239,13 @@ def _design_request(placed: list[PlacedGraphic], analysis: Analysis, fd: Fractio
     return "\n\n".join(parts)
 
 
-def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int, warnings: list[str], batch: int = 8) -> dict[str, str]:
+def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int, warnings: list[str], batch: int = 8, house_style: str = "", found: dict | None = None) -> dict[str, str]:
+    """HTML per graphic id. `house_style`: the design system already described for this video;
+    the one in use at the end goes into found["house_style"] (saved in graphics.json for later designs)."""
     from .providers import ProviderAuthError, ProviderError, TextPart
 
     html: dict[str, str] = {}
-    house = ""
+    house = house_style
     for n in range(0, len(placed), batch):
         group = placed[n : n + batch]
         progress.stage("graphics", f"Designing {len(placed)} graphics", current=n, total=len(placed))
@@ -262,6 +264,8 @@ def design(provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fracti
         missing = [g.id for g in group if g.id not in html]
         if missing:
             warnings.append(f"no design came back for {', '.join(missing)}; skipped")
+    if found is not None and house:
+        found["house_style"] = house
     return html
 
 
@@ -437,7 +441,7 @@ def _read_manifest(out_dir: Path) -> dict:
         return {}
 
 
-def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str) -> None:
+def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str, house_style: str = "") -> None:
     fd = tl.frame_duration
     rate = f"{fd.denominator}/{fd.numerator}"
     entries = []
@@ -451,7 +455,8 @@ def write_manifest(out_dir: Path, placed: list[PlacedGraphic], files: dict[str, 
         entries.append(entry)
     from .versions import atomic_write
 
-    atomic_write(out_dir / MANIFEST, json.dumps({"style": style, "graphics": entries}, indent=1))
+    data = {"style": style, **({"house_style": house_style} if house_style else {}), "graphics": entries}
+    atomic_write(out_dir / MANIFEST, json.dumps(data, indent=1))
 
 
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
@@ -482,19 +487,22 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
     return specs, html, str(data.get("style", ""))
 
 
-def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int, saved_html: dict[int, str] | None = None) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
-    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings)."""
+def make(provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int, saved_html: dict[int, str] | None = None, house_style: str = "") -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
+    """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
+
+    `house_style`: the design system described when this video's graphics were first designed (kept in graphics.json)."""
     warnings: list[str] = []
     placed = place(specs, tl, analysis, warnings)
     if not placed:
         return [], [], warnings
     progress.stage("graphics", f"Designing {len(placed)} graphics")
+    found = {"house_style": house_style}
     if saved_html is not None:
         html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
     else:
-        html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings)
+        html = design(provider, placed, analysis, tl.frame_duration, brief=brief, style=style, width=tl.width, height=tl.height, warnings=warnings, house_style=house_style, found=found)
     files = render(placed, html, out_dir / "graphics", tl, workers=workers, warnings=warnings)
     clips = attach(tl, placed, files, warnings)
-    write_manifest(out_dir, placed, files, html, tl, style)
+    write_manifest(out_dir, placed, files, html, tl, style, house_style=found["house_style"])
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     return clips, placed, warnings

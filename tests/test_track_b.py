@@ -961,3 +961,231 @@ def test_plan_limit_wording_is_told_apart_from_a_context_limit():
         assert plan_limit_reached(said.lower()), said
     for said in ("Prompt is too long", "Context limit reached: the conversation is too long", "Rate limited, retrying"):
         assert not plan_limit_reached(said.lower()), said
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def _write_version(out: Path, n: int, movs: list[str]) -> None:
+    """What write_outputs does to the folder, without cutting anything: a new cut using these graphics clips."""
+    from roughcut import versions
+
+    uri = (out / "graphics").as_uri()
+    versions.snapshot(out, before=n)
+    (out / f"f v{n}.fcpxml").write_text("".join(f'<media-rep src="{uri}/{m}"/>' for m in movs))
+    (out / "plan.json").write_text("{}")
+    versions.record(out, {"n": n, "fcpxml": f"f v{n}.fcpxml"})
+    versions.finish(out, n)
+
+
+def test_graphics_of_a_cut_already_in_final_cut_outlive_its_history(tmp_path):
+    """FCP reads imported media in place: a clip any version used must survive that version's history folder."""
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    uri = (out / "graphics").as_uri()
+    # A folder from before versions: one cut, a graphic named without its digest.
+    (out / "f.fcpxml").write_text(f'<media-rep src="{uri}/G01-title-card.mov"/>')
+    (out / "plan.json").write_text("{}")
+    (out / "graphics" / "G01-title-card.mov").write_bytes(b"x")
+    for n in range(2, 10):  # every re-cut changes the graphic's length, so it renders anew
+        for name in (f"G01-title-card-{n:06d}.mov", f"G02-stat-{n:06d}.partial.mov"):
+            (out / "graphics" / name).write_bytes(b"x")
+        _write_version(out, n, [f"G01-title-card-{n:06d}.mov"])
+
+    kept = sorted(int(p.name.split()[0][1:]) for p in (out / "history").iterdir())
+    assert kept == [4, 5, 6, 7, 8]  # history of v1 (the old layout), v2 and v3 is gone...
+    left = {p.name for p in (out / "graphics").iterdir()}
+    assert "G01-title-card.mov" in left  # ...their clips are not
+    assert {f"G01-title-card-{n:06d}.mov" for n in range(2, 10)} <= left
+    assert not any(n.endswith(".partial.mov") for n in left)  # what no version used still goes
+    listed = json.loads((out / "versions.json").read_text())["versions"]
+    assert listed[0]["graphics"] == ["G01-title-card.mov"] and listed[0].get("pruned")
+
+
+def test_the_apps_recut_gets_what_its_form_says(footage, tmp_path, capsys, shared_cache):
+    """Re-cut sends --style always, --format/--keep-fillers/--no-stringout only when set: the rest means the default."""
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none",
+                 "--cache-dir", str(shared_cache), "--format", "vertical", "--keep-fillers", "--no-stringout", "--progress-json"]) == 0
+    capsys.readouterr()
+    # Pacing tight, Format "From footage", Keep fillers off, Stringout on:
+    assert main(["render", str(out), "--progress-json", "--style", "tight"]) == 0
+    done = _events(capsys.readouterr().out)[-1]["result"]
+    assert done["project"] == "footage - Rough Cut v2 (tight, no AI)" and done["stringout_seconds"] is not None
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["format"], settings["keep_fillers"], settings["stringout"]) == (None, False, True)
+
+    # In Terminal, no flag still means "as before", and --format auto goes back to the footage's own shape.
+    assert main(["render", str(out), "--format", "vertical"]) == 0
+    assert main(["render", str(out)]) == 0
+    assert "Rough Cut v4 (tight, vertical, no AI)" in next(out.glob("*.fcpxml")).read_text()
+    assert main(["render", str(out), "--format", "auto"]) == 0
+    projects = check_invariants(next(out.glob("*.fcpxml")))
+    assert "footage - Rough Cut v5 (tight, no AI)" in projects
+
+
+def test_a_run_started_with_nohup_survives_the_terminal_closing():
+    import signal
+
+    from roughcut import cli
+
+    before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        restore = cli._install_stop_handlers(json_mode=False, own_group=False)
+        try:
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN  # nohup's choice stands
+            assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, signal.SIG_IGN)  # a cancel is still logged
+        finally:
+            cli._restore_handlers(restore)
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        restore = cli._install_stop_handlers(json_mode=False, own_group=False)
+        try:
+            assert signal.getsignal(signal.SIGHUP) not in (signal.SIG_DFL, signal.SIG_IGN)  # a plain Terminal run logs it
+        finally:
+            cli._restore_handlers(restore)
+    finally:
+        signal.signal(signal.SIGHUP, before)
+
+
+def _fake_renders(monkeypatch, mov: Path) -> list[str]:
+    """graphics._render_one without a browser: a real (transparent) ProRes clip, so the cut still validates."""
+    rendered: list[str] = []
+
+    def render_one(job):
+        rendered.append(job["id"])
+        shutil.copy(mov, job["out"])
+        return {"id": job["id"], "error": None, "console": []}
+
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    monkeypatch.setattr(graphics, "_render_one", render_one)
+    return rendered
+
+
+@pytest.fixture(scope="module")
+def clear_mov(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("graphic") / "clear.mov"
+    ffmpeg("-f", "lavfi", "-i", "color=c=black@0.0:s=320x180:r=30000/1001:d=10", "-vf", "format=yuva444p10le",
+           "-c:v", "prores_ks", "-profile:v", "4444", str(path))
+    return path
+
+
+def test_a_recut_keeps_the_previous_versions_graphics_manifest_in_history(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_graphics_plan()))
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    v1_manifest = (out / "graphics.json").read_text()
+
+    again = pipeline.rerender(out, Options(inputs=[], style="loose"))
+    validate_dtd(again.fcpxml)
+    assert (out / "graphics.json").read_text() != v1_manifest  # v2's graphic sits elsewhere
+    assert (next((out / "history").glob("v1 *")) / "graphics.json").read_text() == v1_manifest  # v1's own, not v2's
+
+
+def test_a_cut_written_before_its_graphics_has_a_matching_result_json(footage, tmp_path, monkeypatch, fake, shared_cache):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_graphics_plan()))
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+
+    def crash(*a, **k):
+        raise RuntimeError("the renderer crashed")
+
+    monkeypatch.setattr(graphics, "render", crash)
+    with pytest.raises(RuntimeError):
+        pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    result = json.loads((out / "result.json").read_text())
+    assert Path(result["fcpxml"]).is_file() and Path(result["fcpxml"]).name == "footage v2.fcpxml" == _top_fcpxml(out)[0]
+    assert result["version"] == 2 and result["partial"] is True
+    assert result["graphics"]["note"] == "still being made when this cut was written"
+
+
+def test_waiting_on_a_long_model_request_is_not_a_stall(tmp_path):
+    """A long Opus plan or `claude -p` call is work, not a freeze: heartbeat yes, stack dump and stall warning no."""
+    import subprocess
+    import time
+
+    from test_providers import SCHEMA, _anthropic_provider, _sse
+
+    from roughcut.analyze import log_to
+    from roughcut.providers import TextPart
+    from roughcut.providers.claude_code import ClaudeCodeProvider
+
+    def slow_claude(cmd, **k):
+        time.sleep(1.6)
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"structured_output": {"ok": True}, "usage": {}}), stderr="")
+
+    def slow_api(request):
+        time.sleep(1.6)
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_sse('{"ok": true}'))
+
+    api, httpx2 = _anthropic_provider(slow_api)
+    log = tmp_path / "roughcut.log"
+    log_to(log)
+    progress.start_watch(log, interval=0.3, stall=0.9)
+    try:
+        claude = ClaudeCodeProvider(binary="claude", run=slow_claude)
+        assert claude.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="edit plan") == {"ok": True}
+        assert api.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="edit plan") == {"ok": True}
+    finally:
+        progress.stop_watch()
+        log_to(None)
+    text = log.read_text()
+    assert "still working (" in text and "waiting for Claude Code" in text and "waiting for claude-opus-5-5 (edit plan)" in text
+    assert "most recent call first" not in text and "nothing has moved" not in text
+
+
+@pytest.mark.parametrize("command", ["render", "revise"])
+def test_graphics_rendered_before_their_names_had_a_digest_are_reused(command, footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_graphics_plan()))
+    rendered = _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    # The layout an older roughcut left: footage.fcpxml using G01-title-card.mov, its digest only in graphics.json.
+    manifest = json.loads((out / "graphics.json").read_text())
+    (entry,) = manifest["graphics"]
+    digest_name = Path(entry["file"]).name
+    (out / entry["file"]).rename(out / "graphics" / "G01-title-card.mov")
+    entry["file"] = "graphics/G01-title-card.mov"
+    (out / "graphics.json").write_text(json.dumps(manifest))
+    (out / "footage.fcpxml").write_text((out / "footage v1.fcpxml").read_text().replace(digest_name, "G01-title-card.mov"))
+    (out / "footage v1.fcpxml").unlink()
+    (out / "versions.json").unlink()
+    rendered.clear()
+
+    if command == "render":
+        again = pipeline.rerender(out, Options(inputs=[]))
+    else:  # the model keeps the plan and its graphic as they were
+        again = pipeline.revise(out, "Keep it as it is.", Options(inputs=[]))
+    assert rendered == []  # same design, same length: nothing to render
+    assert (out / "graphics" / "G01-title-card.mov").is_file()  # the old cut's clip keeps its name
+    new = json.loads((out / "graphics.json").read_text())["graphics"][0]["file"]
+    assert new.startswith("graphics/G01-title-card-") and (out / new).is_file()
+    assert sum(1 for c in again.timeline.connected if c.kind == "graphic") == 1
+    validate_dtd(again.fcpxml)
+    check_invariants(again.fcpxml)
+
+
+def test_new_graphics_in_a_revision_get_the_videos_design_system(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    plan = _graphics_plan()
+    plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "for weeks", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
+    provider = FakeProvider(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    assert json.loads((out / "graphics.json").read_text())["house_style"] == "test plate"  # what the designer said its system is
+
+    pipeline.rerender(out, Options(inputs=[], style="tight"))
+    assert json.loads((out / "graphics.json").read_text())["house_style"] == "test plate"  # a re-cut keeps it
+
+    revised = json.loads(json.dumps(plan))
+    revised["graphics"][1]["text"] = "Three Weeks"
+    provider.plan = revised
+    calls = len(provider.calls)
+    pipeline.revise(out, "Say three weeks.", Options(inputs=[]))
+    (design,) = [c for c in provider.calls[calls:] if c["schema_name"] == "graphics"]
+    assert "<design_system>\nAlready established for this video; match it exactly:\ntest plate\n</design_system>" in design["parts"][-1].text
+    assert json.loads((out / "graphics.json").read_text())["house_style"] == "test plate"

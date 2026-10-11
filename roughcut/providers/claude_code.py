@@ -153,7 +153,7 @@ class ClaudeCodeProvider:
                 cmd += ["--effort", effort or self.effort]
             t0 = time.monotonic()
             try:
-                with progress.doing(f"waiting for Claude Code ({self.model}, {purpose})"):
+                with progress.doing(f"waiting for Claude Code ({self.model}, {purpose})", external=True):  # bounded by self.timeout
                     proc = self._run(cmd, input=prompt, capture_output=True, text=True, env=subscription_env(), cwd=tmp, timeout=self.timeout)
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"Claude Code took longer than {self.timeout / 60:.0f} minutes on the {purpose} request.") from e

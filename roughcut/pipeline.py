@@ -108,9 +108,16 @@ def result_summary(result: Result) -> dict:
     }
 
 
-def save_result(result: Result) -> Result:
-    """result.json: the done payload, kept with the version it describes (for a recent-runs list)."""
-    atomic_write(result.out_dir / "result.json", json.dumps(result_summary(result), indent=1))
+def save_result(result: Result, *, partial: bool = False) -> Result:
+    """result.json: the done payload, kept with the version it describes (for a recent-runs list).
+
+    `partial`: the cut written before graphics, in case the run stops while they're made;
+    the finished run replaces it.
+    """
+    data = result_summary(result)
+    if partial:
+        data["partial"] = True
+    atomic_write(result.out_dir / "result.json", json.dumps(data, indent=1))
     return result
 
 
@@ -543,16 +550,26 @@ def _finish_build(
 
             # A complete cut without graphics first: if rendering stops, there's still a cut to open.
             pending = ["Motion graphics were still being made when this cut was written; if the run stopped there, this cut has none. `roughcut render` adds any whose designs were saved."]
-            write_outputs(
+            interim = write_outputs(
                 out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
                 version=version, command=command, entry=entry, quiet=True,
             )
+            # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
+            save_result(Result(
+                out_dir, *interim, plan, rough, stringout, fell_back, analysis.warnings + plan.warnings + rough.warnings + extra_warnings + pending,
+                dead_air(analysis.clips, stringout), version=version, project=rough.name, event=event_name(name),
+                summary=run_summary(
+                    plan, graphics_on=True, placed=[], with_graphics=analysis, usage=usage, graphics_note="still being made when this cut was written",
+                    skipped_files=(summary_base or {}).get("skipped_files"), visual_log=(summary_base or {}).get("visual_log"),
+                ),
+            ), partial=True)
             t = time.monotonic()
             with progress.doing(f"making {len(plan.graphics)} motion graphics (design, then render)"):
                 if carry is not None:
-                    saved_html = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
+                    saved_html, house = _carry_designs(provider, plan.graphics, rough, analysis, carry, opts, extra_warnings)
                     g_clips, placed, g_warnings = graphics.make(
-                        None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers, saved_html=saved_html
+                        None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
+                        saved_html=saved_html, house_style=house,
                     )
                 else:
                     g_clips, placed, g_warnings = graphics.make(
@@ -628,8 +645,13 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         else:
             specs, html, style = graphics.saved_designs(out_dir)
             planned_graphics = sum(1 for g in specs if g.text)
+            # make() rewrites graphics.json and the designs: keep this version's copies first.
+            versions.snapshot(out_dir, before=version)
+            versions.adopt_old_graphics(out_dir)  # clips named before the digest was in the name are reused, not rendered again
             with progress.doing("rendering the saved motion graphics"):
-                g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
+                g_clips, placed, g_warnings = graphics.make(
+                    None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=saved_house_style(out_dir)
+                )
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
     fcpxml_path, report_path = write_outputs(
@@ -672,28 +694,43 @@ def _spec_key(spec) -> tuple:
     return (spec.kind, spec.segment, " ".join(spec.words.lower().split()), spec.text.strip())
 
 
-def _carry_designs(provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str]) -> dict[int, str]:
-    """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look."""
+def saved_house_style(out_dir: Path) -> str:
+    """The design system the graphics designer described for this video (in graphics.json), if any."""
+    try:
+        return str(json.loads((out_dir / "graphics.json").read_text()).get("house_style") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _carry_designs(provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str]) -> tuple[dict[int, str], str]:
+    """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look.
+
+    `carry`: {"designs": {spec key: html}, "house_style": str}. Returns (html by plan index, house style).
+    """
     from . import graphics
 
-    saved_html = {i: carry[_spec_key(spec)] for i, spec in enumerate(specs) if _spec_key(spec) in carry}
+    designs, house = carry.get("designs") or {}, carry.get("house_style") or ""
+    saved_html = {i: designs[_spec_key(spec)] for i, spec in enumerate(specs) if _spec_key(spec) in designs}
     placed = graphics.place(specs, rough, analysis, [])  # make() places again and reports what didn't fit
     new = [g for g in placed if g.index not in saved_html]
     if new and provider is not None:
         style = opts.graphics_style
-        if carry:
-            sample = next(iter(carry.values()))
+        if designs:
+            sample = next(iter(designs.values()))
             style = (style + "\n\n" if style else "") + (
                 "Match the graphics already made for this video exactly (type, colors, plates, corner radii, motion). One of them:\n" + sample[:8000]
             )
+        found = {"house_style": house}
         designed = graphics.design(
-            provider, new, analysis, rough.frame_duration, brief=opts.context, style=style, width=rough.width, height=rough.height, warnings=warnings
+            provider, new, analysis, rough.frame_duration, brief=opts.context, style=style, width=rough.width, height=rough.height, warnings=warnings,
+            house_style=house, found=found,
         )
+        house = found["house_style"]
         for g in new:
             if g.id in designed:
                 saved_html[g.index] = designed[g.id]
     log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new)} new")
-    return saved_html
+    return saved_html, house
 
 
 def _pick_provider(settings: dict, source: str, provider: str | None, model: str | None) -> tuple[str, str | None]:
@@ -807,7 +844,10 @@ def revise(
         from . import graphics as gfx
 
         specs, html, _ = gfx.saved_designs(out_dir)
-        carry = {_spec_key(specs[i]): h for i, h in html.items() if i < len(specs) and specs[i].text}
+        carry = {
+            "designs": {_spec_key(specs[i]): h for i, h in html.items() if i < len(specs) and specs[i].text},
+            "house_style": saved_house_style(out_dir),
+        }
 
     before_seconds = prev_entry.get("rough_seconds")
     if before_seconds is None:
@@ -822,6 +862,8 @@ def revise(
         record["revision_of"] = prev_n
     prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n" + request
     save_checkpoint(out_dir, analysis, prompt, record)
+    if opts.graphics:
+        versions.adopt_old_graphics(out_dir)  # unchanged graphics from an older release's folder: reuse their clips
     (out_dir / "graphics.json").unlink(missing_ok=True)  # the new version makes its own (reusing designs) or none
 
     def report_extra(rough: Timeline) -> dict:

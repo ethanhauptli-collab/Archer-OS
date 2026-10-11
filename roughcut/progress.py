@@ -66,22 +66,29 @@ def stage(name: str, message: str = "", current: int | None = None, total: int |
 # the edit with claude-opus-5-5" whenever nothing else was logged for a minute,
 # so Terminal, the app and roughcut.log show it's alive and what it's waiting on.
 # If nothing at all happens for STALL_SECONDS, every thread's stack is written to
-# roughcut.log, so a freeze shows exactly where it is.
+# roughcut.log, so a freeze shows exactly where it is. Waiting on a model request
+# or an outside program (marked `external`) is not a freeze: those have their own
+# timeouts, and a long Opus plan can legitimately take more than ten minutes.
 
 HEARTBEAT_SECONDS = 60.0
 STALL_SECONDS = 600.0
 
-_activities: dict[str, tuple[str, float]] = {}  # key -> (what, started)
+_activities: dict[str, tuple[str, float, bool]] = {}  # key -> (what, started, external)
 _stage: tuple[str, float] | None = None
-_last_output = time.monotonic()
+_last_output = time.monotonic()  # last real output: the heartbeat speaks after a quiet minute
+_last_moved = time.monotonic()  # last sign the run is moving: the stall clock
 _last_beat = 0.0
 _watch: dict = {}  # thread, stop event, stall file
 
 
-def activity(key: str, text: str) -> None:
-    """Something that may take a while has started (a model request, a render...)."""
+def activity(key: str, text: str, *, external: bool = False) -> None:
+    """Something that may take a while has started (a model request, a render...).
+
+    `external`: waiting on a model request or another program that has its own
+    timeout. While one is running, a long silence isn't treated as a stall.
+    """
     with _lock:
-        _activities[key] = (text, time.monotonic())
+        _activities[key] = (text, time.monotonic(), external)
     _touch()
 
 
@@ -92,10 +99,10 @@ def done(key: str) -> None:
 
 
 @contextlib.contextmanager
-def doing(text: str, key: str | None = None):
+def doing(text: str, key: str | None = None, *, external: bool = False):
     """`with progress.doing("planning the edit with opus"):` marks an activity for the heartbeat."""
     key = key or f"{text}#{threading.get_ident()}"
-    activity(key, text)
+    activity(key, text, external=external)
     try:
         yield
     finally:
@@ -106,8 +113,14 @@ def current_activity() -> tuple[str, float] | None:
     """The most recently started activity still running, else the current stage."""
     with _lock:
         if _activities:
-            return max(_activities.values(), key=lambda a: a[1])
+            what, since, _ = max(_activities.values(), key=lambda a: a[1])
+            return what, since
     return _stage
+
+
+def _waiting_outside() -> bool:
+    with _lock:
+        return any(a[2] for a in _activities.values())
 
 
 def _touch() -> None:
@@ -116,6 +129,13 @@ def _touch() -> None:
     if _watch.get("thread") is threading.current_thread():
         return
     _last_output = time.monotonic()
+    _moved()
+
+
+def _moved() -> None:
+    """The run is moving: restart the stall clock (not the heartbeat's)."""
+    global _last_moved
+    _last_moved = time.monotonic()
     _arm_stall_dump()
 
 
@@ -144,27 +164,30 @@ def _beat(stop: threading.Event, interval: float) -> None:
 
     told_stall = None
     while not stop.wait(min(5.0, max(0.05, interval / 4))):
+        if _waiting_outside():
+            _moved()  # a model request or outside program, bounded by its own timeout: not a freeze
         now = time.monotonic()
         if now - max(_last_output, _last_beat) < interval:
             continue
         _last_beat = now
         current = current_activity()
         what, since = current if current else ("working", now)
-        stalled = _watch.get("file") is not None and now - _last_output >= _watch.get("stall", STALL_SECONDS)
+        stalled = _watch.get("file") is not None and now - _last_moved >= _watch.get("stall", STALL_SECONDS)
         try:
             log(f"still working ({_elapsed(now - since)}): {what}")
-            if stalled and told_stall != _last_output:
-                told_stall = _last_output
-                log(f"nothing has moved for {_elapsed(now - _last_output)}: roughcut.log now has a stack trace of every thread (include it if you report this)")
+            if stalled and told_stall != _last_moved:
+                told_stall = _last_moved
+                log(f"nothing has moved for {_elapsed(now - _last_moved)}: roughcut.log now has a stack trace of every thread (include it if you report this)")
         except Exception:  # noqa: BLE001 - the heartbeat must never take the run down
             pass
 
 
 def start_watch(log_path=None, *, interval: float | None = None, stall: float | None = None) -> None:
     """Start the heartbeat (and the stall dump into `log_path`) for a run. Restarts any earlier watch."""
-    global _last_output, _stage
+    global _last_output, _last_moved, _stage
     stop_watch()
-    _last_output, _stage = time.monotonic(), None
+    _last_output = _last_moved = time.monotonic()
+    _stage = None
     with _lock:
         _activities.clear()
     _watch["stall"] = stall if stall is not None else STALL_SECONDS

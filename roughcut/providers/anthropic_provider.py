@@ -227,7 +227,8 @@ class AnthropicProvider:
 
         t0 = time.monotonic()
         try:
-            with progress.doing(f"waiting for {self.model} ({purpose})"), self.client.beta.messages.stream(**params) as stream:
+            # external: the SDK's timeouts bound the request, so a long plan is not a stall
+            with progress.doing(f"waiting for {self.model} ({purpose})", external=True), self.client.beta.messages.stream(**params) as stream:
                 message = stream.get_final_message()
         except TypeError as e:  # the SDK found no credentials at all
             if "authentication" not in str(e).lower():

@@ -27,7 +27,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
     g.add_argument("--style", choices=["tight", "medium", "loose"], help="how aggressively pauses are trimmed (default: medium)")
     g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
-    g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, or WxH@fps (default: from the footage)")
+    g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
     g.add_argument("--broll-db", type=float, help="B-roll audio level in dB (default: -20)")
     g.add_argument("--music-db", type=float, help="music level in dB (default: -14)")
     g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
@@ -425,6 +425,12 @@ def signal_done(text: str, run=subprocess.run) -> None:
         pass
 
 
+FORMAT_FROM_FOOTAGE = ("auto", "footage", "from footage")
+# Cut settings the Mac app's Re-cut always conveys (RecutOptions.arguments()): with
+# --progress-json, `render` takes these from the command line, never from the saved run.
+APP_RECUT_FIELDS = ("style", "format", "keep_fillers", "stringout")
+
+
 def _run(args, json_mode: bool) -> int:
     from .pipeline import Options, build, rerender, result_summary
 
@@ -442,6 +448,14 @@ def _run(args, json_mode: bool) -> int:
         ).items()
         if v is not None
     }
+    if str(args.format or "").strip().lower() in FORMAT_FROM_FOOTAGE:
+        given["format"] = None  # given, and it means "the footage's own format", e.g. after a vertical build
+    if json_mode and args.command == "render":
+        # The app's Re-cut sends its whole form: a toggle it leaves off means off and
+        # its "From footage" format sends no flag, so neither falls back to the saved run.
+        default = Options(inputs=[])
+        for f in APP_RECUT_FIELDS:
+            given.setdefault(f, getattr(default, f))
     common = dict(name=args.name, **given)
     try:
         if args.command == "render":
@@ -635,6 +649,7 @@ def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
 
     Under the Mac app (--progress-json) roughcut leads its own process group,
     so cancelling also stops the `claude`, ffmpeg and browser processes it started.
+    A signal the process was started ignoring (`nohup roughcut build ...`) stays ignored.
     """
     import signal
 
@@ -667,6 +682,8 @@ def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
         if sig is None:
             continue
         try:
+            if signal.getsignal(sig) == signal.SIG_IGN:
+                continue  # started with nohup (or told to ignore it): closing Terminal must not stop the run
             previous[sig] = signal.signal(sig, stop)
         except (ValueError, OSError):  # not the main thread
             pass

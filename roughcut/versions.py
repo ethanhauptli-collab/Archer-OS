@@ -5,8 +5,10 @@ folder: `<name> v3.fcpxml` with the project "<name> - Rough Cut v3 (tight,
 Opus)". The newest version's files sit at the top of the folder; when the
 next one is written, the previous version's text files (FCPXML, plan, paper
 edit, graphics designs) are copied into `history/v2 <date time>/`. The last
-KEEP of those are kept, plus every graphics clip they use, so a cut already
-imported into Final Cut never loses media underneath it.
+KEEP of those are kept. Rendered graphics clips are never deleted once any
+version used them (versions.json remembers each version's clips even after its
+history folder goes), so a cut already imported into Final Cut never loses
+media underneath it.
 
 Nothing is moved when a run starts. A run that stops early leaves the
 previous version (and `roughcut render`) working.
@@ -141,6 +143,8 @@ def snapshot(out_dir: Path, before: int) -> None:
 def record(out_dir: Path, entry: dict) -> None:
     """Add version entry["n"] (or update it, for a cut rewritten after its graphics finish)."""
     found = [v for v in entries(out_dir) if v["n"] != entry["n"]]
+    if entry.get("fcpxml") and "graphics" not in entry:
+        entry = {**entry, "graphics": graphics_in([out_dir / entry["fcpxml"]])}
     found.append({"created": _now(), **entry})
     found.sort(key=lambda v: v["n"])
     _save(out_dir, found)
@@ -169,6 +173,8 @@ def prune_history(out_dir: Path, keep: int = KEEP) -> list[str]:
     removed = []
     for v in snaps[: max(0, len(snaps) - keep)]:
         path = out_dir / v["snapshot"]
+        if "graphics" not in v:  # a folder from before versions: remember what its cut used before the copy goes
+            v["graphics"] = graphics_in(path.glob("*.fcpxml"))
         if path.is_dir() and path.resolve().parent == (out_dir / HISTORY).resolve():
             shutil.rmtree(path, ignore_errors=True)
         removed.append(v.pop("snapshot"))
@@ -181,23 +187,67 @@ def prune_history(out_dir: Path, keep: int = KEEP) -> list[str]:
 _SRC = re.compile(r'src="file://[^"]*?/graphics/([^"/]+)"')
 
 
-def referenced_graphics(out_dir: Path) -> set[str]:
-    """Graphics clips used by the current cut or any version still in history."""
-    files = list(out_dir.glob("*.fcpxml")) + list((out_dir / HISTORY).glob("*/*.fcpxml"))
+def graphics_in(files) -> list[str]:
+    """The graphics clips (file names in graphics/) these FCPXML files use."""
     names: set[str] = set()
     for f in files:
         try:
-            names.update(unquote(m) for m in _SRC.findall(f.read_text(encoding="utf-8")))
+            names.update(unquote(m) for m in _SRC.findall(Path(f).read_text(encoding="utf-8")))
         except OSError:
             continue
+    return sorted(names)
+
+
+def referenced_graphics(out_dir: Path) -> set[str]:
+    """Graphics clips any version ever used: the FCPXML files still here, plus what versions.json remembers."""
+    names = set(graphics_in(list(out_dir.glob("*.fcpxml")) + list((out_dir / HISTORY).glob("*/*.fcpxml"))))
+    for v in _read(out_dir):
+        names.update(str(n) for n in v.get("graphics") or [])
     return names
 
 
-def prune_graphics(out_dir: Path) -> list[str]:
-    """Delete rendered graphics no kept version uses (and leftovers of interrupted renders).
+def adopt_old_graphics(out_dir: Path) -> list[str]:
+    """Clips rendered before their names carried the design digest (`G01-title-card.mov`).
 
-    HTML designs the current version doesn't use go too: history/ has a copy
-    of every earlier version's designs.
+    Gives each a second name with the digest graphics.json recorded for it (a
+    hard link, else a copy), so a re-cut reuses the clip instead of rendering
+    it again; the old name stays for the cut already in Final Cut.
+    """
+    try:
+        manifest = json.loads((out_dir / "graphics.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    made = []
+    for e in manifest.get("graphics", []) if isinstance(manifest, dict) else []:
+        if not isinstance(e, dict):
+            continue
+        digest, name = str(e.get("digest") or ""), Path(str(e.get("file") or "")).name
+        src = out_dir / "graphics" / name
+        if len(digest) < 6 or not name.endswith(".mov") or src.stem.endswith(digest[:6]) or not src.is_file():
+            continue
+        dest = src.with_name(f"{src.stem}-{digest[:6]}.mov")
+        if dest.exists():
+            continue
+        try:
+            os.link(src, dest)
+        except OSError:
+            try:
+                shutil.copy2(src, dest)
+            except OSError:
+                dest.unlink(missing_ok=True)
+                continue
+        made.append(dest.name)
+    return made
+
+
+def prune_graphics(out_dir: Path) -> list[str]:
+    """Delete only what no version ever used: leftovers of interrupted or failed renders.
+
+    A clip an earlier version used stays even after that version's history
+    folder is gone: Final Cut reads imported media in place, so deleting it
+    would take the graphics out of a project already in a library. HTML
+    designs the current version doesn't use go: history/ keeps a copy of
+    every kept version's designs.
     """
     folder = out_dir / "graphics"
     if not folder.is_dir():
