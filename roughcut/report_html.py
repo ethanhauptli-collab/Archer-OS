@@ -198,6 +198,8 @@ function copyChapters(button) {
     try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
     if (ok) { done(); } else { button.textContent = 'Selected: press ⌘C'; }
   };
+  // The text is selected already; say so now, since the clipboard may wait on a permission prompt.
+  button.textContent = 'Selected: press ⌘C';
   if (navigator.clipboard && window.isSecureContext) {
     navigator.clipboard.writeText(pre.innerText).then(done, manual);
   } else {

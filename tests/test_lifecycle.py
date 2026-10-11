@@ -957,7 +957,12 @@ def test_no_bell_for_the_app_or_a_quick_run(footage, tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "NOTIFY_AFTER", 0.0)
     assert main(["render", str(out), "--progress-json"]) == 0  # the app has its own notification
     assert notified == []
+    monkeypatch.setattr(cli.sys, "platform", "linux")
     assert cli.keep_awake() is None  # not a Mac: nothing to start
+    started = []
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    cli.keep_awake(popen=lambda cmd, **kw: started.append(cmd) or "proc")
+    assert started and started[0][:4] == ["caffeinate", "-i", "-s", "-w"]  # held until this process exits
     assert cli._applescript('say "hi" \\ there') == '"say \\"hi\\" \\\\ there"'
 
 
