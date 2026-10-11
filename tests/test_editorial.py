@@ -788,6 +788,97 @@ def test_a_capped_still_moved_up_for_a_short_clip_never_leaves_black_after_it(se
     assert still.start == first.end  # moved up to meet the short clip, not a flash between them
 
 
+def _replays_within(tl, a, seconds=10):
+    """Pairs of shots of one video, at most `seconds` apart, that show some of the same footage."""
+    fd = tl.frame_duration
+    gap = round(Fraction(seconds) / fd)
+    shots = sorted((c for c in tl.connected if a.clip(c.clip_id).media.kind == "video"), key=lambda c: c.start)
+    return [
+        (p.clip_id, p.start, q.start)
+        for i, p in enumerate(shots)
+        for q in shots[i + 1 :]
+        if p.clip_id == q.clip_id and q.start - p.end <= gap and q.src_in < p.src_in + p.frames * fd and p.src_in < q.src_in + q.frames * fd
+    ]
+
+
+def _shown_twice(tl, clip_id) -> float:
+    """Seconds of a clip's footage that more than one of its shots shows."""
+    fd = tl.frame_duration
+    shots = [c for c in tl.connected if c.clip_id == clip_id]
+    return sum(
+        max(0.0, float(min(p.src_in + p.frames * fd, q.src_in + q.frames * fd) - max(p.src_in, q.src_in)))
+        for i, p in enumerate(shots)
+        for q in shots[i + 1 :]
+    )
+
+
+HARBOR = [(0.5, 4.0, "The harbor wakes up before dawn."), (4.3, 8.3, "Boats head out past the jetty."), (8.6, 12.0, "By noon the fish market is full.")]
+
+
+def _harbor(*clips):
+    vo = make_clip("A01", kind="audio", seconds=13, sentences=HARBOR, role="voiceover")
+    return Analysis(clips=[vo, *clips])
+
+
+def _over_lines(*shots):
+    return {"sections": [{"name": "x", "items": ["A01.S001", "A01.S002", "A01.S003"], "broll": [
+        {"clip": clip, "over": [line], "words": "", "source_in": source_in, "reason": ""} for clip, line, source_in in shots
+    ]}]}
+
+
+def test_fill_shows_the_part_of_a_short_clip_it_has_not_shown_yet():
+    from roughcut.plan import heuristic_plan
+    from roughcut.timeline import _gaps_without_picture
+
+    lines = [(0.5, 7.0, "The harbor wakes up before dawn."), (7.5, 14.0, "Boats head out past the jetty."), (14.5, 21.0, "By noon the fish market is full.")]
+    vo = make_clip("A01", kind="audio", seconds=22, sentences=lines, role="voiceover")
+    a = Analysis(clips=[vo] + [make_clip(f"V0{i}", seconds=8) for i in (1, 2, 3)])
+    tl = build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t")
+    assert _gaps_without_picture(tl, a) == []
+    reused = [cid for cid in ("V01", "V02", "V03") if sum(c.clip_id == cid for c in tl.connected) == 2]
+    assert reused, [(c.clip_id, c.start) for c in tl.connected]
+    for cid in reused:  # a 4 s shot again from an 8 s clip: the 4 s it hasn't shown, less the 0.8 s it skipped at the head
+        assert _shown_twice(tl, cid) <= 0.8 + float(tl.frame_duration), (cid, [(c.start, float(c.src_in)) for c in tl.connected if c.clip_id == cid])
+
+
+def test_a_clip_planned_twice_never_replays_what_it_just_showed():
+    from roughcut.timeline import _gaps_without_picture
+
+    # The software chooses both in-points: the second picks up where the first got to.
+    a = _harbor(make_clip("V01", seconds=30), make_clip("V03", seconds=8))
+    tl = build_timeline(normalize(_over_lines(("V03", "A01.S001", -1), ("V03", "A01.S003", -1)), a), a, style=STYLES["medium"], name="t")
+    first, second = sorted((c for c in tl.connected if c.clip_id == "V03"), key=lambda c: c.start)
+    assert second.src_in == first.src_in + first.frames * tl.frame_duration
+    assert not _adjacent_replays(tl) and _replays_within(tl, a) == [] and _gaps_without_picture(tl, a) == []
+
+    # The planner's in-points, 4 s and then 6 s into an 8 s clip on the next line: 6 s backs off into the first shot.
+    a = _harbor(make_clip("V01", seconds=30), make_clip("V04", seconds=8))
+    tl = build_timeline(normalize(_over_lines(("V04", "A01.S001", 4), ("V04", "A01.S002", 6)), a), a, style=STYLES["medium"], name="t")
+    assert not _adjacent_replays(tl) and _replays_within(tl, a) == [] and _gaps_without_picture(tl, a) == []
+    assert any(w.startswith("B-roll V04 from 6s would replay") for w in tl.warnings), tl.warnings
+
+    # With room left in the clip, the second carries on from where the first got to, and the few frames
+    # between the lines are closed without showing any of it twice.
+    a = _harbor(make_clip("V01", seconds=30), make_clip("V04", seconds=12))
+    tl = build_timeline(normalize(_over_lines(("V04", "A01.S001", 2), ("V04", "A01.S002", 4)), a), a, style=STYLES["medium"], name="t")
+    first, second = sorted((c for c in tl.connected if c.clip_id == "V04"), key=lambda c: c.start)
+    assert first.src_in == pytest.approx(2, abs=0.05)  # the planner's first in-point stays
+    assert first.end == second.start and second.src_in == first.src_in + first.frames * tl.frame_duration
+    assert any("carries on from" in w for w in tl.warnings), tl.warnings
+    assert _replays_within(tl, a) == [] and _gaps_without_picture(tl, a) == []
+
+
+def test_fill_never_replays_the_planned_shot_it_leads_into():
+    a = _harbor(make_clip("V02", seconds=10))  # the only clip there is
+    raw = {"sections": [{"name": "x", "items": ["A01.S001", "A01.S002"], "broll": [
+        {"clip": "V02", "over": ["A01.S001"], "words": "wakes up before dawn", "source_in": 1.5, "reason": ""},
+    ]}]}
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+    shots = sorted(tl.connected, key=lambda c: c.start)
+    assert shots[0].note == "auto-fill" and shots[1].note != "auto-fill"  # fill covers the line until its words
+    assert _replays_within(tl, a) == [], [(c.start, float(c.src_in), c.frames) for c in shots]
+
+
 def test_render_media_needs_the_run_style():
     from roughcut.prompts import render_media
 
