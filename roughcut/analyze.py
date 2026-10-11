@@ -14,7 +14,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions
-from .transcribe import Transcriber, Transcript, find_sidecar, load_sidecar
+from .transcribe import Transcriber, TranscriptionError, Transcript, find_sidecar, load_sidecar
 
 ROLE_LABELS = {
     "aroll": "A-Roll",
@@ -245,6 +245,39 @@ def classify(clip: Clip) -> str:
     return "aroll" if words >= 12 and speech >= max(4.0, 0.2 * dur) else "broll"
 
 
+def _short_error(e: BaseException, path: str = "", name: str = "") -> str:
+    """One readable line from an exception (ffmpeg errors put the reason on the last line), with `path` shortened to `name`."""
+    lines = [ln.strip() for ln in (str(e).replace(path, name) if path else str(e)).splitlines() if ln.strip()]
+    if not lines:
+        return type(e).__name__
+    text = lines[0] if len(lines) == 1 else f"{lines[0].split(':', 1)[0]}: {lines[-1]}"
+    return text[:200]
+
+
+class _TranscribeFailures:
+    """A corrupt or half-copied clip is cut on its pauses; a broken transcriber stops the run.
+
+    The transcriber looks broken when the first two clips it tries both fail, or when
+    three fail in a row.
+    """
+
+    def __init__(self) -> None:
+        self.ok = 0
+        self.streak: list[str] = []
+
+    def succeeded(self) -> None:
+        self.ok += 1
+        self.streak = []
+
+    def failed(self, what: str, error: BaseException) -> None:
+        self.streak.append(what)
+        if (self.ok == 0 and len(self.streak) >= 2) or len(self.streak) >= 3:
+            raise TranscriptionError(
+                f"Transcription failed on {len(self.streak)} clips in a row ({'; '.join(self.streak)}), so the "
+                "transcriber itself looks broken. Run `roughcut doctor`, or use --transcriber none to cut on pauses only."
+            ) from error
+
+
 def analyze(
     paths: list[Path],
     *,
@@ -324,6 +357,7 @@ def analyze(
 
     t2 = time.monotonic()
     audible = [c for c in clips if c.media.has_audio]
+    failures = _TranscribeFailures()
     for n, clip in enumerate(audible, 1):
         m = clip.media
         # current = files finished, so the bar never reads full while work remains.
@@ -343,9 +377,20 @@ def analyze(
             else:
                 ts = time.monotonic()
                 log(f"transcribing {n}/{len(audible)} {m.name} ({float(m.duration):.0f}s)")
-                transcript = transcriber.transcribe(Path(m.path))
-                cache.put(m.fingerprint, key, transcript.to_json())
-                log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
+                try:
+                    transcript = transcriber.transcribe(Path(m.path))
+                except TranscriptionError:
+                    raise  # the backend itself is missing or misconfigured
+                except Exception as e:  # noqa: BLE001 - one undecodable clip must not stop the run
+                    reason = _short_error(e, m.path, m.name)
+                    failures.failed(f"{m.name}: {reason}", e)  # raises when the transcriber looks broken
+                    warning = f"{m.name}: couldn't transcribe ({reason}); cut on its pauses only"
+                    warnings.append(warning)
+                    log(warning)
+                else:
+                    failures.succeeded()
+                    cache.put(m.fingerprint, key, transcript.to_json())
+                    log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
         if transcript is not None:
             # Only true silence proves a word was invented. A raised level (music bed, loud
             # room) can sit above a quiet real word, so it never deletes words.
