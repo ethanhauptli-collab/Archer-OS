@@ -12,34 +12,51 @@ There's a command-line tool (below) and a Mac app in [`mac/`](mac/README.md) tha
 brew install ffmpeg python@3.12
 git clone https://github.com/ethanhauptli-collab/Archer-OS.git && cd Archer-OS
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e '.[mac,dev]'          # mlx-whisper for fast on-device transcription
-ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut   # `roughcut` in every Terminal window
-roughcut key set                     # paste your Claude API key; saved in the macOS Keychain
+pip install -e '.[mac,dev]'
+ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut
+roughcut key set
 ```
 
-The link means you don't have to `source .venv/bin/activate` in each new window. To update later: `cd ~/Archer-OS && git pull`.
+The `mac` extra installs mlx-whisper for fast on-device transcription. The `ln` line puts `roughcut` in every Terminal window, so you don't have to `source .venv/bin/activate` in each new one. `roughcut key set` asks for your Claude API key and saves it in the macOS Keychain.
+
+To update later, run `roughcut update` from any folder. It pulls the latest code into your clone, reinstalls only when the dependencies changed, and lists what's new.
 
 The first transcription downloads the Whisper model (`whisper-large-v3-turbo`, about 1.6 GB) once.
 
 ## Use
 
-```bash
-# Simplest: everything in the folder, Claude plans the cut
-roughcut build ~/Movies/Trip
+Everything in the folder, Claude plans the cut:
 
-# With a brief and a target length
+```bash
+roughcut build ~/Movies/Trip
+```
+
+With a brief and a target length:
+
+```bash
 roughcut build ~/Movies/Trip -t 8m \
   -c "Vlog: family day trip to Big Bear. Candid, warm. Open on the kids at the lake. Keep the part where they find the giant pinecone."
+```
 
-# Brief from a file, plus a script or outline to follow
+The brief from a file, plus a script or outline to follow:
+
+```bash
 roughcut build ~/Movies/Trip --context-file brief.md --script outline.txt
+```
 
-# No AI, just cut the silence (like Recut / TimeBolt)
+No AI, just cut the silence (like Recut / TimeBolt):
+
+```bash
 roughcut build ~/Movies/Talk --provider none
+```
 
-# Re-cut an earlier run tighter, or for vertical, without calling the model again
+Re-cut an earlier run tighter, or for vertical, without calling the model again:
+
+```bash
 roughcut render ~/Movies/Trip_roughcut --style tight --format vertical
 ```
+
+A path with spaces needs quotes, or drag the folder from Finder into the Terminal window and it's typed for you. If you forget the quotes, roughcut works out which folder you meant when it can and shows the quoted form for next time; otherwise it stops before doing anything and prints the command with the quotes in place.
 
 `roughcut doctor` checks that ffmpeg and transcription are installed, and tests your API key against Anthropic.
 
@@ -88,7 +105,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 ```bash
 roughcut build ~/Movies/OCVIBE --graphics \
   -c "Promo for OC Vibe. Lower third for each speaker, call out the big numbers, kinetic caption on the hook." \
-  --graphics-style "navy #0B1F3A and orange #FF6A13, bold geometric sans, premium and energetic"
+  --graphics-style "bold geometric sans, white type on dark plates, one accent color, premium and energetic"
 ```
 
 With `--graphics`, Claude also plans animated graphics while it plans the cut: lower thirds (names and roles only when the footage or brief states them), stat callouts, title cards, word-by-word kinetic captions, pulled quotes and short lists. It picks the moments and the exact words; roughcut times each graphic to the frame from the transcript. A second request designs every graphic as an HTML animation in one consistent style (your `--graphics-style`, or a clean default). A browser renders them frame by frame to transparent ProRes 4444 at the sequence size, and they land on their own lane above the B-roll in the Rough Cut.
@@ -109,15 +126,24 @@ Setup: install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `cl
 
 ### Other models
 
+In these, replace `MODEL_NAME` with the model's name.
+
+OpenAI (first `pip install -e '.[openai]'`, and `roughcut key set --openai` or export `OPENAI_API_KEY`):
+
 ```bash
-# OpenAI (pip install -e '.[openai]', export OPENAI_API_KEY)
-roughcut build ~/Movies/Trip --provider openai --model <model-name>
+roughcut build ~/Movies/Trip --provider openai --model MODEL_NAME
+```
 
-# Local, private, free: Ollama
-roughcut build ~/Movies/Trip --provider ollama --model <model-name> --no-vision
+Local, private and free, with Ollama:
 
-# Anything OpenAI-compatible (LM Studio, OpenRouter, Groq...)
-roughcut build ~/Movies/Trip --provider openai-compatible --base-url http://localhost:1234/v1 --model <model-name>
+```bash
+roughcut build ~/Movies/Trip --provider ollama --model MODEL_NAME --no-vision
+```
+
+Anything OpenAI-compatible (LM Studio, OpenRouter, Groq...):
+
+```bash
+roughcut build ~/Movies/Trip --provider openai-compatible --base-url http://localhost:1234/v1 --model MODEL_NAME
 ```
 
 Claude requests opt into Anthropic's server-side refusal fallbacks (`fallbacks: "default"`). If a request is ever declined by a safety classifier, the API reruns it on the recommended fallback model instead of failing.
@@ -140,5 +166,7 @@ Footage exported more than once (the same promo in 16:9, 9:16 and 4:3, or a clip
 
 ```bash
 pip install -e '.[dev]'
-pytest            # 196 tests; generates synthetic footage with ffmpeg, no API key needed
+pytest
 ```
+
+The tests generate synthetic footage with ffmpeg and need no API key.

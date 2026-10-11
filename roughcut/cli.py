@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_render_args(b)
 
     r = sub.add_parser("render", help="rebuild the FCPXML from a previous run's plan (no model calls)")
-    r.add_argument("out_dir", help="a folder written by `roughcut build`")
+    r.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`")
     _add_render_args(r)
 
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
@@ -81,7 +81,27 @@ def build_parser() -> argparse.ArgumentParser:
     k = sub.add_parser("key", help="save, check or remove your API key (stored in the macOS Keychain, shared with the Mac app)")
     k.add_argument("action", choices=["set", "status", "remove"])
     k.add_argument("--openai", action="store_true", help="the OpenAI / compatible-server key instead of Claude's")
+
+    sub.add_parser("update", help="get the latest roughcut (git pull in its folder; reinstalls when dependencies changed)")
     return parser
+
+
+def _resolve_paths(args, argv: list[str]) -> str | None:
+    """Rejoin paths zsh split at spaces (build inputs, render's folder). Returns an error, or None."""
+    from .paths import PathInputError, resolve
+
+    note = lambda line: print(line, file=sys.stderr)  # noqa: E731
+    try:
+        if args.command == "build":
+            args.inputs = resolve(args.inputs, argv, notify=note)
+        elif args.command == "render":
+            found = resolve(args.out_dir, argv, notify=note)
+            if len(found) != 1:
+                return "render takes one output folder; put a path with spaces in quotes."
+            args.out_dir = found[0]
+    except PathInputError as e:
+        return str(e)
+    return None
 
 
 def _key_command(action: str, openai: bool) -> int:
@@ -309,7 +329,20 @@ def _log_end(line: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
+    if args.command == "update":
+        from .update import update
+
+        return update()
+    if args.command in ("build", "render"):
+        # Before anything runs or any folder is created.
+        problem = _resolve_paths(args, argv)
+        if problem:
+            progress.enable(bool(args.progress_json))
+            print(f"roughcut: {problem}", file=sys.stderr)
+            progress.emit("error", message=problem)
+            return 1
     if args.command == "key":
         # Works on the real environment: what the shell exports vs the Keychain.
         return _key_command(args.action, args.openai)

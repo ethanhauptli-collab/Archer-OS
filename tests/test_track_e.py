@@ -162,3 +162,200 @@ def test_hidden_duplicate_exports_are_not_described_again(footage, tmp_path, mon
 
     still = next(c for c in analysis.clips if c.media.name == "portrait.png")
     assert still.frames and _dims(still.frames[0]) == (288, 512)
+
+
+# ------------------------------------------------------------ N4: zsh-safe commands, split paths, update
+
+README = Path(__file__).parents[1] / "README.md"
+
+
+def _bash_blocks(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"```bash\n(.*?)```", text, flags=re.S)
+
+
+def test_readme_commands_paste_cleanly_into_zsh():
+    """zsh (macOS's shell) doesn't treat # as a comment when pasting, and globs unquoted [...]."""
+    blocks = _bash_blocks(README.read_text(encoding="utf-8"))
+    assert len(blocks) >= 8
+    for block in blocks:
+        for line in block.splitlines():
+            assert not line.lstrip().startswith("#") and " #" not in line, f"comment in a shell block: {line!r}"
+            assert "<" not in line and ">" not in line, f"placeholder or redirect in a shell block: {line!r}"
+            assert ".[" not in line.replace("'.[", ""), f"unquoted pip extras: {line!r}"
+
+
+def test_readme_check_catches_comments():
+    assert " #" in _bash_blocks("```bash\npip install -e '.[mac]'   # fast\n```\n")[0]
+
+
+@pytest.fixture
+def spaced(tmp_path) -> Path:
+    folder = tmp_path / "YouTube Current Project Staging" / "OCVIBE"
+    folder.mkdir(parents=True)
+    return folder
+
+
+def test_split_path_is_rejoined(spaced):
+    from roughcut.paths import resolve
+
+    notes = []
+    pieces = str(spaced).split(" ")
+    assert len(pieces) == 4
+    assert resolve(pieces, ["build", *pieces], notify=notes.append) == [str(spaced)]
+    assert notes == [f"Read that as '{spaced}'. Next time put the path in quotes, or drag the folder into Terminal."]
+
+
+def test_pieces_that_exist_on_their_own_are_not_joined(tmp_path):
+    from roughcut.paths import rejoin
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a b").mkdir()  # exists too, but both pieces are real folders
+    assert rejoin([str(tmp_path / "a"), str(tmp_path / "b")]) == [str(tmp_path / "a"), str(tmp_path / "b")]
+    # An existing first piece is still joined when the rest only makes sense with it.
+    (tmp_path / "Trip").mkdir()
+    (tmp_path / "Trip Day").mkdir()
+    assert rejoin([str(tmp_path / "Trip"), "Day"]) == [str(tmp_path / "Trip Day")]
+    # Two folders, one with spaces.
+    assert rejoin([str(tmp_path / "a"), str(tmp_path / "Trip"), "Day"]) == [str(tmp_path / "a"), str(tmp_path / "Trip Day")]
+
+
+def test_missing_path_fails_with_the_quoted_command(tmp_path):
+    from roughcut.paths import PathInputError, resolve
+
+    pieces = [str(tmp_path / "My"), "Trip"]
+    with pytest.raises(PathInputError) as e:
+        resolve(pieces, ["build", *pieces, "-t", "8m"])
+    message = str(e.value)
+    assert f"can't find '{tmp_path}/My Trip'" in message
+    assert f"roughcut build '{tmp_path}/My Trip' -t 8m" in message
+    with pytest.raises(PathInputError) as e:  # a plain typo: no advice about quotes
+        resolve([str(tmp_path / "Tirp")], ["build", str(tmp_path / "Tirp")])
+    assert "quotes" not in str(e.value)
+
+
+def test_build_and_render_accept_split_paths(footage, spaced, tmp_path, capsys):
+    from roughcut.cli import main
+
+    for name in ("talk.mov", "talk.json"):
+        shutil.copy2(footage / name, spaced / name)
+    out = tmp_path / "Rough Cuts" / "OCVIBE out"
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
+    assert main(["build", *str(spaced).split(" "), "-o", str(out), *common]) == 0
+    assert (out / "OCVIBE.fcpxml").is_file()
+    assert "Read that as" in capsys.readouterr().err
+    assert main(["render", *str(out).split(" "), "--style", "tight"]) == 0
+
+
+def test_build_with_a_missing_path_stops_before_creating_anything(tmp_path, capsys):
+    from roughcut.cli import main
+
+    before = sorted(p.name for p in tmp_path.parent.iterdir())
+    assert main(["build", str(tmp_path / "My"), "Trip", "--provider", "none", "--transcriber", "none"]) == 1
+    err = capsys.readouterr().err
+    assert f"roughcut build '{tmp_path}/My Trip' --provider none --transcriber none" in err
+    assert sorted(p.name for p in tmp_path.parent.iterdir()) == before
+    assert list(tmp_path.iterdir()) == []
+
+
+def _git(cwd: Path, *args: str) -> str:
+    import os
+    import subprocess
+
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=env).stdout
+
+
+def _commit(repo: Path, files: dict[str, str], message: str) -> None:
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+
+
+@pytest.fixture
+def clone(tmp_path) -> tuple[Path, Path]:
+    """An 'upstream' repo and a clone of it, like the owner's install."""
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q", "-b", "main")
+    _commit(upstream, {"pyproject.toml": "[project]\nname='roughcut'\n", "roughcut/__init__.py": '__version__ = "0.1.0"\n'}, "first")
+    local = tmp_path / "Archer OS"
+    _git(tmp_path, "clone", "-q", str(upstream), str(local))
+    return upstream, local
+
+
+class Runner:
+    """subprocess.run that does git for real and records pip instead of running it."""
+
+    def __init__(self, pip_code: int = 0):
+        self.pip: list[list[str]] = []
+        self.pip_code = pip_code
+
+    def __call__(self, cmd, **kwargs):
+        import subprocess
+
+        if cmd[0] == "git":
+            return subprocess.run(cmd, **kwargs)
+        self.pip.append(cmd)
+        return subprocess.CompletedProcess(cmd, self.pip_code, "", "")
+
+
+def test_update_pulls_and_reinstalls_only_when_dependencies_change(clone):
+    import sys
+
+    from roughcut import update
+
+    upstream, local = clone
+    lines: list[str] = []
+    runner = Runner()
+    assert update.update(local, runner=runner, out=lines.append) == 0
+    assert any("Already up to date: roughcut 0.1.0" in ln for ln in lines) and runner.pip == []
+
+    _commit(upstream, {"roughcut/cut.py": "x = 1\n"}, "Cut tighter around breaths")
+    lines.clear()
+    assert update.update(local, runner=runner, out=lines.append) == 0
+    assert runner.pip == [], "code-only change: an editable install needs no reinstall"
+    assert any("Cut tighter around breaths" in ln for ln in lines)
+    assert (local / "roughcut" / "cut.py").is_file()
+
+    _commit(upstream, {"pyproject.toml": "[project]\nname='roughcut'\ndependencies=['x']\n", "roughcut/__init__.py": '__version__ = "0.2.0"\n'}, "New dependency")
+    lines.clear()
+    assert update.update(local, runner=runner, out=lines.append) == 0
+    assert len(runner.pip) == 1
+    cmd = runner.pip[0]
+    assert cmd[:5] == [sys.executable, "-m", "pip", "install", "-e"] and cmd[5].startswith(str(local))
+    assert any("roughcut 0.1.0 → 0.2.0" in ln for ln in lines)
+
+
+def test_update_explains_a_failed_pull(clone):
+    from roughcut import update
+
+    upstream, local = clone
+    _commit(upstream, {"roughcut/__init__.py": '__version__ = "0.2.0"\n'}, "bump")
+    (local / "roughcut" / "__init__.py").write_text('__version__ = "mine"\n')  # edited by hand
+    lines: list[str] = []
+    assert update.update(local, runner=Runner(), out=lines.append) == 1
+    assert "edited by hand" in lines[-1] and "git -C" in lines[-1]
+
+
+def test_update_refuses_outside_a_git_checkout(tmp_path):
+    from roughcut import update
+
+    lines: list[str] = []
+    assert update.update(tmp_path, runner=Runner(), out=lines.append) == 1
+    assert "isn't a git clone" in lines[0]
+
+
+def test_update_command_is_wired(monkeypatch):
+    from roughcut import update
+    from roughcut.cli import main
+
+    seen = []
+    monkeypatch.setattr(update, "update", lambda: seen.append(True) or 0)
+    assert main(["update"]) == 0 and seen == [True]
