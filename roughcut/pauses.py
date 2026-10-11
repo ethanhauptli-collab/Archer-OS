@@ -8,6 +8,12 @@ noise, and their pauses are dead air like any other.
 
 Music is tonal and noise isn't: the spectral flatness of the pauses (near 0
 for tones and chords, 0.5-0.9 for noise) tells them apart.
+
+A breath or a mouth click in the middle of a pause splits it in two on the
+silence map, and each half can be shorter than the style's longest pause,
+so the whole pause stayed. `mark_breaths` finds those short, quiet islands
+(no transcribed word in them, well below the speech level) so the timeline
+can treat the pause as one.
 """
 
 from __future__ import annotations
@@ -114,3 +120,92 @@ def mark_beds(clips: list[Clip], cache: Cache, workers: int = 4) -> list[str]:
         log(note)
         notes.append(note)
     return notes
+
+
+# ------------------------------------------------------------------ breaths
+
+BREATH_MAX = 0.4  # longest sound between two silences that can be a breath or a click
+BREATH_BELOW_SPEECH = 12.0  # dB under the clip's speech level
+WINDOW = 0.05  # seconds per level reading
+
+
+def window_levels(path: Path) -> list[float]:
+    """RMS level (dBFS) of each 50 ms of the first audio track; [] if it can't be read."""
+    af = (
+        f"aformat=channel_layouts=mono,aresample=48000,asetnsamples=n={int(48000 * WINDOW)}:p=0,"
+        "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-"
+    )
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    levels = []
+    for line in proc.stdout.splitlines():
+        if "RMS_level=" in line:
+            try:
+                value = float(line.split("=", 1)[1])
+            except ValueError:
+                value = -120.0
+            levels.append(max(-120.0, value) if math.isfinite(value) else -120.0)
+    return levels
+
+
+def breath_candidates(silences: list[tuple[float, float]], words: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Short sounds between two silences that hold no transcribed word (its start, or all of it)."""
+    spans = sorted(silences)
+    out = []
+    for (_, e1), (s2, _) in zip(spans, spans[1:]):
+        if not 0 < s2 - e1 <= BREATH_MAX:
+            continue
+        if any(e1 <= ws < s2 or (e1 - 0.02 <= ws and we <= s2 + 0.02) for ws, we in words):
+            continue
+        out.append((e1, s2))
+    return out
+
+
+def breath_islands(silences, words: list[tuple[float, float]], levels: list[float]) -> list[tuple[float, float]]:
+    """The candidates quiet enough to be a breath or click: BREATH_BELOW_SPEECH under the speech."""
+    candidates = breath_candidates(silences, words)
+    if not candidates or not levels:
+        return []
+    spans = sorted(words)
+    in_words = [v for i, v in enumerate(levels) if _within((i + 0.5) * WINDOW, spans)]
+    speech = statistics.median(in_words) if len(in_words) >= 20 else sorted(levels)[(len(levels) * 9) // 10]
+    out = []
+    for a, b in candidates:
+        first, last = int(a / WINDOW), min(len(levels) - 1, int(b / WINDOW))
+        windows = [levels[i] for i in range(first, last + 1) if a <= (i + 0.5) * WINDOW <= b]
+        if not windows:  # shorter than a window: the one it falls in
+            windows = [levels[min(len(levels) - 1, int((a + b) / 2 / WINDOW))]]
+        if max(windows) <= speech - BREATH_BELOW_SPEECH:
+            out.append((a, b))
+    return out
+
+
+def _within(t: float, spans: list[tuple[float, float]]) -> bool:
+    i = bisect.bisect_right(spans, (t, math.inf)) - 1
+    return i >= 0 and spans[i][0] <= t <= spans[i][1]
+
+
+def mark_breaths(clips: list[Clip], cache: Cache, workers: int = 4) -> None:
+    """Set clip.breaths on talking clips: the breaths and clicks that split a pause in two."""
+    todo = []
+    for c in clips:
+        c.breaths = []
+        if c.role not in ("aroll", "voiceover") or c.hidden or not c.media.has_audio:
+            continue
+        words = sorted((w.start, w.end) for s in c.segments for w in s.words)
+        if words and breath_candidates(c.silences, words):
+            todo.append((c, words))
+
+    def measure(item) -> None:
+        clip, words = item
+        m = clip.media
+        found = cache.get(m.fingerprint, "levels-v1.json")
+        if found is None:
+            found = {"window": WINDOW, "rms": window_levels(Path(m.path))}
+            cache.put(m.fingerprint, "levels-v1.json", found)
+        clip.breaths = breath_islands(clip.silences, words, found.get("rms") or [])
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(measure, todo))

@@ -410,6 +410,102 @@ def test_jumps_in_a_music_bed_get_markers_and_a_clashing_cue_a_warning():
     assert any("music A01 plays over V01" in w for w in tl.warnings)
 
 
+# ------------------------------------------------------------ T23: a pause split by a breath
+
+HOME = [(1.0, 4.0, "We drove all the way back home from the coast."), (5.2, 7.5, "And then we unpacked the car and the bikes."), (8.65, 10.5, "It was late by then for everyone.")]
+HOME_SILENCES = [(0.0, 1.0), (4.0, 4.45), (4.75, 5.2), (7.5, 7.95), (8.2, 8.65), (10.5, 12.0)]
+HOME_BREATH = (4.45, 4.75)  # quiet; the sound between 7.95 and 8.2 is loud, so it's not a breath
+
+
+def _home_clip(kind, breaths):
+    from conftest import spread_words
+
+    from roughcut.segments import build_segments
+    from roughcut.transcribe import Word
+
+    words = [Word(**w) for s, e, text in HOME for w in spread_words(s, e, text)]
+    for x, y in zip(words, words[1:]):  # Whisper: each word runs up to the next
+        x.end = y.start
+    clip = make_clip("V01" if kind == "video" else "A01", kind=kind, seconds=12, silences=list(HOME_SILENCES), role="aroll" if kind == "video" else "voiceover")
+    clip.segments = build_segments(clip.id, words, gap_split=5.0)  # one long segment, like run-on speech
+    clip.breaths = list(breaths)
+    return clip
+
+
+def _home_spans(kind, breaths, style):
+    from roughcut.plan import heuristic_plan
+
+    a = Analysis(clips=[_home_clip(kind, breaths)])
+    return _spans(build_timeline(heuristic_plan(a), a, style=STYLES[style], name="t"))
+
+
+def _plays(spans, t):
+    return any(a <= t < b for a, b in spans)
+
+
+def test_a_pause_split_by_a_breath_is_one_pause_on_camera():
+    # Each half (0.45 s) is under medium's 0.6 s, so without the breath marked the whole 1.2 s pause stays.
+    assert _plays(_home_spans("video", [], "medium"), 4.6)
+    spans = _home_spans("video", [HOME_BREATH], "medium")
+    assert not any(_plays(spans, t) for t in (4.3, 4.6, 4.9))  # one edit, breath and all
+    assert _plays(spans, 3.9) and _plays(spans, 5.25)
+    assert _plays(spans, 8.0)  # the loud sound between two pauses is never cut
+    # Tight cut each half and left the breath as a half-second flash; now it's one edit.
+    flashes = [(a, b) for a, b in _home_spans("video", [], "tight") if b - a < 0.6 and a < 4.6 < b]
+    assert flashes and not _plays(_home_spans("video", [HOME_BREATH], "tight"), 4.6)
+
+
+def test_narration_keeps_the_breath_and_loses_the_silence_around_it():
+    spans = _home_spans("audio", [HOME_BREATH], "medium")
+    assert _plays(spans, 4.6)  # sound is never removed from narration
+    assert not _plays(spans, 4.3) and not _plays(spans, 4.95)
+    assert _plays(spans, 3.9) and _plays(spans, 5.25)
+
+
+def test_a_silence_holding_a_word_is_never_joined_across():
+    from roughcut.timeline import _pause_clusters
+
+    clip = _home_clip("video", [HOME_BREATH])
+    assert [(s, e) for s, e, _ in _pause_clusters(clip)][1] == (4.0, 5.2)
+    clip.silences[2] = (4.75, 5.6)  # now holds a whole word (quiet speech under a raised level)
+    assert (4.0, 5.6) not in [(s, e) for s, e, _ in _pause_clusters(clip)]
+
+
+@pytest.fixture(scope="module")
+def breath_footage(tmp_path_factory):
+    import json
+    import shutil
+    import subprocess
+
+    from conftest import spread_words
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("breath")
+    speech = "+".join(f"0.5*sin(2*PI*200*t)*between(t,{s},{e})" for s, e, _ in HOME)
+    expr = f"{speech}+0.06*sin(2*PI*400*t)*between(t,4.45,4.75)+0.3*sin(2*PI*300*t)*between(t,7.95,8.2)"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30000/1001:duration=12",
+                    "-f", "lavfi", "-i", f"aevalsrc=exprs='{expr}':s=48000:d=12", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(root / "cam.mov")], check=True)
+    words = [w for s, e, text in HOME for w in spread_words(s, e, text)]
+    for x, y in zip(words, words[1:]):
+        x["end"] = y["start"]
+    (root / "cam.json").write_text(json.dumps({"words": words}))
+    return root
+
+
+def test_breaths_are_found_by_level_and_cut_on_camera(breath_footage, tmp_path):
+    from roughcut.analyze import Cache, analyze
+    from roughcut.plan import heuristic_plan
+
+    a = analyze([breath_footage / "cam.mov"], transcriber=None, cache=Cache(tmp_path / "cache"))
+    clip = a.clips[0]
+    assert len(clip.breaths) == 1 and clip.breaths[0] == pytest.approx(HOME_BREATH, abs=0.03)  # the loud one isn't
+    spans = _spans(build_timeline(heuristic_plan(a), a, style=STYLES["medium"], name="t"))
+    assert not _plays(spans, 4.6) and _plays(spans, 8.0)
+    assert Analysis.from_json(a.to_json()).clips[0].breaths == clip.breaths
+
+
 @pytest.mark.parametrize("bed,pieces", [("music", 1), ("noise", 2), (None, 2)])
 def test_pauses_over_a_music_bed_stay_up_to_a_second(bed, pieces):
     from roughcut.timeline import kept_length

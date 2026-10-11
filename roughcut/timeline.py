@@ -204,6 +204,37 @@ def _pause_between(prev_start: float, next_end: float, silences: list[tuple[floa
     return max((e - s for s, e in silences if s >= prev_start + eps and e <= next_end - eps), default=0.0)
 
 
+BREATH_MARGIN = 0.05  # kept either side of a breath in narration
+MIN_TRIM = 0.1  # a shorter trim isn't worth an edit
+
+
+def _pause_clusters(clip: Clip) -> list[tuple[float, float, list[tuple[float, float]]]]:
+    """Silences joined across the breaths and clicks between them: (start, end, the silences).
+
+    A breath splits one pause in two on the silence map, and each half can be
+    shorter than the style's longest pause, so the pause stayed. Analysis
+    marks the breaths (short, quiet, no transcribed word); silences that hold
+    a whole word (quiet speech under a raised level) are never joined.
+    """
+    spans = sorted(clip.silences)
+    if not clip.breaths:
+        return [(s, e, [(s, e)]) for s, e in spans]
+    spoken = [(w.start, w.end) for seg in clip.segments for w in seg.words]
+
+    def holds_word(s: float, e: float) -> bool:
+        return any(s <= ws and we <= e for ws, we in spoken)
+
+    out: list[tuple[float, float, list[tuple[float, float]]]] = []
+    for s, e in spans:
+        if out and not holds_word(s, e) and not holds_word(*out[-1][2][-1]):
+            prev_end = out[-1][1]
+            if any(abs(b0 - prev_end) < 1e-3 and abs(b1 - s) < 1e-3 for b0, b1 in clip.breaths):
+                out[-1] = (out[-1][0], e, out[-1][2] + [(s, e)])
+                continue
+        out.append((s, e, [(s, e)]))
+    return out
+
+
 def _gap_limit(clip: Clip, style: Style) -> float:
     """Longest pause kept inside speech. Over a music bed (a finished promo) the pauses carry
     the music, and cutting every breath makes it stutter, so they stay longer."""
@@ -230,13 +261,16 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     # has no picture of its own (B-roll covers it), so every um/uh can go.
     filler_floor = 0.25 if clip.media.has_video else 0.0
     max_gap = _gap_limit(clip, style)
+    # On camera a pause split by a breath is one pause, cut in one edit. Narration keeps its
+    # breaths (sound is never removed there); _cut_silences trims the silence around them.
+    sil = [(s, e) for s, e, _ in _pause_clusters(clip)] if clip.media.has_video else clip.silences
     for i, w in enumerate(all_words):
         if style.remove_fillers and w.is_filler:
             removed_since_last = True
             continue
         if current:
             prev = all_words[current[-1]]
-            gap = max(w.start - prev.end, _pause_between(prev.start, w.end, clip.silences))
+            gap = max(w.start - prev.end, _pause_between(prev.start, w.end, sil))
             if gap > max_gap or (removed_since_last and gap > filler_floor):
                 runs.append(current)
                 current = []
@@ -249,7 +283,6 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     # of a cut retake or the start of the next sentence.
     idx = next((i for i, s in enumerate(clip.segments) if s.id == seg.id), -1)
     base = sum(len(s.words) for s in clip.segments[:idx]) if idx > 0 else 0
-    sil = clip.silences
 
     def end_of(w) -> float:  # where a neighbouring word's sound really stops / starts
         return _silence_clamp_end(w.end, w.start, sil)
@@ -268,8 +301,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
     for run in runs:
         first_i, last_i = run[0], run[-1]
         first, last = all_words[first_i], all_words[last_i]
-        wa = _silence_clamp_start(first.start, first.end, clip.silences)
-        wb = _silence_clamp_end(last.end, last.start, clip.silences)
+        wa = _silence_clamp_start(first.start, first.end, sil)
+        wb = _silence_clamp_end(last.end, last.start, sil)
         # Padding never reaches into a neighbouring word (including cut fillers).
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
@@ -310,6 +343,11 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
     inside the piece go: a quiet reaction shot or B-roll stays as chosen.
     A "silence" that holds a whole transcribed word is quiet speech under a
     raised level (music bed, loud room), not dead air, so it stays too.
+
+    A pause split by a breath or click counts as one (_pause_clusters). On
+    camera it goes in one edit, breath and all, rather than leaving a
+    word-less flash of the breath; in narration only the silence around the
+    breath goes.
     """
     out: list[_Piece] = []
     for p in pieces:
@@ -323,10 +361,20 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
             out.append(p)
             continue
         cur = p
-        for s, e in sorted(clip.silences):
+        for s, e, members in _pause_clusters(clip):
             if e - s > longest and cur.wa < s and e < cur.wb and not any(s <= ws and we <= e for ws, we in spoken):
-                out.append(replace(cur, b=min(cur.b, s + style.pad_out), wb=s, w1=None, b_tight=False, seg_ids=list(cur.seg_ids)))
-                cur = replace(cur, a=max(cur.a, e - style.pad_in), wa=e, w0=None, a_tight=False, seg_ids=list(cur.seg_ids))
+                if clip.media.has_video or len(members) == 1:
+                    cuts = [(s, e, style.pad_out, style.pad_in)]
+                else:
+                    last = len(members) - 1
+                    cuts = [
+                        (ms, me, style.pad_out if i == 0 else BREATH_MARGIN, style.pad_in if i == last else BREATH_MARGIN)
+                        for i, (ms, me) in enumerate(members)
+                    ]
+                    cuts = [c for c in cuts if (c[1] - c[3]) - (c[0] + c[2]) >= MIN_TRIM]
+                for ms, me, pad_out, pad_in in cuts:
+                    out.append(replace(cur, b=min(cur.b, ms + pad_out), wb=ms, w1=None, b_tight=False, seg_ids=list(cur.seg_ids)))
+                    cur = replace(cur, a=max(cur.a, me - pad_in), wa=me, w0=None, a_tight=False, seg_ids=list(cur.seg_ids))
         out.append(cur)
     return out
 
