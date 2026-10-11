@@ -25,13 +25,23 @@ from .timeline import SpineClip, Timeline
 
 FCPXML_VERSION = "1.10"
 
-# Final Cut gives stills a one-hour origin; every real export uses start="3600s".
+# Final Cut gives stills a one-hour origin.
 STILL_ORIGIN = Fraction(3600)
 
 
-def origin(m: MediaInfo) -> Fraction:
-    """Source-time origin of a clip: embedded timecode, or 3600s for stills."""
-    return STILL_ORIGIN if m.kind == "image" else m.start
+def still_origin(frame_duration: Fraction | None = None) -> Fraction:
+    """A still's origin in a sequence: the frame at or before 3600s on its grid, as Final Cut 11
+    writes it (start="86399313/24000s" at 23.976, "3600s" at 25 and 30). Without a sequence
+    (a browser clip) there is no grid: 3600s."""
+    if not frame_duration:
+        return STILL_ORIGIN
+    return tc.floor_frames(STILL_ORIGIN, frame_duration) * frame_duration
+
+
+def origin(m: MediaInfo, frame_duration: Fraction | None = None) -> Fraction:
+    """Source-time origin of a clip: embedded timecode, or a still's one-hour origin
+    on the sequence's frame grid (`frame_duration`)."""
+    return still_origin(frame_duration) if m.kind == "image" else m.start
 
 
 class _Resources:
@@ -284,7 +294,7 @@ def _volume(
 
 def _local(tl: Timeline, sc: SpineClip, clip: Clip, frame: int) -> Fraction:
     """Absolute timeline frame -> time inside spine clip `sc`'s source."""
-    return origin(clip.media) + sc.src_in + (frame - sc.offset) * tl.frame_duration
+    return origin(clip.media, tl.frame_duration) + sc.src_in + (frame - sc.offset) * tl.frame_duration
 
 
 def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
@@ -327,7 +337,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             clip,
             res,
             offset=tc.fcpx_time(sc.offset * fd, tb),
-            start=origin(clip.media) + sc.src_in,
+            start=origin(clip.media, fd) + sc.src_in,
             duration=tc.fcpx_time(sc.frames * fd, tb),
             lane=None,
             timebase=tb,
@@ -345,7 +355,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 child_clip,
                 res,
                 offset=tc.fcpx_time(_local(tl, sc, clip, cc.start), tb),
-                start=origin(child_clip.media) + cc.src_in,
+                start=origin(child_clip.media, fd) + cc.src_in,
                 duration=tc.fcpx_time(cc.frames * fd, tb),
                 lane=cc.lane,
                 timebase=tb,
@@ -354,7 +364,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
                 inherited=parent_format,
                 seq_fd=fd,
             )
-            child_start = origin(child_clip.media) + cc.src_in
+            child_start = origin(child_clip.media, fd) + cc.src_in
             keyframes = [(child_start + k * fd, db) for k, db in cc.keyframes]
             _volume(child, child_clip, cc.volume_db, cc.fade_in, cc.fade_out, keyframes, tb)
         for mk in attached[i]["markers"]:

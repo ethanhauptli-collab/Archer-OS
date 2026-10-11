@@ -6,6 +6,7 @@ Cut Pro and vendored by open-source FCPXML tools.
 
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -43,13 +44,13 @@ def check_invariants(path: Path) -> dict:
             off, dur, start = T(el.get("offset")), T(el.get("duration")), T(el.get("start"))
             assert off == pos, f"gap/overlap at {el.get('name')}"
             assert (off / fd).denominator == 1 and (dur / fd).denominator == 1, "spine edit off the frame grid"
-            _check_source_range(el, assets)
+            _check_source_range(el, assets, fd)
             for child in el:
                 if child.tag in ("asset-clip", "video"):
                     c_off = T(child.get("offset"))
                     assert start <= c_off < start + dur, f"connected {child.get('name')} outside its parent"
                     assert child.get("lane") not in (None, "0")
-                    _check_source_range(child, assets)
+                    _check_source_range(child, assets, fd)
                 elif child.tag in ("marker", "chapter-marker"):
                     assert start <= T(child.get("start")) < start + dur, "marker outside its parent"
             pos += dur
@@ -139,10 +140,10 @@ def format_problems(root: ET.Element, *, primary_audio_may_name_format: bool) ->
     return problems
 
 
-def _check_source_range(el, assets):
+def _check_source_range(el, assets, fd):
     asset = assets[el.get("ref")]
-    if T(asset.get("duration")) == 0:  # stills
-        assert T(el.get("start")) == 3600
+    if T(asset.get("duration")) == 0:  # stills: one hour, on the frame at or before it (as Final Cut writes it)
+        assert T(el.get("start")) == math.floor(3600 / fd) * fd
         return
     a0, ad = T(asset.get("start")), T(asset.get("duration"))
     s, d = T(el.get("start")), T(el.get("duration"))

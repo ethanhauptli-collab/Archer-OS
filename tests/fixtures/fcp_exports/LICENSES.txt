@@ -12,7 +12,7 @@ From orchetect/swift-fcpxml (https://github.com/orchetect/swift-fcpxml),
 commit 00bcacf213cca9b99ced1efd3aad7529396719c7,
 Tests/SwiftFCPXMLTests/TestResource/FCPXML Exports/:
     Complex.fcpxml, Annotations.fcpxml, AudioOnly.fcpxml, Occlusion3.fcpxml,
-    24With25Media.fcpxml, SyncClip.fcpxml
+    24With25Media.fcpxml, SyncClip.fcpxml, TwoClipsMarkers.fcpxml
 
 From TheAcharya/pipeline-neo, now OpenFCPXMLKit (https://github.com/TheAcharya/pipeline-neo),
 commit 7f55583a3a5b4fecf336ca2ae4b77fb11f8db46d, Tests/FCPXML Samples/FCPXML/:

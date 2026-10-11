@@ -21,7 +21,7 @@ from test_end_to_end import DTD, RATE_UNDEFINED, STORY, audio_role, check_invari
 from roughcut import timecode as tc
 from roughcut.analyze import Analysis
 from roughcut import fcpxml
-from roughcut.fcpxml import FADE_SHAPE, STILL_ORIGIN, _roles, build_fcpxml, source_channels
+from roughcut.fcpxml import FADE_SHAPE, STILL_ORIGIN, _roles, build_fcpxml, source_channels, still_origin
 from roughcut.plan import heuristic_plan, normalize
 from roughcut.timecode import parse_fcpx_time as T
 from roughcut.timeline import STYLES, build_timeline
@@ -36,7 +36,7 @@ def load(name: str) -> ET.Element:
 
 
 def test_the_fixtures_are_final_cut_exports():
-    assert len(FILES) == 9
+    assert len(FILES) == 10
     for f in FILES:
         root = ET.parse(f).getroot()
         assert root.get("version") in ("1.11", "1.13")
@@ -227,13 +227,6 @@ def test_stills_and_audio_only_media_look_like_final_cuts():
             if asset is not None and T(asset.get("duration")) == 0:
                 assert not any(c.get("ref") == v.get("ref") for c in root.iter("asset-clip"))  # stills are <video>
     assert formats_seen == {"audio", "still"}
-
-    # In a 23.98 project Final Cut puts a still's origin on the frame at or just before 3600s;
-    # roughcut writes 3600s exactly, inside that same frame.
-    root = load("ImageSample.fcpxml")
-    seq_fd = T(root.find(".//format[@id='r1']").get("frameDuration"))
-    start = T(root.find(".//spine/video").get("start"))
-    assert STILL_ORIGIN - seq_fd < start <= STILL_ORIGIN and (start / seq_fd).denominator == 1
 
 
 ROLE = re.compile(r"^[^.?]+(\.[^.?]+)?$")  # main role, optionally .subrole (captions add ?captionFormat=)
@@ -482,3 +475,75 @@ def test_both_role_styles_give_every_clip_the_same_roles(tmp_path, monkeypatch):
         else:
             assert written["channel"][key][1] == video, key
 
+
+# ------------------------------------------------------------ stills on the sequence's frame grid
+
+# Final Cut's own one-hour origins, one per frame rate: the element, and the start it wrote.
+ONE_HOUR = {
+    "23.98": ("ImageSample.fcpxml", ".//spine/video", "86399313/24000s"),  # a still (Final Cut 11)
+    "25": ("Complex.fcpxml", ".//spine/video", "3600s"),  # a generator's <video>
+    "29.97": ("TwoClipsMarkers.fcpxml", ".//spine/gap", "107999892/30000s"),  # a gap; no still at 29.97 among the exports
+    "30": ("VerticalShort.fcpxml", ".//spine/video", "3600s"),  # a still in a vertical project
+}
+
+
+@pytest.mark.parametrize("rate", sorted(ONE_HOUR))
+def test_final_cut_puts_the_one_hour_origin_on_the_frame_at_or_before_it(rate):
+    name, path, written = ONE_HOUR[rate]
+    root = load(name)
+    formats = {f.get("id"): f for f in root.iter("format")}
+    fd = T(formats[root.find(".//sequence").get("format")].get("frameDuration"))
+    assert tc.rate_label(fd) == rate
+    assert root.find(path).get("start") == written
+    assert still_origin(fd) == T(written) and tc.fcpx_time(still_origin(fd), fd.denominator) == written
+    assert STILL_ORIGIN - fd < T(written) <= STILL_ORIGIN and (T(written) / fd).denominator == 1
+
+
+def _stills_cut(fd: Fraction, rate: str):
+    """Talk at `fd` with a still opening the cut (a chapter marker on it) and another over a line."""
+    talk = make_clip("V01", seconds=30, sentences=[(1.0, 5.0, "We built the first boat in this garage."), (9.0, 13.0, "It took us three whole winters to finish.")])
+    talk.media.frame_duration, talk.media.rate = fd, rate
+    talk.media.duration = round(Fraction(30) / fd) * fd
+    a = Analysis(clips=[talk, make_clip("I01", kind="image"), make_clip("I02", kind="image")])
+    raw = {
+        "title": "t",
+        "sections": [{"name": "Open", "items": ["I01@0-3", "V01.S001", "V01.S002"], "broll": [{"clip": "I02", "over": ["V01.S002"], "reason": "the boat"}]}],
+    }
+    tl = build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t - Rough Cut")
+    assert tl.frame_duration == fd
+    return tl, a
+
+
+@pytest.mark.parametrize("rate", ["23.98", "25", "29.97"])
+def test_roughcut_writes_a_stills_origin_as_final_cut_does(tmp_path, monkeypatch, rate):
+    fd = tc.snap_frame_duration(rate)[0]
+    tl, a = _stills_cut(fd, rate)
+    snapped = tmp_path / "snapped.fcpxml"
+    snapped.write_text(build_fcpxml([tl], a, event_name="e"))
+    validate_dtd(snapped)
+    check_invariants(snapped)
+    root = ET.parse(snapped).getroot()
+    spine_still = root.find(".//spine/video")
+    connected_still = next(v for v in root.find(".//spine").iter("video") if v.get("lane"))
+    written = ONE_HOUR[rate][2]
+    assert spine_still.get("start") == written and connected_still.get("start") == written  # Final Cut's own spelling
+    marker = spine_still.find("chapter-marker")  # in the still's source time, which now starts on the grid
+    assert marker is not None and T(marker.get("start")) == T(written)
+    browser = root.find("library/event/clip")
+    assert browser.get("start") == "3600s"  # no sequence, no grid
+
+    # Nothing else moves: against an exact 3600s origin, only a still's start and what hangs
+    # off a still in the primary storyline shift, all by the same amount.
+    monkeypatch.setattr(fcpxml, "still_origin", lambda frame_duration=None: STILL_ORIGIN)
+    exact = ET.fromstring(build_fcpxml([tl], a, event_name="e"))
+    shift = STILL_ORIGIN - T(written)
+    moved = 0
+    for ours, before in zip(root.iter(), exact.iter(), strict=True):
+        assert ours.tag == before.tag
+        for key in set(ours.attrib) | set(before.attrib):
+            if ours.get(key) == before.get(key):
+                continue
+            assert key in ("start", "offset") and shift, (ours.tag, key)
+            assert T(before.get(key)) - T(ours.get(key)) == shift
+            moved += 1
+    assert moved == (3 if shift else 0)  # the two stills' starts and the marker on the first one
