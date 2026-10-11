@@ -53,7 +53,7 @@ from .analyze import ROLE_LABELS, Analysis, Clip, log
 from .plan import DEFAULT_SECONDS, GraphicSpec
 from .timeline import ConnectedClip, Timeline
 
-LEAD = 0.12  # a graphic starts animating in just before its words
+LEAD = 0.12  # a graphic starts animating in just before its words (never before the cut its words open)
 GAP_FRAMES = 2  # between one graphic leaving and the next arriving: one graphic on screen at a time
 MIN_SECONDS = 1.5  # shortest a graphic is held when it's shortened to make room for the next
 MANIFEST = "graphics.json"
@@ -79,16 +79,37 @@ VERTICAL_KEEP_OUT = {"top": 0.14, "bottom": 0.20, "right": 0.12}
 # the start play on the graphic's clock; ones that window.seek starts later (a class it adds, an element
 # it inserts, element.animate()) play from the frame they start, as in a browser. A design that rebuilds
 # its elements every frame would restart them every frame, so for those new animations keep the
-# graphic's clock. Returns the error window.seek threw, or null.
+# graphic's clock. SVG animations (<animate>, <animateTransform>, <animateMotion>, <set>) aren't in
+# getAnimations(): each outermost <svg> has its own clock, paused and set the same way (one inserted later
+# starts from the frame it appears; one rebuilt every frame keeps the graphic's clock). Returns the error
+# window.seek threw, or null.
 _SEEK_JS = """t => {
   const rc = window.__roughcut || (window.__roughcut = {last: [], streak: 0, shared: false});
+  const svgs = (adopt) => {
+    const fresh = [];
+    for (const s of document.querySelectorAll('svg')) {
+      if (s.ownerSVGElement || typeof s.pauseAnimations !== 'function') continue;
+      if (s.__t0 === undefined) {
+        if (!adopt) continue;
+        const svgLast = rc.svgLast || [];
+        if (t > 0 && svgLast.length > 0 && svgLast.every(o => !o.isConnected)) rc.svgShared = true;
+        s.__t0 = t > 0 && !rc.svgShared ? t : 0;
+        fresh.push(s);
+      }
+      s.pauseAnimations();
+      s.setCurrentTime(Math.max(0, t - s.__t0));
+    }
+    if (adopt) rc.svgLast = t > 0 ? fresh : [];
+  };
   for (const a of document.getAnimations()) {
     if (a.__t0 !== undefined) { a.pause(); a.currentTime = Math.max(0, t - a.__t0) * 1000; }
   }
+  svgs(false);
   let error = null;
   if (typeof window.seek === 'function') {
     try { window.seek(t); } catch (e) { error = String((e && e.message) || e); }
   }
+  svgs(true);
   const fresh = document.getAnimations().filter(a => a.__t0 === undefined);
   if (t > 0 && fresh.length) {
     const rebuilt = rc.last.length > 0 && rc.last.every(a => a.effect && a.effect.target && !a.effect.target.isConnected);
@@ -181,11 +202,14 @@ def place(specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, warnings: 
         else:  # silence-map segment: no words, use its span
             i = j = 0
             t0, t1 = seg.start, seg.end
-        start = _first_kept(tl, clip_id, t0, max(t1, seg.end))
-        if start is None:
+        hit = _first_kept(tl, clip_id, t0, max(t1, seg.end))
+        if hit is None:
             warnings.append(f"graphic {spec.text!r}: its words aren't in the cut; skipped")
             continue
-        start = max(0, start - round(LEAD * fps))
+        # The lead never reaches back over a cut: Final Cut connects a graphic to the clip under its
+        # first frame, and it should move (and be deleted) with the clip its words are in.
+        piece = tl.spine_at(hit)
+        start = max(piece.offset if piece is not None else 0, hit - round(LEAD * fps))
         times = []
         for w in words[i : j + 1]:
             f = _frame_at(tl, clip_id, w.start)
@@ -250,9 +274,9 @@ background transparent, overflow hidden. Never paint a full-frame background exc
 completely gone (opacity 0 or off-frame) by the end. The last frame is drawn one frame before the end, \
 so finish the exit at least 0.1 s before the given seconds.
 - Animate only with CSS @keyframes/transitions (explicit durations and delays in seconds, \
-animation-fill-mode both) or the Web Animations API. The renderer pauses every animation and \
-seeks it to each frame's time, so never rely on setTimeout, setInterval, requestAnimationFrame, \
-Date or performance.now. Animations that start later (a class or element your window.seek adds, or \
+animation-fill-mode both), the Web Animations API, or SVG <animate>/<animateTransform> inside \
+inline SVG. The renderer pauses every animation and seeks it to each frame's time, so never rely \
+on setTimeout, setInterval, requestAnimationFrame, Date or performance.now. Animations that start later (a class or element your window.seek adds, or \
 element.animate() called from it) play from the frame they start, as they would in a browser. \
 For what CSS can't do (counting a number up, typing text out), define \
 window.seek = function (t) { ... } that sets the DOM for time t in seconds; it is called for \

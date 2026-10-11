@@ -23,7 +23,12 @@ TWO_GRAPHICS = [
 ]
 
 FREEZES = GRAPHIC_HTML.replace("<script>window.seek=function(t){", "<script>window.seek=function(t){if(t>0.1){while(true){}}")
-STALLS_IN_A_TIMER = GRAPHIC_HTML.replace("</script>", ";setTimeout(function(){while(true){}},50)</script>")
+# Blocks the page's main thread from a timer, outside window.seek. The timer is set by the first seek,
+# so the stall always starts once the page and its fonts are loaded and frames are being drawn,
+# however slow the machine is.
+STALLS_IN_A_TIMER = GRAPHIC_HTML.replace(
+    "<script>window.seek=function(t){", "<script>window.seek=function(t){if(!window.__stall){window.__stall=1;setTimeout(function(){while(true){}},0)}"
+)
 
 
 class DesignsBy(FakeProvider):
@@ -92,7 +97,8 @@ def test_a_frozen_design_is_left_out_and_the_build_finishes(footage, tmp_path, m
 @needs_renderer
 def test_a_page_stuck_outside_seek_cant_hang_the_renderer(tmp_path, monkeypatch):
     """A timer that never returns blocks the page's main thread; every browser call is bounded on our side."""
-    monkeypatch.setattr(graphics, "STEP_TIMEOUT", 2.0)
+    # Short enough to keep the test quick, long enough that loading the page on a busy machine never hits it.
+    monkeypatch.setattr(graphics, "STEP_TIMEOUT", 8.0)
     monkeypatch.setattr(graphics, "FRAME_TIMEOUT", 2.0)
     t0 = time.monotonic()
     result = graphics._render_one(job_for(tmp_path, STALLS_IN_A_TIMER, frames=60))
@@ -393,6 +399,7 @@ def test_a_rejected_key_while_designing_later_batches_still_stops_the_run():
 # ------------------------------------------------------------------ T1: seek-started animations, script errors, fonts, QC
 
 FADE = "@keyframes f{from{opacity:0}to{opacity:1}}"
+SMIL_WIDTH = '<animate attributeName="width" from="0" to="100" dur="2s" fill="freeze"/>'  # 50 at 1 s
 SEEK_CASES = {
     # A transition started by a class window.seek adds at 0.5 s is halfway through 0.5 s later.
     "class toggle": (
@@ -427,6 +434,21 @@ SEEK_CASES = {
         "<div id=b>Hi</div><script>window.seek=t=>document.getElementById('b').animate([{opacity:0},{opacity:1}],{duration:300,fill:'both'})</script>",
         1.0, "getComputedStyle(document.getElementById('b')).opacity", 1.0,
     ),
+    # SVG animations (SMIL) aren't Web Animations: they follow the frame clock too, not the wall clock.
+    "svg animate at load": (
+        f"<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>",
+        1.0, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
+    "svg inserted later": (
+        "<div id=box></div><script>window.seek=t=>{if(t>=0.5&&!document.querySelector('svg')){document.getElementById('box').innerHTML="
+        f"'<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>'}}}}</script>",
+        1.5, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
+    "svg rebuilt every frame": (
+        "<div id=box></div><script>window.seek=t=>{document.getElementById('box').innerHTML="
+        f"'<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>'}}</script>",
+        1.0, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
 }
 
 
@@ -445,6 +467,27 @@ def test_animations_started_during_playback_play_from_when_they_start(case):
         got = float(page.evaluate(probe))
         browser.close()
     assert got == pytest.approx(want, abs=0.05)
+
+
+@needs_renderer
+def test_svg_animations_render_on_the_frame_clock(tmp_path):
+    """A bar drawn on with SVG <animate> is as long in each frame as that frame's time says,
+    however slowly the frames are captured (SMIL would otherwise run on the wall clock)."""
+    bar = (
+        "<!doctype html><html><head><style>html,body{margin:0;background:transparent}</style></head><body>"
+        '<svg width="1920" height="1080" style="position:absolute;left:0;top:0"><rect x="0" y="480" height="120" width="0" fill="#fff">'
+        '<animate attributeName="width" from="0" to="1920" dur="2s" fill="freeze"/></rect></svg></body></html>'
+    )  # the canvas is 1920x1080 CSS pixels, rendered at 320x180
+    result = graphics._render_one(job_for(tmp_path, bar, frames=60, size=(320, 180)))
+    assert result["error"] is None
+    w, h, frames = graphics._alpha_frames(tmp_path / "G01-test.mov", (320, 180))
+    row = 90 * w
+
+    def width(n: int) -> int:
+        return sum(1 for v in frames[n][row : row + w] if v > 128)
+
+    for n in (0, 15, 30, 45):
+        assert width(n) == pytest.approx(320 * (n / 30) / 2, abs=3), n  # 0, 80, 160, 240 px
 
 
 def _plate(css="left:10%;top:40%", extra="", exits=True):
