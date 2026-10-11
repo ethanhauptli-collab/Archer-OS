@@ -18,7 +18,11 @@ ln -sf "$PWD/.venv/bin/roughcut" /opt/homebrew/bin/roughcut
 mac/scripts/build-app.sh --install
 ```
 
-That installs `roughcut` for every Terminal window (no `source .venv/bin/activate` needed) and puts **Roughcut.app** in Applications. The `mac` extra is mlx-whisper (fast on-device transcription; the first run downloads its model, about 1.6 GB, once) and `graphics` is the renderer for motion graphics.
+That installs `roughcut` for every Terminal window (no `source .venv/bin/activate` needed) and puts **Roughcut.app** in Applications. The `mac` extra is mlx-whisper (fast on-device transcription; the first run downloads its model, about 1.6 GB, once) and `graphics` is the renderer for motion graphics. Graphics render with Google Chrome if it's installed; if not, run this once:
+
+```bash
+~/Archer-OS/.venv/bin/python -m playwright install chromium
+```
 
 Then choose how the AI steps are paid for:
 

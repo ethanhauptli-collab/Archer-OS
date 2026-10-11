@@ -5,9 +5,10 @@ One JSON object per line on stdout. Every line has an "event" key:
   {"event": "stage", "stage": "transcribe", "message": "Transcribing IMG_1.MOV", "current": 2, "total": 9}
   {"event": "log", "message": "probed 12 files in 0.4s"}
   {"event": "done", "result": {...}}          # see pipeline.result_summary
-  {"event": "error", "message": "..."}
+  {"event": "error", "message": "...", "resume": "roughcut render '...'", "kind": "usage_limit"}
 
-Stages, in order: scan, probe, silence, transcribe, vision, plan, cut, write.
+Stages, in order: scan, probe, silence, transcribe, vision, plan, cut, graphics, write.
+They only ever move forward; `error` (when there is one) is the last line.
 Human-readable logging still goes to stderr. Off by default, so the CLI's
 normal output is unchanged.
 """
