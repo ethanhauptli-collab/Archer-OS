@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -287,9 +288,10 @@ def test_build_and_render_accept_split_paths(footage, spaced, tmp_path, capsys):
     out = tmp_path / "Rough Cuts" / "OCVIBE out"
     common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
     assert main(["build", *str(spaced).split(" "), "-o", str(out), *common]) == 0
-    assert (out / "OCVIBE.fcpxml").is_file()
+    assert (out / "OCVIBE v1.fcpxml").is_file()
     assert "Read that as" in capsys.readouterr().err
     assert main(["render", *str(out).split(" "), "--style", "tight"]) == 0
+    assert (out / "OCVIBE v2.fcpxml").is_file()
 
 
 def test_build_with_a_missing_path_stops_before_creating_anything(tmp_path, capsys):
@@ -447,8 +449,9 @@ def capture(monkeypatch):
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)  # don't start a browser for each check
 
     def grab(kind):
-        def fn(*args):
+        def fn(*args, **kwargs):
             seen[kind] = args
+            seen[f"{kind} kwargs"] = kwargs
             raise Captured
 
         return fn
@@ -548,6 +551,7 @@ def test_render_takes_the_presets_pacing(config, capture, tmp_path):
     with pytest.raises(Captured):
         main(["render", str(tmp_path), "--preset", "save-the-kid"])
     assert capture["render"][1].style == "loose"
+    assert "style" in capture["render kwargs"]["overrides"]  # the preset's pacing wins over the saved run's
 
 
 def test_unknown_preset_stops_before_anything_runs(footage, config, capsys):
@@ -716,7 +720,8 @@ def test_logo_renders_in_a_graphic(tmp_path):
     assert 'src="brand:logo"' in designer.requests[0], "the designer is told about the logo"
     saved = (tmp_path / "out" / "graphics" / f"{placed[0].slug}.html").read_text()
     assert "data:image/png;base64," in saved and "brand:logo" not in saved, "re-renders don't need the logo file"
-    mov = tmp_path / "out" / "graphics" / f"{placed[0].slug}.mov"
+    mov = clips[0].media.path  # graphics/<slug>-<digest>.mov
+    assert Path(mov).name.startswith(f"{placed[0].slug}-")
     r, g, b, alpha = _pixel(mov, 40, 40, 0.5)  # inside the logo (top-left, 90 px tall at this size)
     assert r > 200 and g < 60 and b < 60 and alpha > 200
     assert _pixel(mov, 300, 170, 0.5)[3] < 20  # elsewhere: transparent
@@ -860,7 +865,8 @@ def test_an_approved_look_reaches_the_designer_end_to_end(footage, config, tmp_p
     plan_request = next(c for c in provider.calls if c["schema_name"] == "edit_plan")["parts"][-1].text
     assert "<approved_design" not in plan_request, "the planner doesn't need the HTML"
     assert "<approved_design" not in json.loads((second / "graphics.json").read_text())["style"], "the manifest keeps the plain style"
-    assert sorted(p.name for p in (second / "graphics").glob("*.mov")) == ["G01-title-card.mov"]
+    (mov,) = (second / "graphics").glob("*.mov")
+    assert re.fullmatch(r"G01-title-card-[0-9a-f]{6}\.mov", mov.name)  # the design's digest is in the name
     fcpxml = next(second.glob("*.fcpxml"))
     validate_dtd(fcpxml)
     check_invariants(fcpxml)

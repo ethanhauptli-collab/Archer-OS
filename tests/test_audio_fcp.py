@@ -80,7 +80,8 @@ def test_report_warns_about_the_2398_clip_in_a_2997_cut(built):
 
 
 def _rough(root):
-    return next(p for p in root.iter("project") if p.get("name").endswith("Rough Cut"))
+    # "footage - Rough Cut v1 (medium, fake-model)" from a run; "t - Rough Cut" from build_timeline here.
+    return next(p for p in root.iter("project") if " - Rough Cut" in p.get("name"))
 
 
 def test_roles_and_planner_notes_in_the_planned_cut(built):
@@ -374,14 +375,21 @@ def test_dialogue_level_off_and_older_folders(talkers, tmp_path):
     result = pipeline.build(opts)
     assert all(v == {0.0} for v in _spine_volumes(result.fcpxml).values())
     assert "## Levels" not in result.report.read_text()
+    # A re-cut keeps the run's own setting: still off.
+    again = pipeline.rerender(out, Options(inputs=[], cache_dir=tmp_path / "cache2"))
+    assert all(v == {0.0} for v in _spine_volumes(again.fcpxml).values())
 
-    # A folder from before level matching (no loudness saved) is measured at render time.
+    # A folder from before level matching (no loudness saved, no level setting) is measured at render time.
     path = out / "analysis.json"
     data = json.loads(path.read_text())
     for c in data["clips"]:
         for key in ("loudness", "loudness_floor", "peak_db", "sound_end", "speech_loudness", "speech_peak"):
             c.pop(key, None)
     path.write_text(json.dumps(data))
+    saved = json.loads((out / "plan.json").read_text())
+    for key in ("dialogue_level", "fades"):
+        saved["settings"].pop(key)
+    (out / "plan.json").write_text(json.dumps(saved))
     again = pipeline.rerender(out, Options(inputs=[], cache_dir=tmp_path / "cache2"))
     vols = _spine_volumes(again.fcpxml)
     assert abs((vols["quiet"].pop() - vols["loud"].pop()) - 18.0) <= 1.0
@@ -461,6 +469,18 @@ def test_cli_fades_off(footage, tmp_path):
     validate_dtd(fcpxml)
     root = ET.parse(fcpxml).getroot()
     assert root.find(".//fadeIn") is None and root.find(".//adjust-volume") is not None  # levels still matched
+
+    # `render` keeps the run's settings unless they're typed again.
+    assert main(["render", str(out)]) == 0
+    root = ET.parse(next(out.glob("* v2.fcpxml"))).getroot()
+    assert root.find(".//fadeIn") is None and root.find(".//adjust-volume") is not None
+    assert main(["render", str(out), "--fades", "on", "--dialogue-level", "off"]) == 0
+    v3 = next(out.glob("* v3.fcpxml"))
+    validate_dtd(v3)
+    assert ET.parse(v3).getroot().find(".//fadeIn") is not None
+    assert all(v == {0.0} for v in _spine_volumes(v3).values())  # clip levels as recorded
+    assert main(["render", str(out), "--style", "tight"]) == 0  # and that's what the next re-cut starts from
+    assert all(v == {0.0} for v in _spine_volumes(next(out.glob("* v4.fcpxml"))).values())
 
 
 # --------------------------------------------------------------- T24 music bed
@@ -592,7 +612,7 @@ def test_music_flag_end_to_end(footage, tmp_path):
     assert bed.music_bed and bed.role == "music" and bed.transcript_source == "music" and not bed.segments
     assert 35.5 < bed.sound_end < 37.5
 
-    fcpxml = out / "footage.fcpxml"
+    fcpxml = out / "footage v1.fcpxml"
     validate_dtd(fcpxml)
     check_invariants(fcpxml)
     root = ET.parse(fcpxml).getroot()
@@ -601,7 +621,7 @@ def test_music_flag_end_to_end(footage, tmp_path):
     assert music.get("name") == "Sunrise Theme" and music.get("audioRole") == "music.Music Bed"
     end = T(music.get("start")) + T(music.get("duration"))
     assert abs(float(end) - bed.sound_end) < 0.05  # back-timed onto the song's ending
-    stringout = next(p for p in root.iter("project") if p.get("name").endswith("Stringout"))
+    stringout = next(p for p in root.iter("project") if p.get("name") == "footage - Stringout v1")
     assert not [el for el in stringout.iter("asset-clip") if el.get("lane") == "-1"]
     report = (out / "edit_report.md").read_text()
     assert "Sunrise Theme.m4a (--music) runs under the whole cut" in report
@@ -763,11 +783,12 @@ def test_fades_off_keeps_the_music_fades():
 
 
 def test_dialogue_level_takes_lufs_after_a_space(tmp_path):
-    from roughcut.cli import _glue_levels, build_parser, main
+    from roughcut.cli import LEVEL_OFF, _glue_levels, build_parser, main
 
-    for value, want in (("-14LUFS", -14.0), ("-14", -14.0), ("off", None), ("-16 LUFS", -16.0)):
+    for value, want in (("-14LUFS", -14.0), ("-14", -14.0), ("off", LEVEL_OFF), ("-16 LUFS", -16.0)):
         args = build_parser().parse_args(_glue_levels(["render", "out", "--dialogue-level", value]))
         assert args.dialogue_level == want
+    assert build_parser().parse_args(["render", "out"]).dialogue_level is None  # not given: the saved run's level
     assert build_parser().parse_args(_glue_levels(["render", "out", "--dialogue-level=-14LUFS"])).dialogue_level == -14.0
     # Through main the option parses (and the missing folder is the only complaint).
     assert main(["render", str(tmp_path / "missing"), "--dialogue-level", "-14LUFS"]) == 1

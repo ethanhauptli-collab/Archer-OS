@@ -82,7 +82,7 @@ def test_a_frozen_design_is_left_out_and_the_build_finishes(footage, tmp_path, m
     frozen = [w for w in result.warnings if w.startswith("graphic G02 ")]
     assert frozen and re.search(r"froze at frame [34] \(window.seek never returned\)", frozen[0]) and "G02-title-card.html" in frozen[0] and "roughcut render" in frozen[0]
     assert [c.clip_id for c in result.timeline.connected if c.kind == "graphic"] == ["G01"]
-    assert not (out / "graphics" / "G02-title-card.mov").exists() and not list((out / "graphics").glob("*.partial.mov"))
+    assert not list((out / "graphics").glob("G02-*.mov")) and not list((out / "graphics").glob("*.partial.mov"))
     validate_dtd(result.fcpxml)
     check_invariants(result.fcpxml)
     # The design is still saved, so it can be fixed and re-rendered.
@@ -166,6 +166,8 @@ def test_roughcut_render_finishes_designs_a_stopped_run_left(tmp_path, monkeypat
 def test_unchanged_renders_are_reused_and_an_older_folder_re_renders_once(tmp_path, monkeypatch):
     import hashlib
 
+    from roughcut import versions
+
     rendered: list = []
     fake_renderer(monkeypatch, rendered)
     a, plan, tl = small_cut()
@@ -175,24 +177,36 @@ def test_unchanged_renders_are_reused_and_an_older_folder_re_renders_once(tmp_pa
 
     def rerender():
         rendered.clear()
+        versions.adopt_old_graphics(out)  # as `roughcut render` does before re-timing the graphics
         specs, html, style = graphics.saved_designs(out)
         graphics.make(None, specs, small_cut()[2], a, out, brief="", style=style, workers=2, saved_html=html)
         return sorted(gid for gid, _ in rendered)
 
     assert rerender() == []  # nothing changed
 
-    # graphics.json as written before this change: "digest" (an older formula) + "file", no "rendered".
+    # A folder from before this renderer: graphics.json with "digest" (an older formula) + "file" and no
+    # "rendered", and clips named before the digest was in the name (G01) or with that older digest (G02).
     manifest = json.loads((out / "graphics.json").read_text())
+    old_names = []
     for g in manifest["graphics"]:
         g.pop("rendered")
         page = (out / g["html"]).read_text()
         g["digest"] = hashlib.sha256(f"{g['frames']}|30000/1001|640x360|{page}".encode()).hexdigest()[:16]
+        slug = g["html"].removeprefix("graphics/").removesuffix(".html")
+        old = f"graphics/{slug}.mov" if g["id"] == "G01" else f"graphics/{slug}-{g['digest'][:6]}.mov"
+        (out / g["file"]).rename(out / old)
+        g["file"] = old
+        old_names.append(old)
     (out / "graphics.json").write_text(json.dumps(manifest))
     assert rerender() == ["G01", "G02"]  # rendered with the new encoder and seek once...
     assert rerender() == []  # ...then reused
-    # A clip at another graphic's name is never taken for this one's.
+    assert all((out / name).is_file() for name in old_names)  # the old clips stay for cuts already in Final Cut
+    # A clip at another graphic's name is never taken for this one's, even made from the same design.
     manifest = json.loads((out / "graphics.json").read_text())
-    manifest["graphics"][0]["file"] = "graphics/G01-quote.mov"
+    g01 = manifest["graphics"][0]
+    other = f"graphics/G01-quote-{g01['digest'][:6]}.mov"
+    (out / g01["file"]).rename(out / other)
+    g01["file"] = other
     (out / "graphics.json").write_text(json.dumps(manifest))
     assert rerender() == ["G01"]
 
@@ -818,7 +832,8 @@ def test_a_stopped_render_keeps_the_graphics_that_finished(tmp_path, monkeypatch
     with pytest.raises(KeyboardInterrupt):
         graphics.make(FakeProvider(), plan.graphics, tl, a, out, brief="", style="", workers=2)
     entries = {g["id"]: g for g in _manifest(out)}
-    assert entries["G01"]["rendered"] == entries["G01"]["digest"] and entries["G01"]["file"] == "graphics/G01-lower-third.mov"
+    g01 = f"graphics/G01-lower-third-{entries['G01']['digest'][:6]}.mov"  # the digest is in a clip's name
+    assert entries["G01"]["rendered"] == entries["G01"]["digest"] and entries["G01"]["file"] == g01 and (out / g01).is_file()
     assert "rendered" not in entries["G02"] and "file" not in entries["G02"]
 
     # `roughcut render` then renders only what's missing.

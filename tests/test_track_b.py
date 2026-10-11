@@ -230,15 +230,21 @@ def test_graphics_used_by_a_kept_version_are_never_deleted(tmp_path):
     out = tmp_path / "out"
     (out / "graphics").mkdir(parents=True)
     (out / "history" / "v1 2026-10-01 10.00").mkdir(parents=True)
-    for name in ("G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G02-quote-cccccc.mov", "G03-list-dddddd.partial.mov", "G01-stat.html", "G09-old.html"):
+    for name in ("G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G02-quote-cccccc.mov", "G03-list-dddddd.partial.mov", "G01-stat.html", "G09-old.html", "preview.html"):
         (out / "graphics" / name).write_bytes(b"x")
+    (out / "graphics" / "previews").mkdir()
+    (out / "graphics" / "previews" / "G01.mp4").write_bytes(b"x")
     uri = (out / "graphics").as_uri()
     (out / "f v2.fcpxml").write_text(f'<media-rep src="{uri}/G01-stat-bbbbbb.mov"/>')
     (out / "history" / "v1 2026-10-01 10.00" / "f v1.fcpxml").write_text(f'<media-rep src="{uri}/G01-stat-aaaaaa.mov"/>')
-    (out / "graphics.json").write_text(json.dumps({"graphics": [{"id": "G01", "html": "graphics/G01-stat.html"}]}))
+    (out / "graphics.json").write_text(json.dumps({"graphics": [{"id": "G01", "html": "graphics/G01-stat.html", "file": "graphics/G01-stat-bbbbbb.mov"}]}))
     removed = versions.prune_graphics(out)
     assert sorted(removed) == ["G02-quote-cccccc.mov", "G03-list-dddddd.partial.mov", "G09-old.html"]
-    assert sorted(p.name for p in (out / "graphics").iterdir()) == ["G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G01-stat.html"]
+    assert sorted(p.name for p in (out / "graphics").iterdir()) == ["G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov", "G01-stat.html", "preview.html", "previews"]
+    # A version without graphics: the preview page would show an earlier cut's, so it goes; the clips stay.
+    (out / "graphics.json").unlink()
+    assert sorted(versions.prune_graphics(out)) == ["G01-stat.html", "preview.html"]
+    assert sorted(p.name for p in (out / "graphics").iterdir()) == ["G01-stat-aaaaaa.mov", "G01-stat-bbbbbb.mov"]
 
 
 def test_a_failed_write_leaves_the_previous_version_intact(footage, tmp_path, monkeypatch, fake, shared_cache):
@@ -523,7 +529,8 @@ def test_revise_needs_notes(tmp_path, capsys):
 
 def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp_path, monkeypatch, shared_cache):
     plan = _graphics_plan()
-    plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "for weeks", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
+    # On the cold open's first words, so it's gone before the title card arrives (one graphic at a time).
+    plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "The kids have been asking", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
     provider = FakeProvider(plan)
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
@@ -1189,3 +1196,37 @@ def test_new_graphics_in_a_revision_get_the_videos_design_system(footage, tmp_pa
     (design,) = [c for c in provider.calls[calls:] if c["schema_name"] == "graphics"]
     assert "<design_system>\nAlready established for this video; match it exactly:\ntest plate\n</design_system>" in design["parts"][-1].text
     assert json.loads((out / "graphics.json").read_text())["house_style"] == "test plate"
+
+
+def test_new_graphics_in_a_revision_get_the_builds_logo_and_approved_look(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    from roughcut import presets
+
+    plan = _graphics_plan()
+    plan["graphics"].append({"kind": "stat", "segment": "V01.S005", "words": "The kids have been asking", "text": "Weeks", "subtext": "", "seconds": 3, "direction": ""})
+    provider = FakeProvider(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    _fake_renders(monkeypatch, clear_mov)
+    logo = tmp_path / "logo.svg"
+    logo.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>')
+    approved = tmp_path / "approved.html"
+    approved.write_text("<html><body><div class=plate style='color:#123ABC'>Approved</div></body></html>")
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True, graphics_logo=str(logo), graphics_look=(str(approved),)))
+
+    def revise_designs(notes: str) -> tuple[str, pipeline.Result]:
+        revised = json.loads(json.dumps(plan))
+        revised["graphics"][1]["text"] = notes
+        provider.plan = revised
+        calls = len(provider.calls)
+        result = pipeline.revise(out, f"Say {notes.lower()}.", Options(inputs=[]))
+        (design,) = [c for c in provider.calls[calls:] if c["schema_name"] == "graphics"]
+        return design["parts"][-1].text, result
+
+    request, _ = revise_designs("Three Weeks")
+    assert presets.LOGO_DIRECTION in request, "the new graphic may show the build's logo"
+    assert presets.LOOK_DIRECTION in request and "#123ABC" in request, "and matches the approved look"
+
+    logo.unlink()  # moved since the build: the revision still runs, designed without it
+    request, result = revise_designs("Four Weeks")
+    assert presets.LOGO_DIRECTION not in request and "#123ABC" in request
+    assert any("logo" in w and "isn't there any more" in w for w in result.warnings)
