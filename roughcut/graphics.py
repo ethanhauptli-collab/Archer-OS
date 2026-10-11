@@ -3,18 +3,25 @@
 The planner picks the moments: which segment, the exact words a graphic
 belongs to, and what it says. As with the cut itself, the model never
 writes a timestamp; the transcript gives the frames. Only one graphic is
-on screen at a time. A second request designs every graphic as a
-self-contained HTML/CSS animation in one consistent style, knowing the
-shot it sits over (and, on vertical video, the platform's button areas). A headless browser then renders each one frame by frame
-(every animation is paused and seeked to the frame's time) and ffmpeg
-encodes ProRes 4444 with alpha, which Final Cut layers above the footage.
-Every browser step has a deadline: a design that freezes is left out with
-a warning instead of hanging the run. The designs and graphics.json are
-saved before rendering starts, so `roughcut render` can finish a run that
-stopped there without asking the model again.
+on screen at a time.
 
-The HTML is saved next to each rendered clip. Edit it and run
-`roughcut render` to re-render only what changed.
+A second request designs every graphic as a self-contained HTML/CSS
+animation in one consistent style (the first batch sets the look, the
+rest are designed in parallel against it), knowing the shot it sits over
+and, on vertical video, where the platform's buttons are.
+
+A headless browser renders each one frame by frame (every animation is
+paused and seeked to the frame's time) and ffmpeg encodes ProRes 4444
+with alpha, which Final Cut layers above the footage. Every browser step
+has a deadline: a design that freezes is left out with a warning instead
+of hanging the run. Each render is checked (script errors, missing fonts,
+blank, never animating off, outside the safe area) and composited over
+its shot in graphics/preview.html (graphics_preview.py).
+
+The designs and graphics.json are saved before rendering starts, so
+`roughcut render` can finish a run that stopped there without asking the
+model again. Edit a design's HTML and run `roughcut render` to re-render
+only what changed.
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ PICTURE_WIDTH = 512  # frame of the shot under each graphic, shown to the design
 # buttons, caption and header (fractions of the frame). Designs keep out of them and the render
 # check flags anything under them. Pass keep_out= to make() to use other strips.
 VERTICAL_KEEP_OUT = {"top": 0.14, "bottom": 0.20, "right": 0.12}
+
 # Sets the page to time t (seconds); called for every frame, in order, from 0. Animations that exist at
 # the start play on the graphic's clock; ones that window.seek starts later (a class it adds, an element
 # it inserts, element.animate()) play from the frame they start, as in a browser. A design that rebuilds
@@ -267,7 +275,8 @@ external URLs, web fonts, images, libraries or network requests. Inline SVG is f
 - The viewport is the canvas size given below, in CSS pixels. html and body: margin 0, \
 background transparent, overflow hidden. Never paint a full-frame background except on a title card.
 - Each graphic lasts exactly its given seconds. Animate in over the first 0.3-0.7 s, hold, and be \
-completely gone (opacity 0 or off-frame) by the end.
+completely gone (opacity 0 or off-frame) by the end. The last frame is drawn one frame before the end, \
+so finish the exit at least 0.1 s before the given seconds.
 - Animate only with CSS @keyframes/transitions (explicit durations and delays in seconds, \
 animation-fill-mode both) or the Web Animations API. The renderer pauses every animation and \
 seeks it to each frame's time, so never rely on setTimeout, setInterval, requestAnimationFrame, \
@@ -872,14 +881,11 @@ QC_GRACE = 0.01  # soft shadows and glows may reach this much past it
 
 QC_WIDTH = 320  # the alpha channel is checked at this width
 QC_ALPHA = 8  # of 255: anything more opaque than this counts as visible
+QC_LAST_ALPHA = 64  # of 255: more than this on the last frame is a visible cut, not the tail of a fade
 
 
-def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float, float, float] | None] | None:
-    """Per frame, the box holding everything visible (x0, y0, x1, y1 as fractions of the frame), or None when blank.
-
-    One ffmpeg pass reads the alpha channel, area-averaged down to QC_WIDTH so thin
-    strokes still count. None when the file can't be read.
-    """
+def _alpha_frames(path: Path, size: tuple[int, int]) -> tuple[int, int, list[bytes]] | None:
+    """(width, height, frames) of the alpha channel, area-averaged down to QC_WIDTH so thin strokes still count."""
     w = QC_WIDTH
     h = max(2, round(w * size[1] / size[0] / 2) * 2) if size[0] and size[1] else w * 9 // 16
     cmd = ["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"alphaextract,scale={w}:{h}:flags=area,format=gray", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
@@ -889,29 +895,37 @@ def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float,
         return None
     if proc.returncode != 0 or not proc.stdout:
         return None
-    boxes: list[tuple[float, float, float, float] | None] = []
-    size_ = w * h
-    for n in range(len(proc.stdout) // size_):
-        frame = proc.stdout[n * size_ : (n + 1) * size_]
-        rows = [r for r in range(h) if max(frame[r * w : (r + 1) * w]) > QC_ALPHA]
-        if not rows:
-            boxes.append(None)
-            continue
-        x0 = next(c for c in range(w) if max(frame[c::w]) > QC_ALPHA)
-        x1 = next(c for c in range(w - 1, -1, -1) if max(frame[c::w]) > QC_ALPHA)
-        boxes.append((x0 / w, rows[0] / h, (x1 + 1) / w, (rows[-1] + 1) / h))
-    return boxes
+    n = w * h
+    return w, h, [proc.stdout[i * n : (i + 1) * n] for i in range(len(proc.stdout) // n)]
+
+
+def _box(frame: bytes, w: int, h: int) -> tuple[float, float, float, float] | None:
+    """The box holding everything visible (x0, y0, x1, y1 as fractions of the frame), or None when blank."""
+    rows = [r for r in range(h) if max(frame[r * w : (r + 1) * w]) > QC_ALPHA]
+    if not rows:
+        return None
+    x0 = next(c for c in range(w) if max(frame[c::w]) > QC_ALPHA)
+    x1 = next(c for c in range(w - 1, -1, -1) if max(frame[c::w]) > QC_ALPHA)
+    return x0 / w, rows[0] / h, (x1 + 1) / w, (rows[-1] + 1) / h
+
+
+def visible_boxes(path: Path, size: tuple[int, int]) -> list[tuple[float, float, float, float] | None] | None:
+    """Per frame, the box holding everything visible, or None when blank. None when the file can't be read."""
+    read = _alpha_frames(path, size)
+    return None if read is None else [_box(f, read[0], read[1]) for f in read[2]]
 
 
 def inspect(path: Path, kind: str, size: tuple[int, int], keep_out: dict[str, float] | None = None) -> list[str]:
     """What a viewer would notice: blank, never animating off, outside the title-safe area, under platform buttons."""
-    boxes = visible_boxes(path, size)
-    if not boxes:
+    read = _alpha_frames(path, size)
+    if not read or not read[2]:
         return []
+    w, h, frames = read
+    boxes = [_box(f, w, h) for f in frames]
     if not any(boxes):
         return ["came out blank: nothing is visible in any frame"]
     notes = []
-    if boxes[-1] is not None:
+    if max(frames[-1]) > QC_LAST_ALPHA:  # a fade that's nearly done on the last frame is fine
         notes.append("is still on screen in its last frame, so it cuts off instead of animating out")
     n = len(boxes)
     hold = [b for b in boxes[n // 3 : max(n // 3 + 1, 2 * n // 3)] if b]  # the middle third: not entering or leaving

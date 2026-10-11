@@ -402,6 +402,8 @@ def test_renders_are_checked_for_blank_stuck_on_and_outside_the_safe_area(tmp_pa
         "came out blank: nothing is visible in any frame"
     ]
     assert notes(_plate(exits=False), gid="G03") == ["is still on screen in its last frame, so it cuts off instead of animating out"]
+    # A fade timed to end exactly at the graphic's end leaves a trace on the last frame (drawn a frame early): fine.
+    assert notes(_plate().replace("out .2s linear .6s", "out .3s linear .7s"), gid="G07") == []
     assert notes(_plate("left:0;top:40%"), gid="G04") == ["reaches outside the title-safe area (5% in from the edges)"]
     assert notes(_plate("left:0;top:40%"), kind="title_card", gid="G05") == []  # title cards may fill the frame
     # A plate that slides in from off-frame is judged on its hold, not its entrance.
@@ -600,6 +602,31 @@ def test_each_graphic_is_previewed_over_the_shot_it_sits_on(footage, tmp_path):
     assert (previews / "G01.mp4").stat().st_mtime_ns == stamp and not (previews / "G02.mp4").exists()
     # Nothing rendered: no page left behind pointing at old clips.
     assert write_previews(placed, {}, tl, a, out) is None and not page.exists()
+
+
+def test_previews_are_written_next_to_their_final_files(tmp_path, monkeypatch):
+    """Output folders often live on an external drive, where a rename from a temp folder fails."""
+    import errno
+    from pathlib import Path
+
+    from roughcut.graphics_preview import write_previews
+
+    real_replace = Path.replace
+
+    def same_folder_only(self, target):
+        if Path(self).parent != Path(target).parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", same_folder_only)
+    a, plan, tl = small_cut()
+    placed = graphics.place(plan.graphics, tl, a, [])[:1]
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    files = {placed[0].id: _transparent_mov(out / "graphics" / "G01.mov", placed[0].frames)}
+    warnings: list[str] = []
+    assert write_previews(placed, files, tl, a, out, warnings=warnings) is not None and not warnings
+    assert sorted(f.name for f in (out / "graphics" / "previews").iterdir()) == ["G01.jpg", "G01.key", "G01.mp4"]
 
 
 def test_vertical_previews_can_show_the_platform_button_strips(tmp_path):

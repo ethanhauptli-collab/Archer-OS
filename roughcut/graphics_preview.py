@@ -92,24 +92,28 @@ def _preview(job: dict, previews: Path, size: tuple[int, int], rate: str, fd: fl
                 background = ["-loop", "1", "-framerate", rate, "-i", str(still)]
         fit = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
         graph = f"[0:v]{fit}[bg];[1:v]scale={pw}:{ph}[fg];[bg][fg]overlay=shortest=1:format=auto,format=yuv420p[v]"
-        partial = Path(tmp) / "preview.mp4"
-        error = ""
-        for codec in (["libx264", "-preset", "veryfast", "-crf", "20"], ["h264_videotoolbox", "-b:v", "4M"]):
-            cmd = ["ffmpeg", "-v", "error", "-y", *background, "-i", str(job["mov"]), "-filter_complex", graph, "-map", "[v]", "-an",
-                   "-c:v", *codec, "-r", rate, "-movflags", "+faststart", str(partial)]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode == 0 and partial.is_file():
-                break
-            error = (proc.stderr.strip().splitlines() or ["ffmpeg failed"])[-1][:200]
-        else:
-            return error
-        middle = (g.frames // 2) * fd
-        poster = Path(tmp) / "poster.jpg"
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{middle:.3f}", "-i", str(partial), "-frames:v", "1", "-q:v", "3", str(poster)], capture_output=True)
-        if not poster.is_file():
-            return "couldn't grab a poster frame"
-        partial.replace(mp4)
-        poster.replace(jpg)
+        # Written next to the final files (a rename can't cross from a temp folder to an external drive).
+        partial, poster = previews / f"{g.id}.partial.mp4", previews / f"{g.id}.partial.jpg"
+        try:
+            error = ""
+            for codec in (["libx264", "-preset", "veryfast", "-crf", "20"], ["h264_videotoolbox", "-b:v", "4M"]):
+                cmd = ["ffmpeg", "-v", "error", "-y", *background, "-i", str(job["mov"]), "-filter_complex", graph, "-map", "[v]", "-an",
+                       "-c:v", *codec, "-r", rate, "-movflags", "+faststart", str(partial)]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0 and partial.is_file():
+                    break
+                error = (proc.stderr.strip().splitlines() or ["ffmpeg failed"])[-1][:200]
+            else:
+                return error
+            middle = (g.frames // 2) * fd
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{middle:.3f}", "-i", str(partial), "-frames:v", "1", "-q:v", "3", str(poster)], capture_output=True)
+            if not poster.is_file():
+                return "couldn't grab a poster frame"
+            partial.replace(mp4)
+            poster.replace(jpg)
+        finally:
+            partial.unlink(missing_ok=True)
+            poster.unlink(missing_ok=True)
     keyfile.write_text(job["key"])
     return None
 
