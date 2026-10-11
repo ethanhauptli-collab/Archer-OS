@@ -52,6 +52,26 @@ def test_broll_comes_in_on_the_words_it_illustrates():
     assert not [w for w in tl.warnings if "B-roll" in w]
 
 
+def test_a_lone_shot_named_on_later_words_starts_on_them():
+    from roughcut.timeline import _gaps_without_picture
+
+    a = narration_project()
+
+    def one(clip, words):
+        raw = {"sections": [{"name": "x", "items": ["A01.S002"], "broll": [{"clip": clip, "over": ["A01.S002"], "words": words, "source_in": -1, "reason": ""}]}]}
+        return build_timeline(normalize(raw, a), a, style=STYLES["medium"], name="t")
+
+    # "In Anaheim, Katella Commons is trying to build one.": the planner names the place on its only shot.
+    tl = one("I01", "Katella Commons")
+    shot = next(c for c in tl.connected if c.clip_id == "I01")
+    assert abs(shot.start - _word_frame(tl, a, "A01.S002", "Katella")) <= 2
+    assert _gaps_without_picture(tl, a) == []  # auto-fill has the line until then
+    # Words at the very top of the line: the shot just starts with it.
+    tl = one("V01", "In Anaheim")
+    assert next(c for c in tl.connected if c.clip_id == "V01").start <= tl.seg_ranges["A01.S002"][0]
+    assert [c.clip_id for c in tl.connected if c.note == "auto-fill"] == []
+
+
 def test_unfound_words_fall_back_to_the_even_split():
     a = narration_project()
     even = build_timeline(normalize(_honda_plan(("", "", "", "")), a), a, style=STYLES["medium"], name="t", fill=False)

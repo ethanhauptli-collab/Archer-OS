@@ -536,6 +536,12 @@ class _Lanes:
         self.used.setdefault(lane, []).append((start, end))
         return lane
 
+    def sync(self, tl: "Timeline") -> None:
+        """Re-read what each lane holds after shots were stretched or moved."""
+        self.used = {}
+        for c in tl.connected:
+            self.used.setdefault(c.lane, []).append((c.start, c.end))
+
 
 def _video_window(m, want: int, fd: Fraction, hint: Fraction | None) -> tuple[Fraction, int]:
     """Source in-point and length (frames) for a cutaway of `want` frames."""
@@ -576,7 +582,10 @@ def _place_broll(
             if end - start < min_frames:
                 end = min(tl.total_frames, start + min_frames)
             # A shot named on words comes in as they're spoken; the others share the time between.
-            for run_start, run_end, run in _broll_runs(tl, analysis, group, start, end, min_frames, warnings):
+            runs = _broll_runs(tl, analysis, group, start, end, min_frames, reach, warnings)
+            if runs[0][0] > start and _extend_shot_before(tl, analysis, start, runs[0][0], max_still):
+                lanes.sync(tl)  # the shot before holds until the words
+            for run_start, run_end, run in runs:
                 cursor = run_start
                 for k, b in enumerate(run):
                     remaining = run_end - cursor
@@ -667,22 +676,25 @@ def _word_frame(tl: Timeline, analysis: Analysis, b, after: int, start: int, end
     return None
 
 
-def _broll_runs(tl: Timeline, analysis: Analysis, group: list, start: int, end: int, min_frames: int, warnings: list[str]) -> list[tuple[int, int, list]]:
+def _broll_runs(
+    tl: Timeline, analysis: Analysis, group: list, start: int, end: int, min_frames: int, reach: int, warnings: list[str]
+) -> list[tuple[int, int, list]]:
     """Split a group of cutaways over the same lines at the shots anchored on words.
 
-    The first shot always starts with the lines. A later shot whose words are
-    found starts as they're spoken (and ends the shot before it); shots
-    without words share the time up to the next anchored one evenly. Words
+    A shot whose words are found starts as they're spoken (and ends the shot
+    before it); shots without words share the time up to the next anchored
+    one evenly. The first shot starts with the lines unless its words come
+    later (over half a second in): then the shot before holds, or the
+    speaker, or auto-fill under narration, has the lines until them. Words
     that aren't in the cut fall back to the even split, with a warning.
     """
-    firsts = [0]
-    at = {0: start}
-    prev, count = start, 1  # last fixed start, and how many shots share the time since it
-    for k in range(1, len(group)):
-        b = group[k]
+    firsts: list[int] = []
+    at: dict[int, int] = {}
+    prev, count = start, 0  # last fixed start, and how many shots share the time since it
+    for k, b in enumerate(group):
         anchor = None
         if b.words:
-            anchor = _word_frame(tl, analysis, b, prev, start, end)
+            anchor = _word_frame(tl, analysis, b, prev if k else -1, start, end)
             if anchor is None:
                 warnings.append(f'B-roll {b.clip_id}: "{b.words}" isn\'t heard in {", ".join(b.over)} (or was cut); shared the time evenly instead')
             else:
@@ -692,6 +704,10 @@ def _broll_runs(tl: Timeline, analysis: Analysis, group: list, start: int, end: 
                     anchor = None
                 else:
                     anchor = min(max(anchor, lo), hi)
+                    if k == 0 and anchor - start < reach:
+                        anchor = start  # the words open the line: start with it
+        if k == 0 and anchor is None:
+            anchor = start
         if anchor is None:
             count += 1
             continue
@@ -708,11 +724,20 @@ def _broll_runs(tl: Timeline, analysis: Analysis, group: list, start: int, end: 
 # ---------------------------------------------------------- picture fill
 
 
-def _extend_shot_before(tl: Timeline, analysis: Analysis, g0: int, g1: int) -> bool:
+def _lane_busy(tl: Timeline, c: ConnectedClip, f0: int, f1: int) -> bool:
+    """Does another clip on c's lane hold any of frames f0..f1?"""
+    return any(o is not c and o.lane == c.lane and o.start < f1 and o.end > f0 for o in tl.connected)
+
+
+def _extend_shot_before(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_still: int | None = None) -> bool:
     """Close a sliver of a gap by holding the previous shot a little longer."""
     for c in tl.connected:
         m = analysis.clip(c.clip_id).media
         if c.end != g0 or not m.has_video:
+            continue
+        if m.kind == "image" and max_still is not None and c.frames + g1 - g0 > max_still:
+            continue
+        if _lane_busy(tl, c, g0, g1):
             continue
         if m.kind == "image" or c.src_in + (c.frames + g1 - g0) * tl.frame_duration <= m.duration:
             c.frames += g1 - g0
@@ -729,7 +754,7 @@ def _extend_shot_after(tl: Timeline, analysis: Analysis, g0: int, g1: int, max_s
     fd = tl.frame_duration
     for c in tl.connected:
         m = analysis.clip(c.clip_id).media
-        if c.start != g1 or not m.has_video or c.kind != "broll":
+        if c.start != g1 or not m.has_video or c.kind != "broll" or _lane_busy(tl, c, g0, g1):
             continue
         if m.kind == "image":
             if c.frames + g1 - g0 <= max_still:
@@ -871,9 +896,7 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
         if g1 - g0 < tiny and (_extend_shot_before(tl, analysis, g0, g1) or _extend_shot_after(tl, analysis, g0, g1, max_still)):
             placed_frames += g1 - g0
     gaps = _gaps_without_picture(tl, analysis)
-    lanes.used = {}
-    for c in tl.connected:
-        lanes.used.setdefault(c.lane, []).append((c.start, c.end))
+    lanes.sync(tl)
 
     docs = {c.id: _clip_tokens(c) for c in pool}
     df: dict[str, int] = {}

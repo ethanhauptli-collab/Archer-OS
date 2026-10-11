@@ -54,8 +54,7 @@ PLAN_SCHEMA: dict = {
                                     "type": "string",
                                     "description": (
                                         "Exact words copied from the covered lines where this shot should come in (a name, "
-                                        "place or list item), or '' to share the time evenly. The first shot over a line "
-                                        "always starts with the line."
+                                        "place or list item), or '' to follow the shot before it (or start with the line)."
                                     ),
                                 },
                                 "source_in": {

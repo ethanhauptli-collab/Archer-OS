@@ -55,9 +55,9 @@ what the line is about: when the narration names a place, project or person, sho
 variety; don't repeat a shot. source_in is where to start inside the B-roll clip in seconds, or \
 -1 to let the software pick a good spot. Long clips list timed Moments: set source_in to the \
 time of the usable moment that fits the line. "words": when a shot belongs on a name, place or \
-list item, copy those exact words from the line, and the shot comes in as they are spoken (the \
-first shot over a line always starts with the line); otherwise "". On long lines, add enough \
-shots to cover the whole line.
+list item, copy those exact words from the line, and the shot comes in as they are spoken; \
+otherwise "", and it follows the shot before it (or starts with the line). On long lines, add \
+enough shots to cover the whole line.
 6b. Narration (Voiceover clips) has no picture of its own. When the piece is carried by \
 narration, use one read of it as the backbone, bring in interview soundbites where they back up \
 what was just said, and cover every narrated segment with B-roll or stills from start to end. \
