@@ -49,13 +49,21 @@ PLAN_SCHEMA: dict = {
                                     "items": {"type": "string"},
                                     "description": "Consecutive segment IDs (from this section's items) the cutaway covers.",
                                 },
+                                "words": {
+                                    "type": "string",
+                                    "description": (
+                                        "Exact words copied from the covered lines where this shot should come in (a name, "
+                                        "place or list item), or '' to share the time evenly. The first shot over a line "
+                                        "always starts with the line."
+                                    ),
+                                },
                                 "source_in": {
                                     "type": "number",
                                     "description": "Seconds into the B-roll clip to start from, or -1 to let the software choose.",
                                 },
                                 "reason": {"type": "string"},
                             },
-                            "required": ["clip", "over", "source_in", "reason"],
+                            "required": ["clip", "over", "words", "source_in", "reason"],
                             "additionalProperties": False,
                         },
                     },
@@ -135,6 +143,7 @@ class Broll:
     over: list[str]
     source_in: float = -1.0
     reason: str = ""
+    words: str = ""  # where in the covered lines the shot comes in ("" = even split)
 
 
 @dataclass
@@ -222,7 +231,8 @@ class Plan:
                     "purpose": s.purpose,
                     "items": [i.ref for i in s.items],
                     "broll": [
-                        {"clip": b.clip_id, "over": b.over, "source_in": b.source_in, "reason": b.reason} for b in s.broll
+                        {"clip": b.clip_id, "over": b.over, "words": b.words, "source_in": b.source_in, "reason": b.reason}
+                        for b in s.broll
                     ],
                 }
                 for s in self.sections
@@ -294,7 +304,15 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
                 source_in = float(b_raw.get("source_in", -1))
             except (TypeError, ValueError):
                 source_in = -1.0
-            section.broll.append(Broll(clip_id=clip_id, over=valid, source_in=source_in, reason=str(b_raw.get("reason") or "")))
+            section.broll.append(
+                Broll(
+                    clip_id=clip_id,
+                    over=valid,
+                    source_in=source_in,
+                    reason=str(b_raw.get("reason") or ""),
+                    words=str(b_raw.get("words") or "").strip()[:200],
+                )
+            )
 
         if section.items:
             raw_to_plan[s_idx] = len(plan.sections)

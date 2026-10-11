@@ -16,6 +16,8 @@ from fractions import Fraction
 
 from . import timecode as tc
 from .analyze import Analysis, Clip
+from .phrases import exact_matches, frame_at, partial_match
+from .phrases import tokens as phrase_tokens
 from .plan import Plan
 from .segments import Segment
 
@@ -483,36 +485,114 @@ def _place_broll(
             end = max(r[1] for r in ranges)
             if end - start < min_frames:
                 end = min(tl.total_frames, start + min_frames)
-            cursor = start
-            for k, b in enumerate(group):
-                remaining = end - cursor
-                if remaining < 1:
-                    warnings.append(f"B-roll {b.clip_id}: no time left over {', '.join(b.over)}; skipped")
-                    continue
-                want = remaining if k == len(group) - 1 else max(1, remaining // (len(group) - k))
-                clip = analysis.clip(b.clip_id)
-                m = clip.media
-                if m.kind == "image":
-                    src_in, frames = Fraction(0), min(want, max_still)
-                else:
-                    hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
-                    src_in, frames = _video_window(m, want, fd, hint)
-                if frames < min(min_frames, want):
-                    warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
-                    continue
-                tl.connected.append(
-                    ConnectedClip(
-                        clip_id=b.clip_id,
-                        src_in=src_in,
-                        frames=frames,
-                        start=cursor,
-                        lane=lanes.free(cursor, cursor + frames),
-                        kind="broll",
-                        volume_db=volume_db if m.has_audio else None,
-                        note=b.reason,
+            # A shot named on words comes in as they're spoken; the others share the time between.
+            for run_start, run_end, run in _broll_runs(tl, analysis, group, start, end, min_frames, warnings):
+                cursor = run_start
+                for k, b in enumerate(run):
+                    remaining = run_end - cursor
+                    if remaining < 1:
+                        warnings.append(f"B-roll {b.clip_id}: no time left over {', '.join(b.over)}; skipped")
+                        continue
+                    want = remaining if k == len(run) - 1 else max(1, remaining // (len(run) - k))
+                    clip = analysis.clip(b.clip_id)
+                    m = clip.media
+                    if m.kind == "image":
+                        src_in, frames = Fraction(0), min(want, max_still)
+                    else:
+                        hint = Fraction(b.source_in).limit_denominator(1000000) if b.source_in >= 0 else None
+                        src_in, frames = _video_window(m, want, fd, hint)
+                    if frames < min(min_frames, want):
+                        warnings.append(f"B-roll {b.clip_id} is too short for its spot; skipped")
+                        continue
+                    tl.connected.append(
+                        ConnectedClip(
+                            clip_id=b.clip_id,
+                            src_in=src_in,
+                            frames=frames,
+                            start=cursor,
+                            lane=lanes.free(cursor, cursor + frames),
+                            kind="broll",
+                            volume_db=volume_db if m.has_audio else None,
+                            note=b.reason,
+                        )
                     )
-                )
-                cursor += frames
+                    cursor += frames
+
+
+BROLL_LEAD = 0.07  # a cutaway named on words comes in about two frames before them
+
+
+def _word_frame(tl: Timeline, analysis: Analysis, b, after: int, start: int, end: int) -> int | None:
+    """First timeline frame (after `after`) where the cutaway's words are heard, or None."""
+    lead = max(1, round(Fraction(BROLL_LEAD).limit_denominator(1000) / tl.frame_duration))
+    segs = [s for s in (analysis.segment(o) for o in b.over) if s is not None and s.words]
+
+    def frame_of(seg, i: int) -> int | None:
+        w = seg.words[i]
+        clip = analysis.clip(seg.clip_id)
+        # Whisper often starts a word early, over the pause before it; the sound starts later.
+        f = frame_at(tl, seg.clip_id, _silence_clamp_start(w.start, w.end, clip.silences))
+        if f is None:
+            f = frame_at(tl, seg.clip_id, w.start)
+        if f is None or not (start <= f < end) or f - lead <= after:
+            return None
+        return f - lead
+
+    for seg in segs:
+        for i, _ in exact_matches(seg.words, b.words):
+            f = frame_of(seg, i)
+            if f is not None:
+                return f
+    # Close enough: most of the opening words ("Honda Centre" for "Honda Center").
+    want = phrase_tokens(b.words)
+    for seg in segs:
+        hit = partial_match(seg.words, b.words)
+        if hit is None:
+            continue
+        got = phrase_tokens(" ".join(w.text for w in seg.words[hit[0] : hit[1] + 1]))
+        if len(got) * 2 >= len(want) and any(len(t) >= 4 for t in got):
+            f = frame_of(seg, hit[0])
+            if f is not None:
+                return f
+    return None
+
+
+def _broll_runs(tl: Timeline, analysis: Analysis, group: list, start: int, end: int, min_frames: int, warnings: list[str]) -> list[tuple[int, int, list]]:
+    """Split a group of cutaways over the same lines at the shots anchored on words.
+
+    The first shot always starts with the lines. A later shot whose words are
+    found starts as they're spoken (and ends the shot before it); shots
+    without words share the time up to the next anchored one evenly. Words
+    that aren't in the cut fall back to the even split, with a warning.
+    """
+    firsts = [0]
+    at = {0: start}
+    prev, count = start, 1  # last fixed start, and how many shots share the time since it
+    for k in range(1, len(group)):
+        b = group[k]
+        anchor = None
+        if b.words:
+            anchor = _word_frame(tl, analysis, b, prev, start, end)
+            if anchor is None:
+                warnings.append(f'B-roll {b.clip_id}: "{b.words}" isn\'t heard in {", ".join(b.over)} (or was cut); shared the time evenly instead')
+            else:
+                lo, hi = prev + min_frames * count, end - min_frames
+                if lo > hi:
+                    warnings.append(f'B-roll {b.clip_id}: no room to start on "{b.words}"; shared the time evenly instead')
+                    anchor = None
+                else:
+                    anchor = min(max(anchor, lo), hi)
+        if anchor is None:
+            count += 1
+            continue
+        firsts.append(k)
+        at[k] = anchor
+        prev, count = anchor, 1
+    runs = []
+    for n, k in enumerate(firsts):
+        nxt = firsts[n + 1] if n + 1 < len(firsts) else len(group)
+        runs.append((at[k], at[nxt] if nxt in at else end, group[k:nxt]))
+    return runs
 
 
 # ---------------------------------------------------------- picture fill
