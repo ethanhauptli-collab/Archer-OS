@@ -115,7 +115,7 @@ def mark_beds(clips: list[Clip], cache: Cache, workers: int = 4) -> list[str]:
         edit = (clip.cuts_per_min or 0) >= FINISHED_EDIT_CUTS
         note = (
             f"{clip.media.name}: speech over a music bed{' in a finished edit' if edit else ''}, "
-            "so its pauses are kept longer and the music flows; edits that jump the music get to-do markers"
+            "so its pauses are kept longer and the music flows"
         )
         log(note)
         notes.append(note)
