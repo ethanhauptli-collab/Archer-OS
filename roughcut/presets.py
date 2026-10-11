@@ -1,7 +1,8 @@
 """Presets: a brand's or channel's usual settings, picked with `--preset NAME`.
 
 A preset holds the brief, target length, pacing, sequence format, whether
-motion graphics are on, the graphics look and an optional logo. Two are
+motion graphics are on, the graphics look, an optional logo and approved
+designs from an earlier run for new graphics to match. Two are
 built in (venture-oc, save-the-kid). `roughcut preset save` stores your
 own, or your version of a built-in one (exact brand colors, a logo), as JSON
 in your user config folder.
@@ -18,6 +19,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -58,6 +60,16 @@ LOGO_DIRECTION = (
     "Put it on every title card, and small at one end of each lower third; leave it off captions, stats, quotes "
     "and lists. Set its height and leave the width auto; never stretch, recolor or redraw it."
 )
+LOOK_MAX = 3  # approved designs: the designer reads every one on every request
+LOOK_MAX_CHARS = 60_000  # each, without its inlined logo
+LOOK_DIRECTION = (
+    "Approved designs: the graphics below are from an earlier video in this series and were approved as the house "
+    "look, some of them adjusted by hand. Match them exactly (typefaces, sizes, the exact colors in their CSS, plates, "
+    "corner radii, logo placement, easing and timing); where they differ from the style direction above, they win. "
+    "Adapt the layout to each new graphic's kind and text, and never reuse their words."
+)
+NO_LOGO_NOTE = f'There is no logo this time: leave out any <img src="{LOGO_SRC}">.'
+_DATA_IMAGE = re.compile(r"data:image/[\w.+-]+;base64,[A-Za-z0-9+/=]+")  # designs' only images are the logo
 
 
 class PresetError(ValueError):
@@ -75,11 +87,13 @@ class Preset:
     graphics: bool = False
     graphics_style: str = ""
     logo: str | None = None  # PNG/SVG/JPEG/WebP the graphics may show
+    look: tuple[str, ...] = ()  # approved designs (.html) new graphics should match
     source: str = field(default="built in", compare=False)  # built in / saved / saved over built in
 
     def to_json(self) -> dict:
         d = asdict(self)
         d.pop("source")
+        d["look"] = list(self.look)
         return d
 
     def summary(self) -> str:
@@ -96,6 +110,8 @@ class Preset:
         bits.append("graphics on" if self.graphics else "graphics off")
         if self.logo:
             bits.append("logo")
+        if self.look:
+            bits.append(f"approved look ({len(self.look)} design{'s' if len(self.look) != 1 else ''})")
         return ", ".join(bits)
 
 
@@ -151,7 +167,7 @@ def _file(name: str) -> Path:
     return presets_dir() / f"{_clean_name(name)}.json"
 
 
-FIELDS = ("description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo")
+FIELDS = ("description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo", "look")
 TEXT_FIELDS = ("description", "brief", "graphics_style")  # "" when unset; the others are None
 
 
@@ -173,13 +189,17 @@ def _from_file(path: Path) -> Preset:
         value = data[key]
         if key == "graphics":
             value = bool(value)
+        elif key == "look":
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise PresetError(f"the preset {path} has a problem: look should be a list of .html files. {fix}")
+            value = tuple(value)
         elif key in TEXT_FIELDS:
             value = "" if value is None else str(value)
         else:
             value = None if value in (None, "") else str(value)
         setattr(preset, key, value)
     preset.source = "saved over built in" if built_in else "saved"
-    problem = check(preset, need_logo=False)
+    problem = check(preset, need_files=False)
     if problem:
         raise PresetError(f"the preset {path} has a problem: {problem}. {fix}")
     return preset
@@ -215,6 +235,7 @@ def save(preset: Preset) -> Path:
     if problem:
         raise PresetError(problem)
     path = _file(preset.name)
+    preset.look = _own_look(preset)
     data = {k: v for k, v in preset.to_json().items() if k in FIELDS}
     if preset.name in BUILT_IN:  # only your changes, layered over the built-in one
         base = BUILT_IN[preset.name].to_json()
@@ -226,7 +247,36 @@ def save(preset: Preset) -> Path:
     return path
 
 
+def look_dir(name: str) -> Path:
+    """Where a preset keeps its own copies of its approved designs."""
+    return presets_dir() / f"{_clean_name(name)}.look"
+
+
+def _own_look(preset: Preset) -> tuple[str, ...]:
+    """The approved designs, copied into the preset's own folder (logo taken out), so a run
+    folder or another preset being deleted can't break it. Copies no longer used are removed."""
+    folder = look_dir(preset.name)
+    kept: list[Path] = []
+    for n, page in enumerate(preset.look, 1):
+        src = Path(page).expanduser().resolve()
+        if src.parent == folder.resolve():
+            kept.append(src)
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        dst = folder / f"{n}-{src.name}"
+        dst.write_text(approved_html(src), encoding="utf-8")
+        kept.append(dst.resolve())
+    if folder.is_dir():
+        for old in folder.iterdir():
+            if old.resolve() not in kept:
+                old.unlink()
+        if not any(folder.iterdir()):
+            folder.rmdir()
+    return tuple(str(p) for p in kept)
+
+
 def remove(name: str) -> Path | None:
+    shutil.rmtree(look_dir(name), ignore_errors=True)
     path = _file(name)
     if path.is_file():
         path.unlink()
@@ -248,7 +298,70 @@ def logo_problem(logo: str) -> str | None:
     return None
 
 
-def check(preset: Preset, *, need_logo: bool = True) -> str | None:
+def look_problem(page: str) -> str | None:
+    path = Path(page).expanduser()
+    if not path.is_file():
+        return f"the approved design {page} doesn't exist"
+    if path.suffix.lower() not in (".html", ".htm"):
+        return f"the approved design {path.name} should be an .html file from a run's graphics folder"
+    try:
+        size = len(approved_html(path))
+    except (OSError, UnicodeDecodeError) as e:
+        return f"can't read the approved design {path.name}: {e}"
+    if size > LOOK_MAX_CHARS:
+        return f"the approved design {path.name} is too big to show the designer ({size // 1000} KB; the limit is {LOOK_MAX_CHARS // 1000} KB)"
+    return None
+
+
+def approved_html(path: Path) -> str:
+    """A saved design with its inlined logo turned back into brand:logo (keeps it short)."""
+    return _DATA_IMAGE.sub(LOGO_SRC, Path(path).expanduser().read_text(encoding="utf-8"))
+
+
+def _graphic_id(text: str) -> str:
+    m = re.fullmatch(r"[Gg]?0*(\d+)", text.strip())
+    return f"G{int(m.group(1)):02d}" if m else text.strip().upper()
+
+
+def approved_from_run(out_dir: Path, ids: list[str]) -> tuple[str, ...]:
+    """Design files of graphics from an earlier run: the ids given, or the first two of different kinds."""
+    from .graphics import MANIFEST
+
+    out_dir = Path(out_dir).expanduser()
+    try:
+        data = json.loads((out_dir / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise PresetError(f"{out_dir} has no graphics to approve. Use the output folder of a build that made graphics.") from None
+    designs: dict[str, tuple[str, Path]] = {}
+    entries = data.get("graphics") if isinstance(data, dict) else None
+    for g in entries if isinstance(entries, list) else []:
+        if isinstance(g, dict) and g.get("html") and (out_dir / str(g["html"])).is_file():
+            designs[str(g.get("id", "")).upper()] = (str(g.get("kind", "")), out_dir / str(g["html"]))
+    if not designs:
+        raise PresetError(f"{out_dir} has no saved graphic designs to approve.")
+    if ids:
+        chosen = list(dict.fromkeys(_graphic_id(i) for i in ids))
+        missing = [g for g in chosen if g not in designs]
+        if missing:
+            raise PresetError(f"{out_dir} has no design for {', '.join(missing)}; it has {', '.join(designs)}.")
+    else:
+        kinds: set[str] = set()
+        chosen = []
+        for gid, (kind, _) in designs.items():
+            if kind not in kinds and len(chosen) < 2:
+                kinds.add(kind)
+                chosen.append(gid)
+    if len(chosen) > LOOK_MAX:
+        raise PresetError(f"approve up to {LOOK_MAX} designs: the designer reads every one each time.")
+    pages = tuple(str(designs[g][1].resolve()) for g in chosen)
+    for page in pages:
+        problem = look_problem(page)
+        if problem:
+            raise PresetError(problem)
+    return pages
+
+
+def check(preset: Preset, *, need_files: bool = True) -> str | None:
     """What's wrong with a preset's values, or None."""
     from .timecode import parse_duration
     from .timeline import parse_format
@@ -266,9 +379,10 @@ def check(preset: Preset, *, need_logo: bool = True) -> str | None:
             parse_format(preset.format)
         except ValueError as e:
             return str(e)
-    if preset.logo and need_logo:
-        return logo_problem(preset.logo)
-    return None
+    if not need_files:
+        return None
+    problems = ([logo_problem(preset.logo)] if preset.logo else []) + [look_problem(page) for page in preset.look]
+    return next((p for p in problems if p), None)
 
 
 def with_logo(style: str, logo: str | None) -> str:
@@ -276,6 +390,21 @@ def with_logo(style: str, logo: str | None) -> str:
     if not logo:
         return style
     return (style.strip() + "\n\n" + LOGO_DIRECTION).strip()
+
+
+def design_style(style: str, logo: str | None = None, look=()) -> str:
+    """What the designer gets as style direction: the look, where the logo goes, and the approved designs."""
+    text = with_logo(style, logo)
+    pages = []
+    for n, page in enumerate(look or (), 1):
+        try:
+            pages.append(f'<approved_design n="{n}">\n{approved_html(Path(page))}\n</approved_design>')
+        except (OSError, UnicodeDecodeError):
+            continue  # checked before the run; one deleted since is left out
+    if pages:
+        note = "\n" + NO_LOGO_NOTE if not logo and any(LOGO_SRC in p for p in pages) else ""
+        text = (text.strip() + "\n\n" + LOOK_DIRECTION + note + "\n" + "\n".join(pages)).strip()
+    return text
 
 
 def inline_logo(html: str, logo: str | None) -> str:
@@ -309,6 +438,8 @@ def flags(preset: Preset, command: str) -> list[str]:
             out.append(f"--graphics-style={preset.graphics_style}")
         if preset.logo:
             out.append(f"--graphics-logo={preset.logo}")
+        for page in preset.look:
+            out.append(f"--graphics-look={page}")
     return out
 
 
@@ -340,6 +471,14 @@ def add_commands(sub) -> None:
     lg = s.add_mutually_exclusive_group()
     lg.add_argument("--logo", help="a PNG, SVG, JPEG or WebP logo the graphics may show")
     lg.add_argument("--no-logo", action="store_true", help="drop the logo")
+    lk = s.add_mutually_exclusive_group()
+    lk.add_argument(
+        "--look-from",
+        nargs="+",
+        metavar=("OUT_DIR", "G01"),
+        help=f"approve graphics from an earlier run as the look new ones match: its output folder, then up to {LOOK_MAX} graphic ids (default: the first two of different kinds)",
+    )
+    lk.add_argument("--no-look", action="store_true", help="drop the approved designs")
     rm = actions.add_parser("remove", help="delete a saved preset (a built-in one comes back as it was)")
     rm.add_argument("name")
 
@@ -352,6 +491,7 @@ def _print(preset: Preset) -> None:
     print(f"  graphics  {'on' if preset.graphics else 'off'}")
     print(f"  look      {preset.graphics_style or '(the default look)'}")
     print(f"  logo      {preset.logo or 'none'}")
+    print(f"  approved  {', '.join(Path(p).name for p in preset.look) or 'none'}")
     print("  brief")
     for line in preset.brief.splitlines() or ["(none)"]:
         print(f"    {line}")
@@ -427,6 +567,10 @@ def _command(args: argparse.Namespace) -> int:
         preset.graphics = args.graphics
     if args.graphics_style is not None:
         preset.graphics_style = args.graphics_style.strip()
+    if args.no_look:
+        preset.look = ()
+    elif args.look_from:
+        preset.look = approved_from_run(Path(args.look_from[0]), args.look_from[1:])
     if args.no_logo:
         preset.logo = None
     elif args.logo:

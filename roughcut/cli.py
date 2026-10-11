@@ -64,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     gfx.add_argument("--no-graphics", dest="graphics", action="store_false", help="no motion graphics, even if the preset has them")
     gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'one bold accent color, geometric sans, minimal'")
     gfx.add_argument("--graphics-logo", help="a PNG, SVG, JPEG or WebP logo the graphics may show")
+    gfx.add_argument("--graphics-look", action="append", metavar="FILE", help="a graphic you approved (an .html from an earlier run's graphics folder) for new designs to match; repeat for more")
     tr = b.add_argument_group("transcription")
     tr.add_argument("--transcriber", choices=["auto", "mlx", "faster-whisper", "none"], default="auto")
     tr.add_argument("--whisper-model", help="override the Whisper model")
@@ -96,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _apply_preset(args, argv: list[str]):
     """Re-parse with the preset's flags before the user's, so the user's win. Returns (args, error)."""
-    from .presets import PresetError, flags, load, logo_problem
+    from .presets import PresetError, flags, load, logo_problem, look_problem
 
     if getattr(args, "preset", None):
         try:
@@ -106,6 +107,8 @@ def _apply_preset(args, argv: list[str]):
         k = argv.index(args.command)
         typed = args
         args = build_parser().parse_args(argv[: k + 1] + flags(preset, args.command) + argv[k + 1 :])
+        if args.command == "build" and typed.graphics_look:
+            args.graphics_look = typed.graphics_look  # yours replace the preset's approved designs
         skipped = ""
         if args.command == "build" and args.graphics and not typed.graphics:
             if args.provider == "none":
@@ -126,6 +129,12 @@ def _apply_preset(args, argv: list[str]):
         if problem:
             return args, problem
         args.graphics_logo = str(Path(args.graphics_logo).expanduser().resolve())
+    if args.command == "build" and args.graphics and args.graphics_look:
+        for page in args.graphics_look:
+            problem = look_problem(page)
+            if problem:
+                return args, problem
+        args.graphics_look = [str(Path(p).expanduser().resolve()) for p in args.graphics_look]
     return args, None
 
 
@@ -456,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
                 graphics=args.graphics,
                 graphics_style=args.graphics_style,
                 graphics_logo=args.graphics_logo,
+                graphics_look=tuple(args.graphics_look or ()),
                 **common,
             )
             result = build(opts)

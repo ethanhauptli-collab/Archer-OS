@@ -107,6 +107,7 @@ In the Rough Cut, **chapter markers** mark each section, **to-do markers** flag 
 | `--no-fill` | | Don't auto-cover narration the plan left without picture |
 | `--graphics` / `--graphics-style` | off | Claude-designed motion graphics from the transcript (see below); `--no-graphics` turns a preset's off |
 | `--graphics-logo FILE` | | A PNG, SVG, JPEG or WebP logo the graphics may show |
+| `--graphics-look FILE` | | A graphic you approved (an `.html` from an earlier run's `graphics/`) for new designs to match; repeatable |
 
 ### Presets
 
@@ -123,6 +124,14 @@ The built-in `venture-oc` look asks for navy plates with an orange accent, not e
 ```bash
 roughcut preset save venture-oc --graphics-style "BRAND COLORS, FONT, MOOD" --logo ~/Brand/logo.png
 ```
+
+Once a run's graphics look right (edit their HTML in `graphics/` and re-render until they do), make them the preset's approved look:
+
+```bash
+roughcut preset save venture-oc --look-from ~/Movies/OCVIBE_roughcut G01 G03
+```
+
+Every later run with that preset shows those designs to the designer, which matches their type, colors, plates and motion. Name up to three graphics by the number in their file name, or leave the numbers off to take the first two of different kinds. The preset keeps its own copies, so the run folder can go; `--no-look` drops them.
 
 `roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics` set the rest). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
 

@@ -715,3 +715,147 @@ def test_logo_renders_in_a_graphic(tmp_path):
     r, g, b, alpha = _pixel(mov, 40, 40, 0.5)  # inside the logo (top-left, 90 px tall at this size)
     assert r > 200 and g < 60 and b < 60 and alpha > 200
     assert _pixel(mov, 300, 170, 0.5)[3] < 20  # elsewhere: transparent
+
+
+# ------------------------------------------------------------ T13 step 2: an approved look
+
+
+def _run_with_graphics(tmp_path: Path, name: str) -> Path:
+    """A fake earlier run folder: graphics.json plus its saved designs, one with an inlined logo."""
+    out = tmp_path / name
+    (out / "graphics").mkdir(parents=True)
+    pages = {
+        "G01": ("lower_third", "G01-lower-third-maria.html", "<html><body><div class=plate>Maria</div></body></html>"),
+        "G02": ("stat", "G02-stat-40.html", "<html><body><b>40</b></body></html>"),
+        "G03": ("lower_third", "G03-lower-third-ana.html", "<html><body><div class=plate>Ana</div></body></html>"),
+        "G04": ("title_card", "G04-title-card.html", '<html><body><img src="data:image/png;base64,iVBORw0KGgo+/=" alt=""><h1>Launch</h1></body></html>'),
+    }
+    entries = []
+    for gid, (kind, file, html) in pages.items():
+        (out / "graphics" / file).write_text(html)
+        entries.append({"id": gid, "kind": kind, "text": gid, "html": f"graphics/{file}"})
+    (out / "graphics.json").write_text(json.dumps({"style": "x", "graphics": entries}))
+    return out
+
+
+def test_approved_designs_are_picked_from_an_earlier_run(tmp_path):
+    from roughcut import presets
+
+    run = _run_with_graphics(tmp_path, "Promo_roughcut")
+    picked = presets.approved_from_run(run, [])  # default: the first two of different kinds
+    assert [Path(p).name for p in picked] == ["G01-lower-third-maria.html", "G02-stat-40.html"]
+    picked = presets.approved_from_run(run, ["g4", "G01", "3"])
+    assert [Path(p).name for p in picked] == ["G04-title-card.html", "G01-lower-third-maria.html", "G03-lower-third-ana.html"]
+    # The inlined logo goes back to brand:logo, so the designer isn't sent the image bytes.
+    assert presets.approved_html(Path(picked[0])) == '<html><body><img src="brand:logo" alt=""><h1>Launch</h1></body></html>'
+    with pytest.raises(presets.PresetError, match="no design for G09; it has G01, G02, G03, G04"):
+        presets.approved_from_run(run, ["G09"])
+    with pytest.raises(presets.PresetError, match="up to 3"):
+        presets.approved_from_run(run, ["G1", "G2", "G3", "G4"])
+    with pytest.raises(presets.PresetError, match="no graphics to approve"):
+        presets.approved_from_run(tmp_path / "nothing here", [])
+
+
+def test_a_preset_with_a_logo_still_checks_its_approved_designs(tmp_path):
+    from roughcut import presets
+
+    logo = tmp_path / "logo.svg"
+    logo.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+    preset = presets.Preset(name="x", logo=str(logo), look=(str(tmp_path / "gone.html"),))
+    assert "gone.html doesn't exist" in presets.check(preset)
+    assert presets.check(preset, need_files=False) is None
+    big = tmp_path / "big.html"
+    big.write_text("<p>" + "x" * presets.LOOK_MAX_CHARS + "</p>")
+    assert "too big" in presets.look_problem(str(big))
+    assert "should be an .html" in presets.look_problem(str(logo))
+
+
+def test_design_request_shows_the_approved_designs(tmp_path):
+    from roughcut import presets
+
+    run = _run_with_graphics(tmp_path, "r")
+    pages = presets.approved_from_run(run, ["G1", "G4"])
+    assert presets.design_style("navy and orange") == "navy and orange"
+    text = presets.design_style("navy and orange", None, pages)
+    assert text.startswith("navy and orange\n\nApproved designs:")
+    assert '<approved_design n="1">\n<html><body><div class=plate>Maria</div>' in text and "<h1>Launch</h1>" in text
+    assert presets.NO_LOGO_NOTE in text, "the approved title card had a logo; this run has none"
+    logo = tmp_path / "logo.svg"
+    logo.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>')
+    with_logo = presets.design_style("navy", str(logo), pages)
+    assert "Brand logo:" in with_logo and presets.NO_LOGO_NOTE not in with_logo
+    assert "base64" not in with_logo
+
+
+def test_save_an_approved_look_and_build_with_it(footage, config, capture, tmp_path, capsys):
+    from roughcut import presets
+    from roughcut.cli import main
+
+    run = _run_with_graphics(tmp_path, "OCVIBE_roughcut")
+    assert main(["preset", "save", "venture-oc", "--look-from", str(run), "G04", "G01"]) == 0
+    assert "approved look (2 designs)" in capsys.readouterr().out
+    saved = presets.load("venture-oc")
+    folder = config / "presets" / "venture-oc.look"
+    assert [Path(p).parent for p in saved.look] == [folder, folder], "copies kept with the preset"
+    assert [Path(p).name for p in saved.look] == ["1-G04-title-card.html", "2-G01-lower-third-maria.html"]
+    assert "brand:logo" in Path(saved.look[0]).read_text() and "base64" not in Path(saved.look[0]).read_text()
+    assert set(json.loads((config / "presets" / "venture-oc.json").read_text())) == {"look"}
+    shutil.rmtree(run)  # the run folder can go; the preset has its own copies
+
+    opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc"])
+    assert opts.graphics and list(opts.graphics_look) == list(saved.look)
+    # One you name replaces the preset's.
+    mine = tmp_path / "mine.html"
+    mine.write_text("<html><body>mine</body></html>")
+    opts = _opts(capture, ["build", str(footage), "--preset", "venture-oc", "--graphics-look", str(mine)])
+    assert list(opts.graphics_look) == [str(mine)]
+    assert main(["build", str(footage), "--graphics", "--graphics-look", str(tmp_path / "gone.html")]) == 1
+    assert "gone.html doesn't exist" in capsys.readouterr().err
+
+    # Saving other changes keeps the look; --no-look drops it and its copies.
+    assert main(["preset", "save", "venture-oc", "-t", "2m"]) == 0
+    assert presets.load("venture-oc").look == saved.look
+    assert main(["preset", "save", "venture-oc", "--no-look"]) == 0
+    assert presets.load("venture-oc").look == () and not folder.exists()
+    assert main(["preset", "save", "venture-oc", "--look-from", str(tmp_path / "nope")]) == 1
+    run = _run_with_graphics(tmp_path, "again")
+    assert main(["preset", "save", "venture-oc", "--look-from", str(run)]) == 0
+    assert main(["preset", "remove", "venture-oc"]) == 0
+    assert not folder.exists()
+
+
+def test_an_approved_look_reaches_the_designer_end_to_end(footage, config, tmp_path, monkeypatch, capsys):
+    """Run 1 makes graphics, the owner tweaks one and approves it, run 2's designer matches it."""
+    from conftest import CANNED_PLAN, FakeProvider
+    from test_end_to_end import check_invariants, validate_dtd
+    from test_graphics import GRAPHICS
+
+    from roughcut import graphics, pipeline, presets
+    from roughcut.cli import main
+
+    if graphics.renderer_problem() is not None:
+        pytest.skip("no Playwright browser to render with")
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["graphics"] = [GRAPHICS[1]]  # one short title card keeps the two renders quick
+    provider = FakeProvider(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    common = ["--no-menu", "--no-vision", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--format", "320x180"]
+    first = tmp_path / "Promo one"
+    assert main(["build", str(footage), "--graphics", "-o", str(first), *common]) == 0
+    title = first / "graphics" / "G01-title-card.html"
+    title.write_text(title.read_text().replace("#F26B21", "#123ABC"))  # the owner's tweak
+
+    assert main(["preset", "save", "promo", "--from", "venture-oc", "--look-from", str(first), "G01"]) == 0
+    provider.calls.clear()
+    second = tmp_path / "Promo two"
+    assert main(["build", str(footage), "--preset", "promo", "-o", str(second), *common]) == 0
+    capsys.readouterr()
+    request = next(c for c in provider.calls if c["schema_name"] == "graphics")["parts"][-1].text
+    assert presets.LOOK_DIRECTION in request and "#123ABC" in request, "the tweaked design, as approved"
+    plan_request = next(c for c in provider.calls if c["schema_name"] == "edit_plan")["parts"][-1].text
+    assert "<approved_design" not in plan_request, "the planner doesn't need the HTML"
+    assert "<approved_design" not in json.loads((second / "graphics.json").read_text())["style"], "the manifest keeps the plain style"
+    assert sorted(p.name for p in (second / "graphics").glob("*.mov")) == ["G01-title-card.mov"]
+    fcpxml = next(second.glob("*.fcpxml"))
+    validate_dtd(fcpxml)
+    check_invariants(fcpxml)
