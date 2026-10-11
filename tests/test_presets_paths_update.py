@@ -668,7 +668,8 @@ def test_logo_is_inlined_for_the_offline_renderer(tmp_path):
 
 LOGO_HTML = """<!doctype html><html><head><style>
 html,body{margin:0;background:transparent;overflow:hidden}
-img{position:absolute;left:0;top:0;height:540px}
+img{position:absolute;left:0;top:0;height:540px;animation:out .1s linear .8s both}
+@keyframes out{to{opacity:0}}
 </style></head><body><img src="brand:logo" alt=""></body></html>"""
 
 

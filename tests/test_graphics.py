@@ -48,7 +48,8 @@ def test_graphics_are_timed_from_the_transcript():
     raw = {"sections": [{"name": "x", "items": ["V01.S003", "V01.S005"], "broll": []}], "graphics": GRAPHICS[:2]}
     a, plan, tl = analysis_and_cut(raw)
     warnings = []
-    kinetic, title = graphics.place(plan.graphics, tl, a, warnings)
+    title, kinetic = graphics.place(plan.graphics, tl, a, warnings)  # numbered in the order they appear
+    assert (title.id, title.index, kinetic.id, kinetic.index) == ("G01", 1, "G02", 0)
     fps = 1 / float(tl.frame_duration)
     seg = a.segment("V01.S005")
     first = next(w for w in seg.words if w.text == "asking")

@@ -57,3 +57,26 @@ def test_embedded_font_is_what_the_browser_draws(monkeypatch, tmp_path):
         browser.close()
     assert loaded
     assert abs(widths[0] - widths[1]) > 20, widths  # Jost is proportional, the fallback is monospace
+
+
+def test_designer_is_told_which_fonts_render(monkeypatch, tmp_path):
+    from fractions import Fraction
+
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    block = graphics._canvas_block(1920, 1080, Fraction(1001, 24000), {})
+    assert "Fonts installed for rendering:" in block and "Jost" in block and "Fraunces" in block
+    assert "exact" in graphics.DESIGN_SYSTEM and "font families installed for rendering" in graphics.DESIGN_SYSTEM
+
+
+@pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
+def test_a_brand_font_renders_without_the_missing_font_warning(monkeypatch, tmp_path):
+    """The renderer embeds the bundled family, so the font check has nothing to report."""
+    monkeypatch.setenv("ROUGHCUT_FONTS", str(tmp_path / "none"))
+    brand_fonts._scan.cache_clear()
+    from test_graphics_render import _plate, job_for
+
+    html = _plate(extra="<div style=\"position:absolute;left:30%;top:30%;font:700 40px 'Jost',sans-serif;color:#fff\">Venture OC</div>")
+    result = graphics._render_one(job_for(tmp_path, html, frames=12, kind="lower_third"))
+    assert result["error"] is None
+    assert not any("isn't installed" in n for n in result["notes"]), result["notes"]
