@@ -2,7 +2,7 @@
 
 Graphics render offline, so a design that names a font the Mac doesn't have
 silently falls back to a system face. roughcut ships the Venture OC fonts
-(Jost, Inter, Fraunces; SIL Open Font License) and reads any .ttf/.otf/.woff2
+(Jost, Inter, Fraunces and its italic; SIL Open Font License) and reads any .ttf/.otf/.woff2
 you drop into the fonts folder (`roughcut fonts` prints where it is). Every
 family a design names is embedded into the page as @font-face data, so the
 render never depends on what's installed.
@@ -125,13 +125,15 @@ def font_dirs() -> tuple[Path, ...]:
 
 
 def available() -> dict[str, list[FontFile]]:
-    """Family name -> files. Your fonts folder wins over the bundled copy of a family."""
+    """Family name -> files. Your fonts folder wins over the bundled copy of a family, style by style:
+    your own roman replaces the bundled roman, and an italic you add joins the bundled roman."""
     families: dict[str, list[FontFile]] = {}
-    for f in _scan(font_dirs()):
-        key = f.family
-        if key in families and families[key][0].path.parent != f.path.parent:
-            continue  # an earlier folder already supplied this family
-        families.setdefault(key, []).append(f)
+    supplier: dict[tuple[str, bool], Path] = {}  # (family, italic) -> the fonts folder that supplies it
+    for root in font_dirs():
+        for f in _scan((root,)):
+            if supplier.setdefault((f.family, f.italic), root) != root:
+                continue  # an earlier folder already supplied this style of the family
+            families.setdefault(f.family, []).append(f)
     return families
 
 
@@ -164,9 +166,12 @@ def embed(html: str) -> str:
     if not css:
         return html
     tag = "<style data-roughcut-fonts>\n" + css + "\n</style>"
-    m = re.search(r"<head[^>]*>", html, re.IGNORECASE)
-    if m:
-        return html[: m.end()] + tag + html[m.end() :]
+    # Into <head>; without one, just after <html> or the doctype (the parser opens the head there).
+    # Never before the doctype: that would put the page in quirks mode and change its layout.
+    for opening in (r"<head(?:\s[^>]*)?>", r"<html(?:\s[^>]*)?>", r"<!doctype[^>]*>"):
+        m = re.search(opening, html, re.IGNORECASE)
+        if m:
+            return html[: m.end()] + tag + html[m.end() :]
     return tag + html
 
 

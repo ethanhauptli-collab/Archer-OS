@@ -64,6 +64,48 @@ def test_graphics_are_timed_from_the_transcript():
     assert not warnings
 
 
+@pytest.mark.parametrize("style", ["tight", "medium", "loose"])
+def test_a_graphic_on_the_words_that_open_a_clip_hangs_off_that_clip(style, tmp_path):
+    """The lead before a graphic's first word never reaches back over the cut into the clip before.
+
+    Final Cut connects a graphic to the clip under its first frame, and it moves and is deleted
+    with that clip: a lower third on a speaker's first words belongs to the speaker's clip.
+    """
+    import xml.etree.ElementTree as ET
+    from dataclasses import replace
+
+    from test_end_to_end import check_invariants, validate_dtd
+
+    from roughcut.fcpxml import build_fcpxml
+
+    lower = {"kind": "lower_third", "segment": "V01.S005", "words": "The kids have", "text": "The Kids", "subtext": "", "seconds": 2, "direction": ""}
+    a, plan, _ = analysis_and_cut({"sections": [{"name": "x", "items": ["V01.S003", "V01.S005"], "broll": []}], "graphics": [lower]})
+    tl = build_timeline(plan, a, style=STYLES[style], name="t", format_override="640x360")
+    fps = 1 / float(tl.frame_duration)
+    (g,) = graphics.place(plan.graphics, tl, a, [])
+    first = graphics._frame_at(tl, "V01", a.segment("V01.S005").words[0].start)
+    piece = tl.spine_at(first)
+    assert piece is tl.spine[1]  # "The kids" opens the second clip
+    assert g.start == max(piece.offset, first - round(graphics.LEAD * fps))
+    assert piece.offset <= g.start <= first
+    assert g.word_times[0] == ("The", round((first - g.start) * float(tl.frame_duration), 3))  # still timed from its own start
+
+    mov = tmp_path / f"{g.slug}.mov"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black@0.0:s=640x360:r=30000/1001,format=rgba", "-frames:v", str(g.frames),
+         *graphics.ENCODER, str(mov)],
+        check=True,
+    )
+    clips = graphics.attach(tl, [g], {g.id: mov}, [])
+    path = tmp_path / "cut.fcpxml"
+    path.write_text(build_fcpxml([tl], replace(a, clips=a.clips + clips), event_name="e"))
+    validate_dtd(path)
+    check_invariants(path)
+    spine = list(ET.parse(path).getroot().find(".//project/sequence/spine"))
+    parents = [i for i, el in enumerate(spine) if any((c.get("name") or "").startswith(g.slug) for c in el)]
+    assert parents == [1]
+
+
 def test_find_phrase_tolerates_punctuation_and_partial_matches():
     words = make_clip("V01", seconds=20, sentences=SPEECH).segments[4].words  # "The kids have been asking about this trip for weeks."
     assert graphics._find_phrase(words, "TRIP, for weeks") == (7, 9)

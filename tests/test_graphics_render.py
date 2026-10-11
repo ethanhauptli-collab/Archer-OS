@@ -8,7 +8,7 @@ import subprocess
 import time
 
 import pytest
-from conftest import CANNED_PLAN, GRAPHIC_HTML, SPEECH, FakeProvider, make_clip
+from conftest import CANNED_PLAN, GRAPHIC_HTML, SPEECH, FakeProvider, ffmpeg, make_clip
 
 from roughcut import graphics
 from roughcut.analyze import Analysis
@@ -23,7 +23,12 @@ TWO_GRAPHICS = [
 ]
 
 FREEZES = GRAPHIC_HTML.replace("<script>window.seek=function(t){", "<script>window.seek=function(t){if(t>0.1){while(true){}}")
-STALLS_IN_A_TIMER = GRAPHIC_HTML.replace("</script>", ";setTimeout(function(){while(true){}},50)</script>")
+# Blocks the page's main thread from a timer, outside window.seek. The timer is set by the first seek,
+# so the stall always starts once the page and its fonts are loaded and frames are being drawn,
+# however slow the machine is.
+STALLS_IN_A_TIMER = GRAPHIC_HTML.replace(
+    "<script>window.seek=function(t){", "<script>window.seek=function(t){if(!window.__stall){window.__stall=1;setTimeout(function(){while(true){}},0)}"
+)
 
 
 class DesignsBy(FakeProvider):
@@ -85,14 +90,16 @@ def test_a_frozen_design_is_left_out_and_the_build_finishes(footage, tmp_path, m
     assert not list((out / "graphics").glob("G02-*.mov")) and not list((out / "graphics").glob("*.partial.mov"))
     validate_dtd(result.fcpxml)
     check_invariants(result.fcpxml)
-    # The design is still saved, so it can be fixed and re-rendered.
-    assert (out / "graphics" / "G02-title-card.html").read_text() == FREEZES
+    # The design is still saved (with a note of the timing it was made for), so it can be fixed and re-rendered.
+    saved = (out / "graphics" / "G02-title-card.html").read_text()
+    assert graphics.without_timing(saved) == FREEZES and graphics.design_timing(saved, result.timeline.frame_duration)["seconds"] == pytest.approx(2.0, abs=0.04)
 
 
 @needs_renderer
 def test_a_page_stuck_outside_seek_cant_hang_the_renderer(tmp_path, monkeypatch):
     """A timer that never returns blocks the page's main thread; every browser call is bounded on our side."""
-    monkeypatch.setattr(graphics, "STEP_TIMEOUT", 2.0)
+    # Short enough to keep the test quick, long enough that loading the page on a busy machine never hits it.
+    monkeypatch.setattr(graphics, "STEP_TIMEOUT", 8.0)
     monkeypatch.setattr(graphics, "FRAME_TIMEOUT", 2.0)
     t0 = time.monotonic()
     result = graphics._render_one(job_for(tmp_path, STALLS_IN_A_TIMER, frames=60))
@@ -393,6 +400,7 @@ def test_a_rejected_key_while_designing_later_batches_still_stops_the_run():
 # ------------------------------------------------------------------ T1: seek-started animations, script errors, fonts, QC
 
 FADE = "@keyframes f{from{opacity:0}to{opacity:1}}"
+SMIL_WIDTH = '<animate attributeName="width" from="0" to="100" dur="2s" fill="freeze"/>'  # 50 at 1 s
 SEEK_CASES = {
     # A transition started by a class window.seek adds at 0.5 s is halfway through 0.5 s later.
     "class toggle": (
@@ -427,6 +435,21 @@ SEEK_CASES = {
         "<div id=b>Hi</div><script>window.seek=t=>document.getElementById('b').animate([{opacity:0},{opacity:1}],{duration:300,fill:'both'})</script>",
         1.0, "getComputedStyle(document.getElementById('b')).opacity", 1.0,
     ),
+    # SVG animations (SMIL) aren't Web Animations: they follow the frame clock too, not the wall clock.
+    "svg animate at load": (
+        f"<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>",
+        1.0, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
+    "svg inserted later": (
+        "<div id=box></div><script>window.seek=t=>{if(t>=0.5&&!document.querySelector('svg')){document.getElementById('box').innerHTML="
+        f"'<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>'}}}}</script>",
+        1.5, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
+    "svg rebuilt every frame": (
+        "<div id=box></div><script>window.seek=t=>{document.getElementById('box').innerHTML="
+        f"'<svg width=320 height=40><rect id=r height=10 width=0>{SMIL_WIDTH}</rect></svg>'}}</script>",
+        1.0, "document.getElementById('r').width.animVal.value", 50.0,
+    ),
 }
 
 
@@ -445,6 +468,27 @@ def test_animations_started_during_playback_play_from_when_they_start(case):
         got = float(page.evaluate(probe))
         browser.close()
     assert got == pytest.approx(want, abs=0.05)
+
+
+@needs_renderer
+def test_svg_animations_render_on_the_frame_clock(tmp_path):
+    """A bar drawn on with SVG <animate> is as long in each frame as that frame's time says,
+    however slowly the frames are captured (SMIL would otherwise run on the wall clock)."""
+    bar = (
+        "<!doctype html><html><head><style>html,body{margin:0;background:transparent}</style></head><body>"
+        '<svg width="1920" height="1080" style="position:absolute;left:0;top:0"><rect x="0" y="480" height="120" width="0" fill="#fff">'
+        '<animate attributeName="width" from="0" to="1920" dur="2s" fill="freeze"/></rect></svg></body></html>'
+    )  # the canvas is 1920x1080 CSS pixels, rendered at 320x180
+    result = graphics._render_one(job_for(tmp_path, bar, frames=60, size=(320, 180)))
+    assert result["error"] is None
+    w, h, frames = graphics._alpha_frames(tmp_path / "G01-test.mov", (320, 180))
+    row = 90 * w
+
+    def width(n: int) -> int:
+        return sum(1 for v in frames[n][row : row + w] if v > 128)
+
+    for n in (0, 15, 30, 45):
+        assert width(n) == pytest.approx(320 * (n / 30) / 2, abs=3), n  # 0, 80, 160, 240 px
 
 
 def _plate(css="left:10%;top:40%", extra="", exits=True):
@@ -564,8 +608,8 @@ def test_vertical_designs_are_told_where_the_platform_buttons_are():
 
 @needs_renderer
 def test_a_graphic_under_the_platform_buttons_is_flagged(tmp_path):
-    def notes(css, gid):
-        job = job_for(tmp_path, _plate(css), frames=30, gid=gid, kind="lower_third", size=(180, 320))
+    def notes(css, gid, kind="lower_third"):
+        job = job_for(tmp_path, _plate(css), frames=30, gid=gid, kind=kind, size=(180, 320))
         job["canvas"] = graphics.canvas(180, 320)
         result = graphics._render_one(job)
         assert result["error"] is None
@@ -573,6 +617,10 @@ def test_a_graphic_under_the_platform_buttons_is_flagged(tmp_path):
 
     assert notes("left:8%;bottom:8%", "G01") == ["sits under the app's buttons and captions on a vertical video (bottom 20%)"]
     assert notes("left:8%;top:45%", "G02") == []
+    # Title cards may fill the frame, but their words still shouldn't sit under the buttons.
+    assert notes("left:8%;bottom:8%", "G03", kind="title_card") == ["sits under the app's buttons and captions on a vertical video (bottom 20%)"]
+    assert notes("left:0;top:0;right:0;bottom:0", "G04", kind="title_card") == []  # a full-frame card: can't tell where its words are
+    assert notes("left:8%;top:45%", "G05", kind="title_card") == []
 
 
 def test_designers_are_told_what_each_graphic_sits_over(footage, tmp_path):
@@ -743,16 +791,21 @@ def test_build_points_to_the_preview_page(footage, tmp_path, monkeypatch, capsys
 # ------------------------------------------------------------------ review fixes: saved designs, stopping, stale files
 
 
-def fake_renderer(monkeypatch, rendered: list, *, slow: dict | None = None):
+def fake_renderer(monkeypatch, rendered: list, *, slow: dict | None = None, jobs: list | None = None, fail: set | None = None):
     """Stand-in for the browser: records (id, html) and writes a blank ProRes clip of the right length.
 
-    `slow` maps a graphic ID to a function run before that graphic "renders".
+    `slow` maps a graphic ID to a function run before that graphic "renders"; `jobs` collects
+    every render job as given; graphics whose text is in `fail` freeze instead of rendering.
     """
     from pathlib import Path
 
     def render_one(job):
         if slow and job["id"] in slow:
             slow[job["id"]]()
+        if jobs is not None:
+            jobs.append(dict(job))
+        if fail and any(text in job["html"] for text in fail):
+            return {"id": job["id"], "error": "froze at frame 3 (window.seek never returned); left out", "notes": [], "seconds": 0.0}
         rendered.append((job["id"], job["html"]))
         w, h = job.get("size") or (640, 360)
         _transparent_mov(Path(job["out"]), job["frames"], f"{w}x{h}")
@@ -899,3 +952,271 @@ def test_a_graphic_without_a_saved_design_is_reported_not_dropped_silently(tmp_p
     clips, placed, warnings = graphics.make(None, plan.graphics, tl, a, tmp_path / "out", brief="", style="", workers=2, saved_html={0: GRAPHIC_HTML})
     assert [c.id for c in clips] == ["G01"]
     assert "graphic G02 'Weeks of asking' has no saved design; left out" in warnings
+
+
+# ------------------------------------------------------------------ re-cuts keep a saved design on its words
+
+# Whisper-style words: contiguous, with the word before each pause stretched over it. The silence map
+# cuts the pauses, by more at a tighter pacing, so the caption's words move against its start.
+PAUSED_WORDS = [
+    ("We", 1.00, 1.30), ("started", 1.30, 1.80), ("five", 1.80, 2.10), ("years", 2.10, 2.50), ("ago", 2.50, 4.40),
+    ("with", 4.40, 4.70), ("twelve", 4.70, 5.10), ("vendors", 5.10, 5.70), ("and", 5.70, 7.40), ("now", 7.40, 7.70),
+    ("it", 7.70, 7.85), ("is", 7.85, 8.00), ("the", 8.00, 8.15), ("biggest", 8.15, 8.60), ("festival", 8.60, 9.20), ("around.", 9.20, 9.70),
+    ("See", 10.60, 10.90), ("you", 10.90, 11.10), ("there.", 11.10, 11.60),
+]
+SOUND = [(0.95, 3.05), (4.25, 6.05), (7.25, 9.8), (10.55, 11.65)]  # tone where the words are; true silence in the pauses
+CAPTION = "five years ago with twelve vendors and now it is the biggest"
+
+
+@pytest.fixture(scope="module")
+def paused_footage(tmp_path_factory):
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("paused")
+    gates = "+".join(f"between(t,{s},{e})" for s, e in SOUND)
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30000/1001:duration=12",
+        "-f", "lavfi", "-i", f"aevalsrc=exprs='0.5*sin(2*PI*300*t)*({gates})':s=48000:d=12",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(root / "talk.mov"),
+    )
+    (root / "talk.json").write_text(json.dumps({"words": [{"start": s, "end": e, "text": t, "prob": 0.95} for t, s, e in PAUSED_WORDS]}))
+    return root
+
+
+def _caption_plan(*extra):
+    caption = spec("kinetic_caption", "V01.S001", CAPTION, CAPTION, 0)
+    return {"title": "Fest", "sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}], "graphics": [*extra, caption]}
+
+
+def _placed_now(out, result):
+    """The graphics as placed on a result's cut (its timeline, the saved analysis and plan graphics), by text."""
+    analysis = Analysis.load(out / "analysis.json")
+    specs, _, _ = graphics.saved_designs(out)
+    return {g.spec.text: g for g in graphics.place(specs, result.timeline, analysis, [])}
+
+
+def _check_on_its_words(job, now, made, fd):
+    """Every word the design was made for lands on that word in this cut, and its exit plays at full speed at the end."""
+    assert job["retime"], "a design made for other timing must play re-timed"
+    made_words = dict(made["words"])
+    for word, t in now.word_times:
+        assert graphics.design_time(t, job["retime"]) == pytest.approx(made_words[word], abs=0.002), word
+    end = float(now.frames * fd)
+    assert graphics.design_time(end, job["retime"]) == pytest.approx(made["seconds"], abs=0.002)
+    for back in (0.1, 0.4, 0.7):  # the exit
+        assert graphics.design_time(end - back, job["retime"]) == pytest.approx(made["seconds"] - back, abs=0.002)
+
+
+def test_timing_notes_round_trip_and_are_never_shown_to_the_designer():
+    from fractions import Fraction
+
+    fd = Fraction(1001, 30000)
+    page = GRAPHIC_HTML
+    timing = {"seconds": 4.2, "words": [["Over", 0.12], ["<b>-->", 0.5]]}
+    noted = graphics.with_timing(page, timing)
+    assert noted.startswith(page) and graphics.without_timing(noted) == page
+    assert graphics.design_timing(noted, fd) == {"seconds": 4.2, "words": [("Over", 0.12), ("<b>-->", 0.5)]}
+    assert noted.count("roughcut-timing") == 1 and "<b>" not in noted.split("roughcut-timing")[1]  # can't close the comment early
+    renoted = graphics.with_timing(noted + "<!-- hand edit -->", {"seconds": 3.0, "words": []})
+    assert renoted.count("roughcut-timing") == 1 and "<!-- hand edit -->" in renoted and graphics.design_timing(renoted, fd)["seconds"] == 3.0
+    assert graphics.design_timing(graphics.with_timing(page, {"frames": 60}), fd) == {"seconds": float(60 * fd), "words": None}
+    assert graphics.design_timing(page, fd) is None and graphics.design_timing(page + "<!-- roughcut-timing {nonsense} -->", fd) is None
+
+    # Saved designs shown as examples (approved looks, a revision's reference) lose their notes.
+    a, plan, tl = small_cut()
+    placed = graphics.place(plan.graphics, tl, a, [])
+    request = graphics._design_request(
+        placed, a, tl.frame_duration, brief="", style="Match this:\n" + noted, width=640, height=360, reference=("G01", "stat", noted)
+    )
+    assert "roughcut-timing" not in request and request.count("TEXT <span") == 2
+
+
+def test_time_map_puts_each_word_on_its_word_and_the_exit_at_the_end():
+    from fractions import Fraction
+
+    from roughcut.graphics import PlacedGraphic
+    from roughcut.plan import GraphicSpec
+
+    fd = Fraction(1, 30)
+    g = PlacedGraphic(id="G01", spec=GraphicSpec(kind="kinetic_caption", segment="", words="", text="x"), index=0, start=0, frames=150,
+                      word_times=[("Over", 0.1), ("forty", 0.4), ("chefs,", 0.8), ("are", 1.2), ("cooking.", 1.6)])
+    same = graphics.design_timing(graphics.with_timing("<p>", g.timing(fd)), fd)
+    assert graphics.time_map(g, same, fd) is None  # made for this cut: plays as it is
+    made = {"seconds": 6.0, "words": [("Over", 0.1), ("forty", 0.4), ("chefs,", 0.8), ("are", 1.9), ("cooking.", 2.3)]}
+    anchors = graphics.time_map(g, made, fd)
+    for (word, t), (_, want) in zip(g.word_times, made["words"]):
+        assert graphics.design_time(t, anchors) == pytest.approx(want), word
+    assert graphics.design_time(5.0, anchors) == pytest.approx(6.0) and graphics.design_time(4.5, anchors) == pytest.approx(5.5)
+    assert all(a1 > a0 and b1 > b0 for (a0, b0), (a1, b1) in zip(anchors, anchors[1:]))  # never runs backwards
+    # A design with no word times (from before notes) is fitted by its length, its exit at full speed at the end.
+    assert graphics.time_map(g, {"seconds": 4.0, "words": None}, fd) == [(0.0, 0.0), (4.2, 3.2), (5.0, 4.0)]
+
+
+@needs_renderer
+def test_a_retimed_design_is_rendered_on_its_new_clock(tmp_path):
+    """What the design shows from 1.95 s (a plate appearing) shows from 1.0 s in a cut that re-times 1.0 s to 2.0 s."""
+    page = (
+        "<!doctype html><html><head><style>html,body{margin:0;background:transparent}@keyframes show{from{opacity:0}to{opacity:1}}"
+        ".p{position:absolute;left:10%;top:40%;width:30%;height:20%;background:#c00;animation:show .001s linear 1.95s both}</style></head>"
+        "<body><div class=p></div></body></html>"
+    )
+    retime = [(0.0, 0.0), (1.0, 2.0), (2.0, 3.0)]
+    result = graphics._render_one(job_for(tmp_path, page, frames=60, size=(320, 180), retime=retime))
+    assert result["error"] is None
+    _, _, frames = graphics._alpha_frames(tmp_path / "G01-test.mov", (320, 180))
+    shown = [n for n, f in enumerate(frames) if max(f) > 128]
+    assert shown == list(range(30, 60))  # from 1.0 s (design time 2.0 s) on; without re-timing, only the last frame
+
+
+def test_a_recut_with_other_pacing_keeps_a_saved_design_on_its_words(paused_footage, tmp_path, monkeypatch):
+    from roughcut import pipeline
+
+    rendered: list = []
+    jobs: list[dict] = []
+    fake_renderer(monkeypatch, rendered, jobs=jobs)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_caption_plan()))
+    out = tmp_path / "out"
+    opts = pipeline.Options(inputs=[paused_footage], out=out, transcriber="none", cache_dir=tmp_path / "cache", format="640x360", graphics=True, style="medium")
+    built = pipeline.build(opts)
+    fd = built.timeline.frame_duration
+    (job,) = jobs
+    medium = _placed_now(out, built)[CAPTION]
+    assert job["retime"] is None and job["frames"] == medium.frames
+    design = (out / "graphics" / "G01-kinetic-caption.html").read_text()
+    made = graphics.design_timing(design, fd)  # the timing it was designed for: the medium cut's
+    assert made == {"seconds": round(float(medium.frames * fd), 3), "words": medium.word_times}
+
+    # `roughcut render --style tight`: the pauses shrink, so the words come sooner after the caption starts.
+    jobs.clear()
+    tight_cut = pipeline.rerender(out, pipeline.Options(inputs=[], style="tight"), overrides={"style"})
+    (job,) = jobs
+    tight = _placed_now(out, tight_cut)[CAPTION]
+    assert tight.frames < medium.frames and dict(tight.word_times)["biggest"] < dict(medium.word_times)["biggest"] - 0.15
+    _check_on_its_words(job, tight, made, fd)
+    assert job["html"] == design  # the same design (and its note), played on another clock
+    assert json.loads((out / "graphics.json").read_text())["graphics"][0]["retime"] == [list(a) for a in job["retime"]]
+    assert not [w for w in tight_cut.warnings if "length only" in w]
+
+    # Looser still, the other way; and back at medium the first clip is reused as it is.
+    jobs.clear()
+    loose_cut = pipeline.rerender(out, pipeline.Options(inputs=[], style="loose"), overrides={"style"})
+    (job,) = jobs
+    _check_on_its_words(job, _placed_now(out, loose_cut)[CAPTION], made, fd)
+    jobs.clear()
+    again = pipeline.rerender(out, pipeline.Options(inputs=[], style="medium"), overrides={"style"})
+    assert jobs == [] and [c.clip_id for c in again.timeline.connected if c.kind == "graphic"] == ["G01"]
+    assert (out / "graphics" / "G01-kinetic-caption.html").read_text() == design
+
+
+def test_a_revision_keeps_carried_designs_on_their_words_and_notes_new_ones(paused_footage, tmp_path, monkeypatch):
+    from roughcut import pipeline
+
+    rendered: list = []
+    jobs: list[dict] = []
+    fake_renderer(monkeypatch, rendered, jobs=jobs)
+    provider = FakeProvider(_caption_plan())
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    out = tmp_path / "out"
+    opts = pipeline.Options(inputs=[paused_footage], out=out, transcriber="none", cache_dir=tmp_path / "cache", format="640x360", graphics=True, style="medium")
+    built = pipeline.build(opts)
+    fd = built.timeline.frame_duration
+    made = graphics.design_timing((out / "graphics" / "G01-kinetic-caption.html").read_text(), fd)
+
+    # Tighter, and a title card on the last line: the caption's design is carried over, the title is new.
+    provider.plan = _caption_plan(spec("title_card", "V01.S002", "See you there", "Fest", 1.5))
+    jobs.clear()
+    revised = pipeline.revise(out, "Tighter, with a title.", pipeline.Options(inputs=[], style="tight"), overrides={"style"})
+    request = [c for c in provider.calls if c["schema_name"] == "graphics"][-1]["parts"][-1].text
+    assert "Match the graphics already made for this video" in request and "roughcut-timing" not in request
+    now = _placed_now(out, revised)
+    by_id = {j["id"]: j for j in jobs}
+    caption, title = now[CAPTION], now["Fest"]
+    _check_on_its_words(by_id[caption.id], caption, made, fd)
+    assert by_id[title.id]["retime"] is None  # designed for this cut
+    title_design = (out / "graphics" / f"{title.slug}.html").read_text()
+    assert graphics.design_timing(title_design, fd) == {"seconds": round(float(title.frames * fd), 3), "words": title.word_times}
+
+
+def test_a_graphic_renumbered_by_a_revision_reuses_its_clip(paused_footage, tmp_path, monkeypatch):
+    """Adding a graphic earlier in the cut renumbers the ones after it; their clips are reused, not rendered again."""
+    import os
+
+    from roughcut import pipeline, versions
+
+    rendered: list = []
+    fake_renderer(monkeypatch, rendered)
+    lower = spec("lower_third", "V01.S002", "See you there", "See You There", 2)
+    provider = FakeProvider({"title": "Fest", "sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}], "graphics": [lower]})
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    out = tmp_path / "out"
+    pipeline.build(pipeline.Options(inputs=[paused_footage], out=out, transcriber="none", cache_dir=tmp_path / "cache", format="640x360", graphics=True))
+    (first,) = (out / "graphics").glob("G01-lower-third-*.mov")
+
+    provider.plan = json.loads(json.dumps(provider.plan))
+    provider.plan["graphics"].insert(0, spec("stat", "V01.S001", "twelve vendors", "12 Vendors", 1.5))
+    rendered.clear()
+    revised = pipeline.revise(out, "Call out the twelve vendors.", pipeline.Options(inputs=[]))
+    assert [gid for gid, _ in rendered] == ["G01"]  # only the new stat
+    (again,) = (out / "graphics").glob("G02-lower-third-*.mov")
+    assert again.name.removeprefix("G02") == first.name.removeprefix("G01") and os.path.samefile(again, first)
+    assert again.name in revised.fcpxml.read_text()
+    versions.prune_graphics(out)
+    assert first.is_file() and again.is_file()  # v1 in Final Cut still uses its clip
+
+
+def test_a_reused_clip_keeps_what_its_render_reported_whatever_its_number(tmp_path):
+    a, plan, tl = small_cut()
+    placed = graphics.place(plan.graphics, tl, a, [])
+    html = {g.id: graphics.with_timing(GRAPHIC_HTML.replace("TEXT", g.spec.text), g.timing(tl.frame_duration)) for g in placed}
+    digests = {g.id: graphics.graphic_digest(g, html[g.id], tl) for g in placed}
+    # The earlier version numbered them the other way round.
+    previous = {"graphics": [
+        {"id": "G02", "rendered": digests["G01"], "notes": ["came out blank: nothing is visible in any frame"]},
+        {"id": "G01", "rendered": "0" * 16, "notes": ["console error: from another design"]},
+    ]}
+    reused = {g.id: tmp_path / f"{g.slug}.mov" for g in placed}
+    assert graphics._old_notes(previous, placed, html, tl, reused) == {"G01": ["came out blank: nothing is visible in any frame"]}
+
+
+def test_a_graphic_shortened_for_one_that_never_arrives_gets_its_length_back(tmp_path, monkeypatch):
+    class NoStatDesign(FakeProvider):
+        def complete_json(self, system, parts, schema, *, schema_name, **kw):
+            reply = super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+            reply["graphics"] = [g for g in reply["graphics"] if g["id"] != "G02"]
+            return reply
+
+    graphics_raw = [spec("lower_third", "V01.S003", "Today", "Lower", 4), spec("stat", "V01.S004", "long day", "Stat", 2)]
+    a, plan, tl = small_cut(graphics_raw)
+    fps = 1 / float(tl.frame_duration)
+    jobs: list[dict] = []
+    fake_renderer(monkeypatch, [], jobs=jobs)
+    clips, placed, warnings = graphics.make(NoStatDesign(), plan.graphics, tl, a, tmp_path / "out", brief="", style="", workers=2)
+    lower = placed[0]
+    assert [c.id for c in clips] == ["G01"] and lower.frames == round(4 * fps)
+    assert "no design came back for G02; skipped" in warnings and not [w for w in warnings if "shortened" in w]
+    # It was designed to make way, so its design plays with the hold stretched and the exit at the end.
+    made = graphics.design_timing((tmp_path / "out" / "graphics" / "G01-lower-third.html").read_text(), tl.frame_duration)
+    (job,) = jobs
+    assert made["seconds"] < 3.5 and job["frames"] == lower.frames
+    assert graphics.design_time(lower.frames / fps, job["retime"]) == pytest.approx(made["seconds"])
+    assert graphics.design_time(lower.frames / fps - 0.5, job["retime"]) == pytest.approx(made["seconds"] - 0.5)
+    assert next(c for c in tl.connected if c.clip_id == "G01").frames == lower.frames
+
+
+def test_a_graphic_shortened_for_one_that_didnt_render_is_rendered_again_at_its_length(tmp_path, monkeypatch):
+    graphics_raw = [spec("lower_third", "V01.S003", "Today", "Lower", 4), spec("stat", "V01.S004", "long day", "Stat", 2)]
+    a, plan, tl = small_cut(graphics_raw)
+    fps = 1 / float(tl.frame_duration)
+    jobs: list[dict] = []
+    fake_renderer(monkeypatch, [], jobs=jobs, fail={"G02 <span"})
+    clips, placed, warnings = graphics.make(FakeProvider(), plan.graphics, tl, a, tmp_path / "out", brief="", style="", workers=2)
+    lower = placed[0]
+    short = next(j for j in jobs if j["id"] == "G01")["frames"]
+    assert [(j["id"], j["frames"]) for j in jobs if j["id"] == "G01"] == [("G01", short), ("G01", round(4 * fps))]
+    assert [c.id for c in clips] == ["G01"] and lower.frames == round(4 * fps) > short
+    assert any(w.startswith("graphic G02 froze") for w in warnings) and not [w for w in warnings if "shortened" in w]
+    entry = json.loads((tmp_path / "out" / "graphics.json").read_text())["graphics"][0]
+    assert entry["frames"] == lower.frames and entry["rendered"] == entry["digest"] and entry["file"].endswith(f"-{entry['digest'][:6]}.mov")
+    assert next(c for c in tl.connected if c.clip_id == "G01").frames == lower.frames
