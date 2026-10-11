@@ -629,10 +629,11 @@ def build_timeline(
     _place_music(tl, plan, analysis, music_db, warnings, beds=music_beds)
     tl.target_seconds = target_seconds
     tl.review = review(tl, plan, analysis, target_seconds)
+    _place_markers(tl, plan, analysis)  # first, so a jump on a line the plan flagged keeps one to-do
     if plan.source != "heuristic":  # a stringout is all jump cuts by design
         _mark_bed_jumps(tl, analysis, warnings)
         _mark_jump_cuts(tl, tl.review)
-    _place_markers(tl, plan, analysis)
+        tl.markers.sort(key=lambda mk: mk.frame)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
     _music_fades(tl, analysis)
@@ -1694,11 +1695,12 @@ def _place_markers(tl: Timeline, plan: Plan, analysis: Analysis) -> None:
     for flag in plan.flags:
         rng = tl.seg_ranges.get(flag["ref"])
         if rng is None:
-            # Flags about clips on the timeline land on the clip's first use.
-            clip_first = next((sc.offset for sc in tl.spine if sc.clip_id == flag["ref"]), None)
-            if clip_first is None:
+            # Flags about clips on the timeline land on the clip's first use, in the main storyline
+            # or (B-roll, usually) as a cutaway.
+            uses = [sc.offset for sc in tl.spine if sc.clip_id == flag["ref"]] + [c.start for c in tl.connected if c.clip_id == flag["ref"]]
+            if not uses:
                 continue
-            frame = clip_first
+            frame = min(uses)
         else:
             frame = rng[0]
         tl.markers.append(Marker(frame=frame, value=flag["note"][:120], kind="todo", note=flag["note"]))
@@ -1840,7 +1842,10 @@ def _mark_bed_jumps(tl: Timeline, analysis: Analysis, warnings: list[str]) -> No
         if a.clip_id == b.clip_id and a.src_in + a.frames * fd == b.src_in:
             continue
         jumps.append((b.offset, a, b))
+    marked = {m.frame for m in tl.markers if m.kind == "todo"}  # one to-do per edit: the plan's flag stays
     for frame, a, b in jumps[:MAX_BED_MARKERS]:
+        if frame in marked:
+            continue
         name = analysis.clip(b.clip_id if b.clip_id in bed else a.clip_id).media.name
         tl.markers.append(
             Marker(

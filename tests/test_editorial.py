@@ -483,6 +483,39 @@ def test_a_promo_over_music_keeps_its_breaths_and_noise_does_not(promos, tmp_pat
     assert (again.clips[0].bed, again.clips[0].cuts_per_min) == ("music", clip.cuts_per_min)
 
 
+def test_a_flagged_line_that_starts_on_a_jump_cut_gets_one_todo():
+    v01 = make_clip("V01", seconds=12, sentences=[
+        (0.5, 2.0, "Hello there my good friends."), (2.6, 5.0, "Um, so the ferry leaves every hour."), (5.4, 8.0, "Come early and bring a jacket."),
+    ])
+    a = Analysis(clips=[v01])
+    raw = {"sections": [{"name": "x", "items": ["V01.S001", "V01.S002", "V01.S003"]}], "flags": [{"ref": "V01.S002", "note": "check this line"}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    edit = tl.seg_ranges["V01.S002"][0]
+    assert edit in [j.frame for j in tl.review.jump_cuts]  # the um is cut, so the line starts on a jump
+    assert [m.value for m in tl.markers if m.kind == "todo" and m.frame == edit] == ["check this line"]
+    assert [m.frame for m in tl.markers] == sorted(m.frame for m in tl.markers)
+
+
+def test_a_flag_about_a_cutaway_becomes_a_marker_on_it(tmp_path):
+    from conftest import SPEECH
+    from test_end_to_end import check_invariants, validate_dtd
+
+    from roughcut.fcpxml import build_fcpxml
+
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH), make_clip("V02", seconds=10)])
+    raw = {"sections": [{"name": "x", "items": ["V01.S003", "V01.S004", "V01.S005"], "broll": [
+        {"clip": "V02", "over": ["V01.S004"], "words": "", "source_in": -1, "reason": ""},
+    ]}], "flags": [{"ref": "V02", "note": "B-roll is a test pattern: re-link the real footage"}]}
+    tl = build_timeline(normalize(raw, a, source="fake"), a, style=STYLES["medium"], name="t")
+    v02 = next(c for c in tl.connected if c.clip_id == "V02")
+    assert [m.frame for m in tl.markers if m.value.startswith("B-roll is a test pattern")] == [v02.start]
+    path = tmp_path / "t.fcpxml"
+    path.write_text(build_fcpxml([tl], a, event_name="e"))
+    validate_dtd(path)
+    check_invariants(path)
+    assert path.read_text().count("B-roll is a test pattern") >= 1
+
+
 def test_jumps_in_a_music_bed_get_markers_and_a_clashing_cue_a_warning():
     from conftest import SPEECH
 
