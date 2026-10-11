@@ -53,11 +53,13 @@ def plan_limit_reached(lowered: str) -> bool:
     """Claude Code's wording when the plan is used up ("Claude AI usage limit reached|1760000000",
     "5-hour limit reached ∙ resets 3pm", "You've hit your limit · resets 5pm"). Not any message
     with "limit" in it: a prompt over the context limit is a different, non-fatal problem."""
+    if "context" in lowered or "too long" in lowered:
+        return False
     return any(k in lowered for k in ("usage limit", "limit reached", "hit your limit")) or ("limit" in lowered and "resets" in lowered)
 
 
 def _reset_time(message: str) -> str:
-    """' (resets 17:00)' from the epoch Claude Code appends, or its own 'resets 5pm' wording."""
+    """' (it resets 17:00)' from the epoch Claude Code appends, or from its own 'resets 5pm' wording."""
     m = re.search(r"\|(\d{10})\b", message)
     if m:
         when = datetime.fromtimestamp(int(m.group(1)))

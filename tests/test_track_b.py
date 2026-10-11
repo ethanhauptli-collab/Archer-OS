@@ -578,7 +578,6 @@ def test_cost_is_estimated_per_step_and_nothing_is_silently_unpriced():
 
 def test_haiku_5_5_gets_effort_haiku_4_5_does_not():
     import httpx2
-
     from test_providers import SCHEMA, _anthropic_provider, _sse
 
     from roughcut.providers import TextPart
@@ -741,7 +740,6 @@ def test_a_context_limit_is_not_a_plan_limit(footage, tmp_path, claude_replies):
 
 def test_an_empty_api_balance_is_a_limit_not_a_failure():
     import httpx2
-
     from test_providers import SCHEMA, _anthropic_provider
 
     from roughcut.providers import ProviderLimitError, TextPart
@@ -954,3 +952,12 @@ def test_no_bell_for_the_app_or_a_quick_run(footage, tmp_path, monkeypatch, caps
     assert notified == []
     assert cli.keep_awake() is None  # not a Mac: nothing to start
     assert cli._applescript('say "hi" \\ there') == '"say \\"hi\\" \\\\ there"'
+
+
+def test_plan_limit_wording_is_told_apart_from_a_context_limit():
+    from roughcut.providers.claude_code import plan_limit_reached
+
+    for said in ("Claude AI usage limit reached|1760000000", "5-hour limit reached ∙ resets 3pm", "You've hit your limit · resets 5pm"):
+        assert plan_limit_reached(said.lower()), said
+    for said in ("Prompt is too long", "Context limit reached: the conversation is too long", "Rate limited, retrying"):
+        assert not plan_limit_reached(said.lower()), said

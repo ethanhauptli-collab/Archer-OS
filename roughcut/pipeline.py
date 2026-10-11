@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
-from . import progress
+from . import progress, versions
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log
 from .fcpxml import build_fcpxml
 from .media import require_tools, scan
@@ -21,7 +21,6 @@ from .report import build_report
 from .report_html import report_page
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
-from . import versions
 from .versions import atomic_write, planner_label, safe_name
 
 
@@ -816,7 +815,7 @@ def revise(
 
     version = versions.next_number(out_dir)
     versions.snapshot(out_dir, before=version)
-    new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True)}
+    new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True), "vision_model": settings.get("vision_model")}
     record = plan_record(name, plan, raw, analysis, new_settings)
     record["notes_history"] = history + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
