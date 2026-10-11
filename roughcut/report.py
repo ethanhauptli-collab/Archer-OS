@@ -6,7 +6,7 @@ import re
 
 from .analyze import ROLE_LABELS, Analysis
 from .plan import Plan
-from .providers import UsageLog, estimate_cost
+from .providers import UsageLog, cost_breakdown, describe_cost
 from .timecode import seconds_to_clock
 from .timeline import Timeline, dead_air
 
@@ -76,8 +76,8 @@ def build_report(
         if calls:
             tokens_in = sum(c.input_tokens + c.cache_read_tokens + c.cache_write_tokens for c in calls)
             tokens_out = sum(c.output_tokens for c in calls)
-            cost = sum(filter(None, (estimate_cost(u) for u in usage)))
-            cost_txt = f", about ${cost:.2f}" if cost else ""
+            cost = describe_cost(cost_breakdown(usage))
+            cost_txt = f"; {cost}" if cost else ""
             L.append(f"- **Model usage:** {len(calls)} calls, {tokens_in:,} input / {tokens_out:,} output tokens{cost_txt}")
     if timings:
         L.append("- **Processing:** " + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()))

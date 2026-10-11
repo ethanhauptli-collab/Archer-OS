@@ -128,6 +128,17 @@ def test_swift_fixture_matches_the_cli_contract():
     assert set(done["result"]) == set(live)
 
 
+def test_done_payload_additions_keep_their_shape():
+    """Keys added after the app's first version: what the Swift side should decode (all optional there)."""
+    fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "progress-sample.jsonl"
+    r = [json.loads(ln) for ln in fixture.read_text().splitlines() if ln.strip()][-1]["result"]
+    assert isinstance(r["version"], int) and r["project"].startswith("Trip - Rough Cut v") and r["event"].startswith("Trip (")
+    assert r["graphics"] is None or set(r["graphics"]) == {"planned", "placed", "rendered", "note"}
+    assert set(r["visual_log"]) == {"described", "total"}
+    assert set(r["skipped"]) == {"files", "plan_refs"}
+    assert set(r["usage"]) == {"calls", "dollars", "by_purpose", "calls_by_purpose", "subscription_calls", "unpriced_calls"}
+
+
 def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):
     """A run that never finished looked like a finished one (old files, no graphics): the log tells them apart."""
     out = tmp_path / "out"

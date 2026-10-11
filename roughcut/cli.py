@@ -491,6 +491,8 @@ def _run(args, json_mode: bool) -> int:
     for w in result.warnings:
         if "almost no pauses" in w:
             print(f"  ! {w}")
+    for line in summary_lines(result.summary):
+        print(line)
     print(f"FCPXML:    {result.fcpxml}")
     print(f"Report:    {result.report}")
     if result.version > 1:
@@ -501,6 +503,49 @@ def _run(args, json_mode: bool) -> int:
         print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
     print(f"Then open the project \"{result.project or tl.name}\" in the event \"{result.event}\". The clips in the browser stay your untouched originals.")
     return 3 if result.fell_back else 0
+
+
+def summary_lines(summary: dict) -> list[str]:
+    """What made it into the cut, what was left out, and what the model calls cost: before opening the report."""
+    from .providers import describe_cost
+
+    if not summary:
+        return []
+    made, left = [], []
+    vis = summary.get("visual_log")
+    if vis and vis.get("total"):
+        (made if vis["described"] == vis["total"] else left).append(
+            f"visual log {vis['described']} of {vis['total']} clips" + ("" if vis["described"] == vis["total"] else " described (the rest are in Warnings)")
+        )
+    g = summary.get("graphics")
+    if g is not None:
+        if g.get("note"):
+            left.append(f"graphics: {g['note']}")
+        elif g["planned"]:
+            text = f"graphics {g['rendered']} of {g['planned']} on the timeline"
+            why = []
+            if g["placed"] < g["planned"]:
+                why.append(f"{g['planned'] - g['placed']} couldn't be placed on their words")
+            if g["rendered"] < g["placed"]:
+                why.append(f"{g['placed'] - g['rendered']} didn't design or render")
+            (left if why else made).append(text + (f" ({'; '.join(why)}; see Warnings)" if why else ""))
+    skipped = summary.get("skipped") or {}
+    files = skipped.get("files") or []
+    if files:
+        shown = ", ".join(files[:3]) + (f" and {len(files) - 3} more" if len(files) > 3 else "")
+        left.append(f"{len(files)} file{'s' if len(files) != 1 else ''} couldn't be read ({shown})")
+    if skipped.get("plan_refs"):
+        n = skipped["plan_refs"]
+        left.append(f"{n} plan reference{'s' if n != 1 else ''} dropped or fixed (see Warnings)")
+    lines = []
+    if made:
+        lines.append("In the cut: " + "; ".join(made))
+    if left:
+        lines.append("Left out:   " + "; ".join(left))
+    cost = describe_cost(summary.get("usage") or {})
+    if cost:
+        lines.append("AI usage:   " + cost)
+    return lines
 
 
 def open_in_final_cut(path: Path, run=subprocess.run) -> str:

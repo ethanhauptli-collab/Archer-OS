@@ -16,7 +16,7 @@ from .fcpxml import build_fcpxml
 from .media import require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
-from .providers import Provider, ProviderAuthError, ProviderError, TextPart, make_provider
+from .providers import Provider, ProviderAuthError, ProviderError, TextPart, cost_breakdown, make_provider
 from .report import build_report
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
@@ -75,6 +75,7 @@ class Result:
     version: int = 0  # this cut's number in the output folder (versions.py)
     project: str = ""  # the Rough Cut project's name in Final Cut
     event: str = ""  # the event it's imported into
+    summary: dict = field(default_factory=dict)  # what made it in, what was left out, what it cost (run_summary)
 
 
 def result_summary(result: Result) -> dict:
@@ -99,7 +100,46 @@ def result_summary(result: Result) -> dict:
         "version": result.version,
         "project": result.project,
         "event": result.event,
+        "graphics": result.summary.get("graphics"),
+        "visual_log": result.summary.get("visual_log"),
+        "skipped": result.summary.get("skipped") or {"files": [], "plan_refs": 0},
+        "usage": result.summary.get("usage"),
     }
+
+
+def run_summary(
+    plan: Plan,
+    *,
+    graphics_on: bool,
+    placed: list,
+    with_graphics: Analysis,
+    usage: list | None = None,
+    skipped_files: list[str] | None = None,
+    visual_log: dict | None = None,
+    graphics_note: str | None = None,
+    planned_graphics: int | None = None,
+) -> dict:
+    """Counts for the end of a run: graphics planned/placed/rendered, visual-log coverage, what was skipped, cost."""
+    graphics = None
+    if graphics_on:
+        graphics = {
+            "planned": len(plan.graphics) if planned_graphics is None else planned_graphics,
+            "placed": len(placed),
+            "rendered": sum(1 for c in with_graphics.clips if c.role == "graphic"),
+            "note": graphics_note,
+        }
+    return {
+        "graphics": graphics,
+        "visual_log": visual_log,
+        "skipped": {"files": list(skipped_files or []), "plan_refs": len(plan.warnings)},
+        "usage": cost_breakdown(usage) if usage and any(u.calls for u in usage) else None,
+    }
+
+
+def visual_coverage(analysis: Analysis) -> dict:
+    """How many clips with pictures got a visual description (duplicates hidden from the planner don't count)."""
+    seen = [c for c in analysis.clips if c.media.has_video and not c.hidden]
+    return {"described": sum(1 for c in seen if c.visual), "total": len(seen)}
 
 
 # Cut settings `roughcut render` takes from the saved run unless a flag overrides them.
@@ -193,7 +233,8 @@ def style_for(opts: Options) -> Style:
     return base
 
 
-def run_analysis(opts: Options, out_dir: Path) -> Analysis:
+def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None) -> Analysis:
+    """Scan, probe, map silence and transcribe. `skipped` collects the names of files that couldn't be read."""
     require_tools()
     progress.stage("scan", "Finding media")
     files = scan(opts.inputs, exclude=[out_dir])
@@ -212,9 +253,13 @@ def run_analysis(opts: Options, out_dir: Path) -> Analysis:
 
         w, h, _ = parse_format(opts.format)
         prefer_vertical = h > w
-    return analyze(
+    analysis = analyze(
         files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical
     )
+    if skipped is not None:
+        read = {Path(c.media.path).resolve() for c in analysis.clips}
+        skipped += [f.name for f in files if Path(f).resolve() not in read]
+    return analysis
 
 
 def media_part(analysis: Analysis) -> TextPart:
@@ -378,8 +423,10 @@ def build(opts: Options) -> Result:
         if problem:
             raise RoughcutError(problem)
 
-    analysis = run_analysis(opts, out_dir)
+    skipped_files: list[str] = []
+    analysis = run_analysis(opts, out_dir, skipped=skipped_files)
     timings["analysis"] = time.monotonic() - t_start
+    visual_log = None
 
     usage = []
     extra_warnings: list[str] = []
@@ -398,6 +445,7 @@ def build(opts: Options) -> Result:
             cache = Cache(opts.cache_dir or default_cache_dir())
             extra_warnings += describe_clips(analysis, vision_provider, cache, workers=opts.workers)
             timings["visual log"] = time.monotonic() - t
+            visual_log = visual_coverage(analysis)
 
     prompt = (
         "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis) + "\n\n# Brief\n\n"
@@ -440,7 +488,10 @@ def build(opts: Options) -> Result:
     # Graphics belong to the cut they were made for: a new build makes its own or none.
     (out_dir / "graphics.json").unlink(missing_ok=True)
     try:
-        return _finish_build(opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version)
+        return _finish_build(
+            opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
+            summary_base={"skipped_files": skipped_files, "visual_log": visual_log},
+        )
     except BaseException as e:
         _mark_plan_saved(e, out_dir)
         raise
@@ -448,7 +499,7 @@ def build(opts: Options) -> Result:
 
 def _finish_build(
     opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
-    *, command: str = "build", carry: dict | None = None, report_extra=None, entry_extra: dict | None = None,
+    *, command: str = "build", carry: dict | None = None, report_extra=None, entry_extra: dict | None = None, summary_base: dict | None = None,
 ) -> Result:
     """Cut, make graphics, write the version. `carry` (revise): earlier graphic designs to reuse."""
     rough, stringout = make_timelines(plan, analysis, opts, name)
@@ -456,6 +507,7 @@ def _finish_build(
     entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
     extra = report_extra(rough) if report_extra else {}
     placed, with_graphics = [], analysis
+    graphics_note = None
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
             from . import graphics
@@ -481,8 +533,10 @@ def _finish_build(
             timings["graphics"] = time.monotonic() - t
         else:
             extra_warnings.append("Motion graphics were on, but the plan didn't ask for any.")
+            graphics_note = "the plan asked for none"
     elif opts.graphics and fell_back:
         extra_warnings.append("Motion graphics were on, but AI planning failed, so this cut has none.")
+        graphics_note = "none: AI planning failed"
     timings["total"] = time.monotonic() - t_start
     fcpxml_path, report_path = write_outputs(
         out_dir,
@@ -498,9 +552,14 @@ def _finish_build(
         entry=entry,
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
+    base = summary_base or {}
+    summary = run_summary(
+        plan, graphics_on=opts.graphics, placed=placed, with_graphics=with_graphics, usage=usage,
+        skipped_files=base.get("skipped_files"), visual_log=base.get("visual_log"), graphics_note=graphics_note,
+    )
     return Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
-        version=version, project=rough.name, event=event_name(name),
+        version=version, project=rough.name, event=event_name(name), summary=summary,
     )
 
 
@@ -527,6 +586,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
     graphics_warnings: list[str] = []
     placed, with_graphics = [], analysis
+    graphics_on, planned_graphics, graphics_note = (out_dir / "graphics.json").is_file(), None, None
     if (out_dir / "graphics.json").is_file():
         # Re-time the saved designs (and any hand edits) to the new cut; only changes re-render.
         from . import graphics
@@ -534,8 +594,10 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         problem = graphics.renderer_problem()
         if problem:
             graphics_warnings.append(f"Graphics left out of this re-cut: {problem}")
+            graphics_note = "left out: the renderer isn't available"
         else:
             specs, html, style = graphics.saved_designs(out_dir)
+            planned_graphics = sum(1 for g in specs if g.text)
             g_clips, placed, g_warnings = graphics.make(None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html)
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
@@ -544,9 +606,13 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
     )
     warnings = plan.warnings + rough.warnings + graphics_warnings
+    summary = run_summary(
+        plan, graphics_on=graphics_on, placed=placed, with_graphics=with_graphics, planned_graphics=planned_graphics, graphics_note=graphics_note,
+        visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None,
+    )
     return Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
-        version=version, project=rough.name, event=event_name(name),
+        version=version, project=rough.name, event=event_name(name), summary=summary,
     )
 
 

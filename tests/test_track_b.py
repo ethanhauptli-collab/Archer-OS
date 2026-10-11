@@ -544,3 +544,101 @@ def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp
     kept = next(g for g in after["graphics"] if g["kind"] == "title_card")
     assert "<!-- hand edit -->" in (out / kept["html"]).read_text()  # the saved (hand-edited) design, not a new one
     assert (next((out / "history").glob("v1 *")) / title["html"]).is_file()  # v1's designs are kept in history
+
+
+# ---------------------------------------------------------------- T4: end-of-run summary and cost
+
+
+def test_cost_is_estimated_per_step_and_nothing_is_silently_unpriced():
+    from roughcut.providers import Usage, UsageLog, cost_breakdown, describe_cost, price_for
+
+    assert price_for("claude-opus-5-5") == "claude-opus-5-5" and price_for("claude-opus-5") == "claude-opus-5"
+    assert price_for("claude-opus-5-5-20260401") == "claude-opus-5-5"  # longest prefix, not the older Opus 5
+    assert price_for("claude-sonnet-5-5 (subscription)") is None and price_for("gpt-5") is None
+    api, plan = UsageLog(), UsageLog()
+    api.add(Usage("claude-opus-5-5", "edit plan", input_tokens=100_000, output_tokens=10_000))
+    api.add(Usage("claude-sonnet-5-5", "visual log", input_tokens=50_000, output_tokens=1_000, cache_read_tokens=100_000))
+    api.add(Usage("claude-haiku-5-5", "visual log", input_tokens=200_000, output_tokens=1_000))  # over 100K: the higher price
+    api.add(Usage("some-local-model", "graphics design", input_tokens=5, output_tokens=5))
+    plan.add(Usage("claude-sonnet-5-5 (subscription)", "edit plan", input_tokens=9, output_tokens=9))
+    b = cost_breakdown([api, plan])
+    assert b["by_purpose"]["edit plan"] == pytest.approx(0.4 + 0.2)
+    assert b["by_purpose"]["visual log"] == pytest.approx(0.1 + 0.01 + 0.02 + 0.1 + 0.0025)
+    assert (b["calls"], b["subscription_calls"], b["unpriced_calls"]) == (5, 1, 1)
+    text = describe_cost(b)
+    assert text.startswith("about $0.83 (edit plan $0.60, visual log $0.23)")
+    assert "1 request on your Claude plan" in text and "1 call to a model with no price on file" in text
+
+
+def test_haiku_5_5_gets_effort_haiku_4_5_does_not():
+    import httpx2
+
+    from test_providers import SCHEMA, _anthropic_provider, _sse
+
+    from roughcut.providers import TextPart
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=_sse('{"ok": true}'))
+
+    provider, _ = _anthropic_provider(handler)
+    for model in ("claude-haiku-5-5", "claude-haiku-4-5"):
+        provider.model = model
+        provider.complete_json("s", [TextPart("x")], SCHEMA, schema_name="n", purpose="p")
+    assert seen[0]["output_config"]["effort"] == "high" and "effort" not in seen[1]["output_config"]
+
+
+class _Billed(FakeProvider):
+    """A FakeProvider whose calls show up in the usage log like real API calls."""
+
+    model = "claude-opus-5-5"
+
+    def complete_json(self, system, parts, schema, *, schema_name, purpose, effort=None, max_tokens=64000):
+        from roughcut.providers import Usage
+
+        self.usage.add(Usage(self.model, purpose, input_tokens=10_000, output_tokens=1_000))
+        return super().complete_json(system, parts, schema, schema_name=schema_name, purpose=purpose, effort=effort, max_tokens=max_tokens)
+
+
+def test_the_end_of_a_run_says_what_made_it_in_and_what_it_cost(footage, tmp_path, monkeypatch, capsys):
+    src = tmp_path / "footage"
+    shutil.copytree(footage, src)
+    (src / "half-copied.mov").write_bytes(b"\x00not a movie" * 100)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: _Billed(_graphics_plan()))
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    monkeypatch.setattr(graphics, "_render_one", lambda job: {"id": job["id"], "error": "the renderer crashed", "console": []})
+    out = tmp_path / "out"
+    assert main(["build", str(src), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics"]) == 0
+    printed = capsys.readouterr().out
+    assert "In the cut: visual log 4 of 4 clips" in printed
+    assert "graphics 0 of 1 on the timeline (1 didn't design or render; see Warnings)" in printed
+    assert "1 file couldn't be read (half-copied.mov)" in printed
+    assert "AI usage:   about $0.18 (visual log $0.06, edit plan $0.06, graphics design $0.06)" in printed
+    assert "about $0.18 (visual log $0.06, edit plan $0.06, graphics design $0.06)" in (out / "edit_report.md").read_text()
+
+    capsys.readouterr()
+    assert main(["render", str(out), "--progress-json"]) == 0
+    done = _events(capsys.readouterr().out)[-1]["result"]
+    assert done["graphics"] == {"planned": 1, "placed": 1, "rendered": 0, "note": None}
+    assert done["skipped"] == {"files": [], "plan_refs": 3} and done["usage"] is None  # a render calls no model
+    assert done["visual_log"] == {"described": 4, "total": 4}
+
+
+def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monkeypatch, capsys):
+    from roughcut.providers import ProviderError
+
+    class Broken(FakeProvider):
+        def complete_json(self, *a, **k):
+            if k.get("schema_name") == "edit_plan":
+                raise ProviderError("overloaded")
+            return super().complete_json(*a, **k)
+
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: Broken())
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--graphics", "--progress-json"]) == 3
+    done = _events(capsys.readouterr().out)[-1]["result"]
+    assert done["fell_back"] and done["graphics"]["note"] == "none: AI planning failed"
+    assert "Motion graphics were on, but AI planning failed" in (out / "edit_report.md").read_text()

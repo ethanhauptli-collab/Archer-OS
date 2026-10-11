@@ -203,7 +203,7 @@ class AnthropicProvider:
         anthropic = self._anthropic
         output_config: dict = {"format": {"type": "json_schema", "schema": schema}}
         effort = effort or self.effort
-        if effort and not self.model.startswith("claude-haiku"):  # Haiku 4.5 rejects effort
+        if effort and not self.model.startswith("claude-haiku-4"):  # Haiku 4.5 rejects effort; Haiku 5.5 takes it
             output_config["effort"] = effort
         params = dict(
             model=self.model,
