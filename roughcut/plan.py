@@ -271,7 +271,9 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     plan = Plan(title=str(raw.get("title") or "Rough Cut"), logline=str(raw.get("logline") or ""), source=source)
     used_segments: set[str] = set()
     raw_to_plan: dict[int, int] = {}  # model's section index -> kept section index
-    lines = _UsedLines(analysis)  # the same line from another read or export plays once
+    # The same line from another read or export plays once. Not in the stringout (`render` of a
+    # --provider none run): it plays everything by design, and re-rendering must give the same cut.
+    lines = _UsedLines(analysis, enabled=source != "heuristic")
 
     for s_idx, s_raw in enumerate(raw.get("sections") or []):
         if not isinstance(s_raw, dict):
@@ -380,8 +382,9 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
 class _UsedLines:
     """Lines already in the cut, to catch the same line again from another read or export."""
 
-    def __init__(self, analysis: Analysis):
+    def __init__(self, analysis: Analysis, enabled: bool = True):
         self.analysis = analysis
+        self.enabled = enabled
         self.kept: list[tuple[str, list[str], str, str]] = []  # (segment, words, clip, take group)
         self.replaced: dict[str, str] = {}  # dropped repeat -> the use that was kept
 
@@ -391,6 +394,8 @@ class _UsedLines:
         return line_words(seg.text), clip.id, take_group(clip)
 
     def repeat_of(self, seg_id: str) -> str | None:
+        if not self.enabled:
+            return None
         words, clip_id, group = self._key(seg_id)
         for kept_id, kept_words, kept_clip, kept_group in self.kept:
             # Retakes inside one recording are the planner's call (rule 2); this catches other files.
@@ -400,7 +405,8 @@ class _UsedLines:
         return None
 
     def add(self, seg_id: str) -> None:
-        self.kept.append((seg_id, *self._key(seg_id)))
+        if self.enabled:
+            self.kept.append((seg_id, *self._key(seg_id)))
 
 
 def _parse_item(ref: str, analysis: Analysis, still_seconds: float, warnings: list[str]) -> Item | None:

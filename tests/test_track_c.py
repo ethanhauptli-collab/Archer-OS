@@ -649,3 +649,29 @@ def test_pauses_over_a_music_bed_stay_up_to_a_second(bed, pieces):
     tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
     assert len(tl.spine) == pieces + (0 if bed == "music" else 1)  # S001 and S002 join over music too
     assert kept_length(seg, clip, a, STYLES["loose"])[1] == 0  # loose keeps 1.2 s anyway
+
+
+# ------------------------------------------------------------ review fixes
+
+
+def test_render_of_a_stringout_plays_every_line_again(tmp_path):
+    import json
+
+    from roughcut.pipeline import Options, rerender
+    from roughcut.plan import heuristic_plan
+
+    shared = "Katella Commons opens next summer with twenty acres of parks."
+    p1 = make_clip("V01", seconds=12, sentences=[(1.0, 4.0, "Welcome to the new arena district."), (5.0, 10.0, shared)])
+    p2 = make_clip("V02", seconds=12, sentences=[(1.0, 4.0, "Here is what is coming next year."), (5.0, 10.0, shared)])
+    a = Analysis(clips=[p1, p2])
+    plan = heuristic_plan(a, title="promos (dead air removed)")
+    built = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    refs = [i.ref for s in plan.sections for i in s.items]
+    assert [i.ref for s in normalize(plan.to_json(), a, source="heuristic").sections for i in s.items] == refs
+    a.save(tmp_path / "analysis.json")
+    (tmp_path / "plan.json").write_text(json.dumps({"name": "promos", "plan": plan.to_json(), "raw": None}))
+    again = rerender(tmp_path, Options(inputs=[])).timeline
+    assert [(s.clip_id, s.src_in, s.frames) for s in again.spine] == [(s.clip_id, s.src_in, s.frames) for s in built.spine]
+    assert not [m for m in again.markers if m.value.startswith("ALT")]
+    # A planned cut still plays the shared line once.
+    assert len([i for s in normalize(plan.to_json(), a, source="fake").sections for i in s.items]) == len(refs) - 1
