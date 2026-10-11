@@ -502,7 +502,7 @@ def _run(args, json_mode: bool) -> int:
     for line in summary_lines(result.summary):
         print(line)
     print(f"FCPXML:    {result.fcpxml}")
-    print(f"Report:    {result.report}")
+    print(f"Report:    {result.report.with_suffix('.html')}  (Markdown: {result.report.name})")
     if result.version > 1:
         print(f"This is version {result.version}; earlier cuts are in {result.out_dir / 'history'}.")
     if opened:

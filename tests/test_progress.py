@@ -49,6 +49,8 @@ def test_build_progress_stream(footage, tmp_path, capsys, monkeypatch):
     assert r["title"] == "Mountain Day" and r["sections"][:3] == ["Cold open", "Heading out", "Wrap"]
     assert r["rough_seconds"] > 0 and r["stringout_seconds"] > 0 and r["edits"] > 0 and r["broll"] >= 1
     assert r["fell_back"] is False and any("V09.S001" in w for w in r["warnings"])
+    # result.json in the output folder is the same payload, for a recent-runs list in the app.
+    assert json.loads((out / "result.json").read_text()) == r and Path(r["report_html"]).is_file()
 
 
 def test_render_progress_stream(footage, tmp_path, capsys, monkeypatch):

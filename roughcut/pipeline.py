@@ -18,6 +18,7 @@ from .plan import Plan, heuristic_plan, normalize, plan_schema
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
+from .report_html import report_page
 from .timeline import STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
 from . import versions
@@ -104,7 +105,14 @@ def result_summary(result: Result) -> dict:
         "visual_log": result.summary.get("visual_log"),
         "skipped": result.summary.get("skipped") or {"files": [], "plan_refs": 0},
         "usage": result.summary.get("usage"),
+        "report_html": str(result.report.with_suffix(".html")),
     }
+
+
+def save_result(result: Result) -> Result:
+    """result.json: the done payload, kept with the version it describes (for a recent-runs list)."""
+    atomic_write(result.out_dir / "result.json", json.dumps(result_summary(result), indent=1))
+    return result
 
 
 def run_summary(
@@ -342,6 +350,7 @@ def write_outputs(
     event = event_name(name)
     xml = build_fcpxml(timelines, analysis, event_name=event)
     report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
+    page = report_page(report, title=f"{plan.title} - paper edit", subtitle=f"{rough.name} · event {event}")
     out_dir.mkdir(parents=True, exist_ok=True)
     versions.snapshot(out_dir, before=version)
     fcpxml_path = out_dir / f"{slug(name)} v{version}.fcpxml"
@@ -349,6 +358,7 @@ def write_outputs(
     atomic_write(out_dir / "plan.json", json.dumps({**record, "version": version}, indent=1))
     report_path = out_dir / "edit_report.md"
     atomic_write(report_path, report)
+    atomic_write(out_dir / "edit_report.html", page)
     versions.record(
         out_dir,
         {
@@ -578,10 +588,10 @@ def _finish_build(
         plan, graphics_on=opts.graphics, placed=placed, with_graphics=with_graphics, usage=usage,
         skipped_files=base.get("skipped_files"), visual_log=base.get("visual_log"), graphics_note=graphics_note,
     )
-    return Result(
+    return save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
         version=version, project=rough.name, event=event_name(name), summary=summary,
-    )
+    ))
 
 
 def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None) -> Result:
@@ -632,10 +642,10 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None)
         plan, graphics_on=graphics_on, placed=placed, with_graphics=with_graphics, planned_graphics=planned_graphics, graphics_note=graphics_note,
         visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None,
     )
-    return Result(
+    return save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
         version=version, project=rough.name, event=event_name(name), summary=summary,
-    )
+    ))
 
 
 # ------------------------------------------------------------------ revise

@@ -797,3 +797,93 @@ def test_the_heartbeat_names_the_innermost_step():
             assert progress.current_activity()[0] == "waiting for claude-opus-5-5 (edit plan)"
         assert progress.current_activity()[0] == "planning the edit with opus"
     assert progress._elapsed(370) == "6m10s" and progress._elapsed(42) == "42s"
+
+
+# ---------------------------------------------------------------- T15: readable paper edit and result.json
+
+
+def test_the_paper_edit_converter_handles_what_the_report_writes():
+    from roughcut.report_html import markdown_to_html
+
+    md = "\n".join([
+        "# Trip <script>alert(1)</script>",
+        "",
+        "> **The AI didn't plan this cut.** It's the stringout.",
+        ">",
+        "> AI planning failed: boom",
+        "",
+        "_A day out._",
+        "",
+        "## Chapters",
+        "",
+        "```",
+        "0:00 Cold open",
+        "0:12 The <summit>",
+        "```",
+        "",
+        "### Cold open  `0:00`",
+        "",
+        "- `0:00` **V01.S001** Hello there, broll_2398.mov is_fine  ",
+        "  <sub>talk.mov @ 0:01.0</sub>",
+        "  - B-roll **V02** (broll.mp4) over V01.S001: cover",
+        "- **I01@0-3** visual: photo.png",
+        "",
+        "## Check these",
+        "",
+        "- [ ] V01.S002: cut the restart",
+        "",
+        "| ID | File | Notes |",
+        "|---|---|---|",
+        "| V01 | talk.mov | a / b |",
+    ])
+    page = markdown_to_html(md)
+    assert "<script>" not in page and "&lt;script&gt;" in page  # model and file text is escaped
+    assert "<blockquote><p><strong>The AI didn't plan this cut.</strong> It's the stringout.</p><p>AI planning failed: boom</p></blockquote>" in page
+    assert "<p><em>A day out.</em></p>" in page
+    assert '<pre id="chapter-list">0:00 Cold open\n0:12 The &lt;summit&gt;</pre>' in page and 'id="copy-chapters"' in page
+    assert '<h3 id="cold-open">Cold open  <code>0:00</code></h3>' in page
+    assert "broll_2398.mov is_fine" in page  # underscores in names aren't italics
+    assert "<br><sub>talk.mov @ 0:01.0</sub><ul><li>B-roll <strong>V02</strong>" in page.replace("\n", "")  # nested under its line
+    assert '<li class="todo">' in page and "<td>a / b</td>" in page and "|---" not in page
+
+
+def test_build_writes_a_readable_report_and_result_json(footage, tmp_path, fake):
+    out = tmp_path / "out"
+    result = pipeline.build(_opts(footage, out, tmp_path / "c"))
+    page = (out / "edit_report.html").read_text()
+    assert page.startswith("<!doctype html>") and "@media print" in page and "Copy chapters" in page
+    assert "footage - Rough Cut v1 (medium, fake-model)" in page
+    saved = json.loads((out / "result.json").read_text())
+    assert saved == json.loads(json.dumps(pipeline.result_summary(result)))
+    assert saved["report_html"] == str(out / "edit_report.html")
+    pipeline.rerender(out, Options(inputs=[]))
+    assert json.loads((out / "result.json").read_text())["version"] == 2  # render writes it too
+    assert (next((out / "history").glob("v1 *")) / "result.json").is_file()  # and v1's stays with v1
+
+
+def test_the_report_page_in_a_browser(footage, tmp_path, fake):
+    from roughcut.graphics import launch_browser, renderer_problem
+
+    if renderer_problem() is not None:
+        pytest.skip("no browser")
+    from playwright.sync_api import sync_playwright
+
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c"))
+    chapters = (out / "edit_report.md").read_text().split("## Chapters\n\n```\n")[1].split("\n```")[0]
+    with sync_playwright() as p:
+        browser = launch_browser(p)
+        try:
+            for width in (1000, 390):
+                page = browser.new_page(viewport={"width": width, "height": 900})
+                page.goto((out / "edit_report.html").as_uri())
+                shot = tmp_path / f"report-{width}.png"
+                page.screenshot(path=str(shot), full_page=True)
+                assert shot.stat().st_size > 20_000
+                assert page.evaluate("document.documentElement.scrollWidth") <= width  # no sideways scrolling on a phone
+                page.click("#copy-chapters")
+                assert page.evaluate("window.getSelection().toString()") == chapters
+                assert page.inner_text("#copy-chapters") in ("Copied", "Selected: press ⌘C")
+                page.close()
+        finally:
+            browser.close()
