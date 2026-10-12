@@ -161,15 +161,13 @@ def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None 
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(texts):
-        run = next((r for r in kept if _same(bare[i : i + len(r)], r)), None)
-        if run is not None:
-            i += len(run)  # spelled by a pair still in force: left as it is
-            continue
+        # Spelled by a pair still in force: left as it is, unless a longer name starts here.
+        guard = next((len(r) for r in kept if _same(bare[i : i + len(r)], r)), 0)
         for name, right, correct, possessive, own_period in fixes:
-            if len(right) > len(name) and _same(bare[i : i + len(right)], right):
+            if len(right) > max(len(name), guard) and _same(bare[i : i + len(right)], right):
                 i += len(right)  # already spelled out: "Golden Hour Bar" for "Golden Hour"
                 break
-            if _same(bare[i : i + len(name)], name):
+            if len(name) > guard and _same(bare[i : i + len(name)], name):
                 j = i + len(name)
                 lead = re.match(r"\W*", texts[i]).group()  # an opening quote mark or bracket
                 last = texts[j - 1]
@@ -183,7 +181,7 @@ def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None 
                 i = j
                 break
         else:
-            i += 1
+            i += guard or 1
     return out
 
 

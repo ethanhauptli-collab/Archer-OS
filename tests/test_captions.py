@@ -253,6 +253,10 @@ def test_undoing_a_spelling_leaves_a_longer_name_that_is_still_spelled_alone():
     undone = captions.respell(shown, [{"heard": "Choi", "correct": "Choy"}], keep=keep)
     assert undone == "Kogi by Roy Choi rules, says Roy Choy."
     assert captions.respell(undone, keep) == undone  # not "Kogi by Roy Choi by Roy Choy"
+    # A shorter name in force where a longer undone one starts doesn't stop the undo: "Kogi" stays spelled, by its pair.
+    keep = [{"heard": "kogi", "correct": "Kogi"}]
+    undone = captions.respell("Kogi BBQ Co. rules", [{"heard": "Kogi BBQ Co.", "correct": "kogi bbq"}], keep=keep)
+    assert undone == "kogi bbq rules" and captions.respell(undone, keep) == "Kogi bbq rules"
     # Through the plan's graphics, as a revision applies them.
     from roughcut.plan import GraphicSpec, respell_graphics
 
