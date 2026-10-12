@@ -136,6 +136,20 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(RecutOptions(outputFolder: folder, format: .custom("1080x1920@29.97")).arguments(), base + ["--format=1080x1920@29.97"])
     }
 
+    func testRecutCanTurnPunchInsOnOrOff() {
+        // An Auto build that misread its brief could only lose its punch-ins by hand in Final Cut, or a billed re-plan.
+        let folder = URL(fileURLWithPath: "/tmp/Promo_roughcut")
+        let base = ["render", "/tmp/Promo_roughcut", "--progress-json"]
+        XCTAssertEqual(RecutOptions(outputFolder: folder, style: .tight, punchIn: false).arguments(), base + ["--style", "tight", "--no-punch-in"])
+        XCTAssertEqual(RecutOptions(outputFolder: folder, punchIn: true).arguments(), base + ["--punch-in"])
+        XCTAssertEqual(RecutOptions(outputFolder: folder, style: .medium).arguments(), base + ["--style", "medium"])  // as the cut has them
+        // The picker's first row says what the cut has.
+        XCTAssertEqual(RecutOptions.samePunchInTitle(CutSettings(style: "tight", punchIn: true)), "Same as this cut (On)")
+        XCTAssertEqual(RecutOptions.samePunchInTitle(CutSettings(style: "tight", punchIn: false)), "Same as this cut (Off)")
+        XCTAssertEqual(RecutOptions.samePunchInTitle(CutSettings(style: "tight")), "Same as this cut")  // an older CLI
+        XCTAssertEqual(RecutOptions.samePunchInTitle(nil), "Same as this cut")
+    }
+
     func testRecutPickerStartsFromTheCut() {
         let vertical = CutSettings(style: "tight", format: "vertical", keepFillers: true, stringout: false)
         XCTAssertEqual(RecutOptions.sameFormatTitle(vertical), "Same as this cut (Vertical 9:16)")

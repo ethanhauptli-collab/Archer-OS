@@ -438,13 +438,16 @@ public struct RecutOptions: Equatable, Sendable {
     public var format: SequenceFormat?
     public var keepFillers: Bool?
     public var stringout: Bool?
+    /// Punch-ins on jump cuts: On or Off, or nil for as the cut has them (an Auto build read them from its brief).
+    public var punchIn: Bool?
 
-    public init(outputFolder: URL, style: CutStyle? = nil, format: SequenceFormat? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil) {
+    public init(outputFolder: URL, style: CutStyle? = nil, format: SequenceFormat? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil, punchIn: Bool? = nil) {
         self.outputFolder = outputFolder
         self.style = style
         self.format = format
         self.keepFillers = keepFillers
         self.stringout = stringout
+        self.punchIn = punchIn
     }
 
     public func arguments() -> [String] {
@@ -461,6 +464,9 @@ public struct RecutOptions: Equatable, Sendable {
         if let stringout {
             args.append(stringout ? "--stringout" : "--no-stringout")
         }
+        if let punchIn {
+            args.append(punchIn ? "--punch-in" : "--no-punch-in")
+        }
         return args
     }
 
@@ -468,6 +474,12 @@ public struct RecutOptions: Equatable, Sendable {
     public static func sameFormatTitle(_ cut: CutSettings?) -> String {
         guard let cut else { return "Same as this cut" }
         return "Same as this cut (\(cut.sequenceFormat.title))"
+    }
+
+    /// The Re-cut punch-ins picker's first row, which keeps them as the cut has them.
+    public static func samePunchInTitle(_ cut: CutSettings?) -> String {
+        guard let on = cut?.punchIn else { return "Same as this cut" }
+        return "Same as this cut (\(on ? "On" : "Off"))"
     }
 
     /// The pace Re-cut offers first: the other one from the cut's own (tight gets medium, the rest tight).

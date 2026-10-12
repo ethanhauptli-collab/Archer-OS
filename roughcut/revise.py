@@ -321,10 +321,12 @@ def describe_changes(previous: Plan, revised: Plan, analysis: Analysis, *, befor
     return [head, ""] + L
 
 
-def report_block(notes: str, earlier: list[str], changes: list[str], missing_keeps: list[str]) -> list[str]:
-    """Markdown for the top of the paper edit."""
+def report_block(notes: str, earlier: list[str], changes: list[str], missing_keeps: list[str], settings_notes: list[str] | None = None) -> list[str]:
+    """Markdown for the top of the paper edit. `settings_notes`: what the notes asked for that's a cut setting, and how to change it."""
     L = ["## Revision notes", ""]
     L += [f"> {line}" if line.strip() else ">" for line in (notes.strip() or "(no notes)").splitlines()] + [""]
+    for n in settings_notes or []:
+        L += [f"**{n}**", ""]
     if missing_keeps:
         one = len(missing_keeps) == 1
         L += [f"**You asked to keep {', '.join(missing_keeps)}, but the revision left {'it' if one else 'them'} out.** "

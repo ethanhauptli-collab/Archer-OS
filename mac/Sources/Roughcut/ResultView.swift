@@ -7,6 +7,8 @@ struct ResultView: View {
     @State private var recutStyle: CutStyle = .tight
     /// Nil keeps this cut's own format (a vertical cut stays vertical).
     @State private var recutFormat: SequenceFormat? = nil
+    /// Nil keeps this cut's punch-ins as they are.
+    @State private var recutPunchIn: Bool? = nil
     @State private var showWarnings = false
 
     private var notesAreEmpty: Bool {
@@ -143,9 +145,16 @@ struct ResultView: View {
                             }
                         }
                         .frame(maxWidth: 260)
+                        Picker("Punch-ins", selection: $recutPunchIn) {
+                            Text(RecutOptions.samePunchInTitle(result.cut)).tag(Optional<Bool>.none)
+                            Text("On").tag(Optional(true))
+                            Text("Off").tag(Optional(false))
+                        }
+                        .frame(maxWidth: 240)
+                        .help("A 112% zoom alternating at each jump cut no B-roll covers.")
                         Spacer()
                         Button("Re-cut") {
-                            model.recut(result, style: recutStyle, format: recutFormat)
+                            model.recut(result, style: recutStyle, format: recutFormat, punchIn: recutPunchIn)
                         }
                     }
                     .padding(4)
@@ -226,11 +235,13 @@ struct ResultView: View {
         .onAppear {
             recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
             recutFormat = nil
+            recutPunchIn = nil
             model.reviseProvider = ReviseOptions.planner(model.reviseProvider, form: model.options, doctor: model.doctor)
         }
         .onChange(of: result) {
             recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
             recutFormat = nil
+            recutPunchIn = nil
         }
     }
 }

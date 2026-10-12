@@ -42,7 +42,7 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNotNil(result.skipped)
         XCTAssertTrue(result.reportHtml?.hasSuffix(".html") ?? false)
         // What a re-cut keeps unless it changes it (Re-cut's "Same as this cut").
-        XCTAssertEqual(result.cut, CutSettings(style: "medium", format: nil, keepFillers: false, stringout: true))
+        XCTAssertEqual(result.cut, CutSettings(style: "medium", format: nil, keepFillers: false, stringout: true, punchIn: false))
         XCTAssertEqual(result.cut?.sequenceFormat, .auto)
         XCTAssertFalse(result.madeWithoutAI)
         XCTAssertEqual(result.captionsURL?.lastPathComponent, "Trip v1.srt")  // beside "Trip v1.fcpxml"

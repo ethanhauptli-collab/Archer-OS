@@ -95,7 +95,7 @@ class Result:
         return path if path.is_file() else None
 
 
-CUT_SETTINGS = ("style", "format", "keep_fillers", "stringout")  # result_summary's "cut"
+CUT_SETTINGS = ("style", "format", "keep_fillers", "stringout", "punch_in")  # result_summary's "cut"
 
 
 def result_summary(result: Result) -> dict:
@@ -336,25 +336,24 @@ _LOOSE = re.compile(
 )
 
 
-def _pace(text: str, whose: str) -> tuple[str, str] | None:
-    """What this text says about pacing, or None when it says nothing."""
+def _pace(text: str) -> tuple[str, str | None] | None:
+    """What this text says about pacing: (style, the words that say it; None when it asks for both), or None for nothing."""
     for m in _PACE_SAID.finditer(text):
         if not _turned_down(text, m):
             said = (m.group(1) or m.group(2)).lower()
-            return _PACE_WORDS.get(said, said), f'{whose} says "{m.group(0).strip()}"'
+            return _PACE_WORDS.get(said, said), m.group(0).strip()
     tight, loose = _cues(_TIGHT, text), _cues(_LOOSE, text)
     asked_tight = [m for m, down in tight if not down]
     asked_loose = [m for m, down in loose if not down]
     if asked_tight and not asked_loose:
-        return "tight", f'{whose} says "{asked_tight[0].group(0).strip()}"'
+        return "tight", asked_tight[0].group(0).strip()
     if asked_loose and not asked_tight:
-        return "loose", f'{whose} says "{asked_loose[0].group(0).strip()}"'
+        return "loose", asked_loose[0].group(0).strip()
     if asked_tight and asked_loose:
-        return "medium", f"{whose} asks for both tight and loose pacing"
+        return "medium", None
     if tight or loose:
         m = (tight + loose)[0][0]
-        said = " ".join((_clause_before(text, m.start()) + m.group(0)).split()[-6:])
-        return "medium", f'{whose} says "{said}"'
+        return "medium", " ".join((_clause_before(text, m.start()) + m.group(0)).split()[-6:])
     return None
 
 
@@ -370,9 +369,10 @@ def style_from_brief(brief: str, preset_brief: str = "") -> tuple[str, str]:
     `preset_brief`: the preset's part of the brief. Your own words decide first; the preset's only when yours say nothing about pace.
     """
     for text, whose in ((_own_words(brief, preset_brief), "the brief"), (preset_brief, "the preset's brief")):
-        found = _pace(text or "", whose)
+        found = _pace(text or "")
         if found:
-            return found
+            style, said = found
+            return style, f'{whose} says "{said}"' if said else f"{whose} asks for both tight and loose pacing"
     return "medium", "the default; the brief doesn't ask for tight or loose pacing"
 
 
@@ -445,6 +445,31 @@ _GRAPHICS = re.compile(
 def graphics_from_brief(brief: str) -> str:
     """The words in the brief that ask for graphics ("" if none; "no graphics" doesn't count)."""
     return next((m.group(0) for m, down in _cues(_GRAPHICS, brief or "") if not down), "")
+
+
+def notes_about_cut_settings(notes: str, opts: Options, out_dir: Path) -> list[str]:
+    """Revise notes that ask for another pacing, punch-ins or graphics while they're off: the planner can't
+    change those (they're cut settings), so say so and how, instead of letting the request vanish."""
+    folder = shlex.quote(str(out_dir))
+    out = []
+    pace = _pace(notes or "")
+    if pace and pace[1] and pace[0] != opts.style:
+        out.append(
+            f'Your notes ask for {pace[0]} pacing ("{pace[1]}"), but notes change which lines play, not the pacing, so this version '
+            f"is still {opts.style}. Re-cut it at {pace[0].capitalize()} (no AI call), or `roughcut render {folder} --style {pace[0]}`."
+        )
+    asked, words = read_punch_in(notes)
+    if asked is not None and asked != bool(opts.punch_in):
+        out.append(
+            f'Your notes ask for {"punch-ins" if asked else "no punch-ins"} ("{words}"), but notes don\'t change punch-ins, a cut setting. '
+            f'Re-cut it with Punch-ins {"On" if asked else "Off"} (no AI call), or `roughcut render {folder} {"--punch-in" if asked else "--no-punch-in"}`.'
+        )
+    if not opts.graphics and (asked_graphics := graphics_from_brief(notes)):
+        out.append(
+            f'Your notes ask for graphics ("{asked_graphics}"), but motion graphics are off for this cut, so the revision has none. '
+            f"Revise with them on: `roughcut revise {folder} --graphics` and the same notes."
+        )
+    return out
 
 
 def graphics_off_note(opts: Options, out_dir: Path, *, made_without_ai: bool) -> str | None:
@@ -1421,6 +1446,10 @@ def revise(
             raise RoughcutError(problem)
     extra_warnings: list[str] = []
     opts = replace(opts, graphics_logo=_saved_logo(settings, extra_warnings if opts.graphics else []))
+    settings_notes = notes_about_cut_settings(notes, opts, out_dir)
+    for note in settings_notes:
+        log(note)
+    extra_warnings += settings_notes
     measure_missing_levels(analysis, opts)
 
     revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
@@ -1503,7 +1532,7 @@ def revise(
 
     def report_extra(rough: Timeline) -> dict:
         changes = describe_changes(previous, plan, analysis, before_seconds=before_seconds, after_seconds=rough.seconds, previous_version=prev_n)
-        return {"revision": report_block(notes, [h["notes"] for h in history], changes, enforced.missing_keeps)}
+        return {"revision": report_block(notes, [h["notes"] for h in history], changes, enforced.missing_keeps, settings_notes)}
 
     try:
         return _finish_build(

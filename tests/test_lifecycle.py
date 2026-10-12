@@ -450,6 +450,37 @@ def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_pa
     assert saved["settings"]["context"] == "Family trip" and saved["revision_of"] == 1
 
 
+def test_revise_notes_about_pacing_or_punch_ins_say_how_to_change_them(footage, tmp_path, fake, shared_cache):
+    # The planner can't change cut settings, so notes asking for them used to vanish without a word.
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, context="Family trip"))
+    result = pipeline.revise(out, "Make it looser, let it breathe, and punch in on the jump cuts.", Options(inputs=[]))
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("medium", False), "notes don't change cut settings"
+    pace = next(w for w in result.warnings if w.startswith("Your notes ask for loose pacing"))
+    punch = next(w for w in result.warnings if w.startswith("Your notes ask for punch-ins"))
+    assert '("looser")' in pace and "Re-cut" in pace and f"roughcut render {out} --style loose" in pace
+    assert '("punch in")' in punch and "Punch-ins On" in punch and f"roughcut render {out} --punch-in" in punch
+    block = result.report.read_text().split("## Revision notes")[1].split("Changes from v1")[0]
+    assert pace in block and punch in block, "in the revision block, next to the notes"
+    assert pace in (out / "roughcut.log").read_text()
+
+    # Notes about the lines, or already true of the cut, say nothing.
+    for notes in ("tighter hook, drop the second interview line, more drone over the intro", "the punch-in on V03 looks soft, lose it",
+                  "Keep it medium paced.", "No punch-ins."):
+        result = pipeline.revise(out, notes, Options(inputs=[]))
+        assert not [w for w in result.warnings if w.startswith("Your notes ask for")], notes
+    # Graphics asked for while they're off: say how to turn them on.
+    result = pipeline.revise(out, "Add a lower third for Maria.", Options(inputs=[]))
+    note = next(w for w in result.warnings if w.startswith("Your notes ask for graphics"))
+    assert "--graphics" in note
+    # What the note says to do works, and the app's Re-cut sees the result.
+    assert main(["render", str(out), "--punch-in"]) == 0
+    assert json.loads((out / "result.json").read_text())["cut"]["punch_in"] is True
+    assert main(["render", str(out), "--style", "loose"]) == 0
+    assert json.loads((out / "result.json").read_text())["cut"] == {"style": "loose", "format": None, "keep_fillers": False, "stringout": True, "punch_in": True}
+
+
 def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache))
@@ -634,7 +665,7 @@ def test_revise_progress_stream_for_the_app(footage, tmp_path, fake, capsys, sha
     done = events[-1]["result"]
     assert done["version"] == 2 and done["stringout_seconds"] is None and done["project"].startswith("footage - Rough Cut v2")
     # A revision writes no stringout, but a re-cut of it still makes one: "cut" is what a re-cut keeps.
-    assert done["cut"] == {"style": "medium", "format": None, "keep_fillers": False, "stringout": True}
+    assert done["cut"] == {"style": "medium", "format": None, "keep_fillers": False, "stringout": True, "punch_in": False}
 
 
 def test_the_apps_revise_of_a_cut_made_without_ai_uses_the_planner_it_names(footage, tmp_path, capsys, monkeypatch, shared_cache):
@@ -1165,7 +1196,7 @@ def test_the_apps_recut_keeps_this_cuts_settings_unless_it_says_otherwise(footag
     assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none",
                  "--cache-dir", str(shared_cache), "--format", "vertical", "--keep-fillers", "--no-stringout", "--progress-json"]) == 0
     done = _events(capsys.readouterr().out)[-1]["result"]
-    assert done["cut"] == {"style": "medium", "format": "vertical", "keep_fillers": True, "stringout": False}
+    assert done["cut"] == {"style": "medium", "format": "vertical", "keep_fillers": True, "stringout": False, "punch_in": False}
 
     def recut(*flags: str) -> tuple[dict, dict]:
         assert main(["render", str(out), "--progress-json", *flags]) == 0
@@ -1177,7 +1208,7 @@ def test_the_apps_recut_keeps_this_cuts_settings_unless_it_says_otherwise(footag
     done, settings = recut("--style", "tight")
     assert done["project"] == "footage - Rough Cut v2 (tight, vertical, no AI)" and done["stringout_seconds"] is None
     assert (settings["format"], settings["keep_fillers"], settings["stringout"]) == ("vertical", True, False)
-    assert done["cut"] == {"style": "tight", "format": "vertical", "keep_fillers": True, "stringout": False}
+    assert done["cut"] == {"style": "tight", "format": "vertical", "keep_fillers": True, "stringout": False, "punch_in": False}
 
     # "Finish without AI" sends only the folder: the saved settings, like `roughcut render <folder>` in Terminal.
     done, _ = recut()
@@ -1187,7 +1218,7 @@ def test_the_apps_recut_keeps_this_cuts_settings_unless_it_says_otherwise(footag
     done, settings = recut("--style", "tight", "--format", "auto", "--no-keep-fillers", "--stringout")
     assert done["project"] == "footage - Rough Cut v4 (tight, no AI)" and done["stringout_seconds"] is not None
     assert (settings["format"], settings["keep_fillers"], settings["stringout"]) == (None, False, True)
-    assert done["cut"] == {"style": "tight", "format": None, "keep_fillers": False, "stringout": True}
+    assert done["cut"] == {"style": "tight", "format": None, "keep_fillers": False, "stringout": True, "punch_in": False}
 
     # A format the picker doesn't list (a preset's WxH@fps) goes through as typed.
     done, settings = recut("--style", "loose", "--format=1080x1920@29.97")
@@ -1199,6 +1230,13 @@ def test_the_apps_recut_keeps_this_cuts_settings_unless_it_says_otherwise(footag
     assert main(["render", str(out), "--format", "auto"]) == 0
     projects = check_invariants(next(out.glob("*.fcpxml")))
     assert "footage - Rough Cut v7 (loose, no AI)" in projects
+
+    # Punch-ins On, then a pacing change with Punch-ins "Same as this cut": they stay on.
+    capsys.readouterr()
+    done, settings = recut("--style", "tight", "--punch-in")
+    assert done["cut"]["punch_in"] is True and settings["punch_in"] is True
+    done, _ = recut("--style", "medium")
+    assert done["cut"]["punch_in"] is True
 
 
 def test_a_run_started_with_nohup_survives_the_terminal_closing():

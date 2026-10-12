@@ -130,11 +130,11 @@ final class AppModel {
         run(cli: cli, arguments: options.arguments(), kind: .build)
     }
 
-    /// Re-cut at `style`; `format` nil keeps the cut's own. Fillers and the stringout stay as the cut has them
+    /// Re-cut at `style`; `format` and `punchIn` nil keep the cut's own. Fillers and the stringout stay as the cut has them
     /// (the build form's toggles belong to the next build, not to this cut).
-    func recut(_ result: RunResult, style: CutStyle, format: SequenceFormat?) {
+    func recut(_ result: RunResult, style: CutStyle, format: SequenceFormat?, punchIn: Bool? = nil) {
         guard let cli = resolveCLI() else { return }
-        let recut = RecutOptions(outputFolder: result.outDirURL, style: style, format: format)
+        let recut = RecutOptions(outputFolder: result.outDirURL, style: style, format: format, punchIn: punchIn)
         run(cli: cli, arguments: recut.arguments(), kind: .recut, from: result)
     }
 

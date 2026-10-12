@@ -107,12 +107,15 @@ public struct CutSettings: Codable, Equatable, Sendable {
     public var format: String?
     public var keepFillers: Bool?
     public var stringout: Bool?
+    /// Punch-ins on jump cuts; nil from CLIs before Re-cut could change them.
+    public var punchIn: Bool?
 
-    public init(style: String? = nil, format: String? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil) {
+    public init(style: String? = nil, format: String? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil, punchIn: Bool? = nil) {
         self.style = style
         self.format = format
         self.keepFillers = keepFillers
         self.stringout = stringout
+        self.punchIn = punchIn
     }
 
     public var cutStyle: CutStyle? { style.flatMap(CutStyle.init(rawValue:)) }

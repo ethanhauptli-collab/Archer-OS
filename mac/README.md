@@ -40,7 +40,7 @@ While a run is going the Mac doesn't idle-sleep. When it ends while you're in an
 
 The result screen shows the version, the project and event to open in Final Cut, how many graphics made it, how many clips were looked at, what the AI cost, and anything left out. From there:
 
-- **Re-cut** runs `roughcut render`: the same plan at a different pace or format, with no model call.
+- **Re-cut** runs `roughcut render`: the same plan at a different pace or format, or with punch-ins on or off, with no model call.
 - **Revise with notes** runs `roughcut revise`: Claude re-plans from your notes as the next version, and the earlier cut stays in `history/`.
 - **Paper Edit** opens the printable paper edit.
 
@@ -57,7 +57,7 @@ If a run stops after the plan was saved, the error offers **Finish without AI**.
 | `Tests/RoughcutKitTests/Fixtures/progress-sample.jsonl` | Real CLI output. `tests/test_progress.py` in the Python suite fails if the CLI's output drifts from it. |
 | `scripts/build-app.sh` | Packages the SwiftPM executable as a signed (ad-hoc) `.app` with an icon. It also records this repo's CLI path in `Info.plist`. |
 
-**Re-cut** in the result screen runs `roughcut render`: the same plan at a different pace or format, with no model call. Format starts at **Same as this cut**, so a vertical cut stays vertical; pick **Match footage** to go back to the footage's own shape. Keep um/uh and the Stringout stay as the cut has them (the build form's toggles are for the next build). **Finish without AI** runs `roughcut render <folder>` with the run's own settings, as the CLI's hint says.
+**Re-cut** in the result screen runs `roughcut render`: the same plan at a different pace or format, with no model call. Format starts at **Same as this cut**, so a vertical cut stays vertical; pick **Match footage** to go back to the footage's own shape. **Punch-ins** also starts at **Same as this cut** (it says whether the cut has them); On or Off changes them, e.g. when Auto read the brief differently from what you meant. Revise notes don't change pacing or punch-ins: a note asking for them gets a line in the result's warnings and the paper edit pointing here. Keep um/uh and the Stringout stay as the cut has them (the build form's toggles are for the next build). **Finish without AI** runs `roughcut render <folder>` with the run's own settings, as the CLI's hint says.
 
 **Revise** re-plans the cut from your notes. A cut made without AI (provider None) has no planner to reuse, so the box asks which one re-plans it: Claude through your plan (Claude Code) or your API key, or the form's OpenAI/Ollama model. If a revision or re-cut stops (plan limit, error, Cancel), the window goes back to the cut with your notes still in the box and says what happened; **Finish without AI** appears there when the new plan was saved.
 
