@@ -99,21 +99,29 @@ def _bare(word: str) -> tuple[str, str]:
 
 _PUNCT = ".,;:!?…"
 _POSSESSIVE = re.compile(r"['\u2019][sS]$")
+# The last word of a name whose period is its own: "Jr.", "Inc.", "St.", "U.S.".
+_ABBREVIATION = re.compile(r"(?:^|\s)(?:\S*\.\S+|Jr|Sr|Inc|Co|Ltd|St|Mt|Dr|Mr|Mrs|Ms)\.$", re.IGNORECASE)
+
+
+def _unpunctuated(text: str) -> str:
+    """`text` without the punctuation after it, except an abbreviation's period ("Roy Choi Jr.")."""
+    bare = text.rstrip(_PUNCT).rstrip()
+    return bare + "." if text[len(bare):].lstrip().startswith(".") and _ABBREVIATION.search(bare + ".") else bare
 
 
 def clean_spelling(heard: str, correct: str) -> tuple[str, str]:
-    """A name fix without what the planner copied from the transcript around the name: the punctuation
-    after it ("Marco Belini." -> "Marco Bellini.") and a possessive ("Gina Rousseau's" -> "Gina Russo's").
-    Those are the transcript's, and each caption keeps its own."""
-    heard, correct = heard.strip(), correct.strip()
-    if heard.rstrip(_PUNCT) != heard:  # copied with the punctuation after it: so was correct
-        heard, correct = heard.rstrip(_PUNCT).rstrip(), correct.rstrip(_PUNCT).rstrip()
-    correct = correct.rstrip(",;:").rstrip()  # never part of a name
+    """A name fix without what the planner copied from the transcript around the name, on either side: the
+    punctuation after it ("Marco Belini." -> "Marco Bellini.") and a possessive ("Gina Rousseau's" -> "Gina
+    Russo's", "Roy Choy" -> "Roy Choi's"). Those are the transcript's, and each caption keeps its own."""
+    heard, correct = _unpunctuated(heard.strip()), _unpunctuated(correct.strip())
     if _POSSESSIVE.search(heard) and correct:
         if _POSSESSIVE.search(correct):
             heard, correct = heard[:-2], correct[:-2]
         elif _bare(correct.split()[-1])[0] != _bare(heard.split()[-1])[0] + "s":  # unless it's the name: "Wahoo's" -> "Wahoos"
             heard = heard[:-2]
+    elif _POSSESSIVE.search(correct) and heard:
+        if _bare(correct.split()[-1])[0] + "s" != _bare(heard.split()[-1])[0]:  # unless it's the name: "Trader Joes" -> "Trader Joe's"
+            correct = _unpunctuated(correct[:-2])
     return heard, correct
 
 
@@ -128,7 +136,7 @@ def _same(run: list[tuple[str, str]], name: list[tuple[str, str]]) -> bool:
 
 def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, str]]:
     """Each misheard name in `texts` (one word each): (its first word, past its last, the name as the brief
-    spells it, with the punctuation after it and a possessive the transcript gives it)."""
+    spells it, with a possessive the transcript gives it and what's around it: quote marks, brackets, punctuation)."""
     from .transcribe import FILLERS
 
     fixes = []
@@ -148,10 +156,13 @@ def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, 
                 i += len(right)  # already spelled out: "Golden Hour Bar" for "Golden Hour"
                 break
             if _same(bare[i : i + len(name)], name):
+                lead = re.match(r"\W*", texts[i]).group()  # an opening quote mark or bracket
                 last = texts[i + len(name) - 1]
-                text = correct + (("\u2019s" if "\u2019" in last else "'s") if possessive and bare[i + len(name) - 1][1] else "")
-                punct = last[len(last.rstrip(_PUNCT)):]
-                out.append((i, i + len(name), text if text.endswith(punct) else text + punct))
+                tail = re.search(r"\W*$", last).group()  # punctuation, a closing quote mark or bracket
+                said = last[: len(last) - len(tail)]
+                text = correct + (said[-2] + "s" if possessive and _POSSESSIVE.search(said) else "")  # its own apostrophe
+                tail = tail[next((k for k in range(len(tail), 0, -1) if text.endswith(tail[:k])), 0) :]  # "Jr." then ".": once
+                out.append((i, i + len(name), lead + text + tail))
                 i += len(name)
                 break
         else:
@@ -160,21 +171,32 @@ def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, 
 
 
 def respell(text: str, spellings: list[dict]) -> str:
-    """`text` with each misheard name ("Roy Choy") spelled as the brief spells it ("Roy Choi")."""
-    words = text.split()
+    """`text` with each misheard name ("Roy Choy") spelled as the brief spells it ("Roy Choi"), its line breaks kept."""
+    parts = re.split(r"(\s+)", text)
+    words, gaps = parts[0::2], parts[1::2] + [""]  # each word and the space after it
     found = _respelled(words, spellings)
     if not found:
         return text
     out, at = [], 0
     for i, j, name in found:
-        out += words[at:i] + [name]
+        out += [w + g for w, g in zip(words[at:i], gaps[at:i])] + [name + gaps[j - 1]]
         at = j
-    return " ".join(out + words[at:])
+    return "".join(out + [w + g for w, g in zip(words[at:], gaps[at:])])
+
+
+def respell_timed(words: list[tuple[str, float]], spellings: list[dict]) -> list[tuple[str, float]]:
+    """(word, seconds) with each misheard name as one entry, spelled as the brief spells it, at its first word's time."""
+    out: list[tuple[str, float]] = []
+    at = 0
+    for i, j, name in _respelled([w for w, _ in words], spellings):
+        out += words[at:i] + [(name, words[i][1])]
+        at = j
+    return out + words[at:]
 
 
 def fix_names(words: list[_Word], spellings: list[dict]) -> list[_Word]:
     """Words with each misheard name ("Roy Choy") replaced by its spelling ("Roy Choi"): one caption word,
-    so a line never breaks inside it, keeping the run's timing and its punctuation or possessive."""
+    so a line never breaks inside it, keeping the run's timing, its possessive and the quote marks or punctuation around it."""
     out: list[_Word] = []
     at = 0
     for i, j, name in _respelled([w.text for w in words], spellings):

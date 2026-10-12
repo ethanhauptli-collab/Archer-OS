@@ -74,8 +74,9 @@ dropped).
 10. Spellings: the transcript is speech recognition and often misspells names. When the brief, \
 script or file names spell a name the transcript gets wrong (a person, business, place or brand), \
 add {"heard": the name exactly as the transcript has it, without a possessive 's or punctuation \
-after it, "correct": the right spelling}. They fix the captions and the names in graphics' text \
-and subtext; a graphic's words stay as the transcript has them. Only names you can confirm from \
+after it, "correct": the right spelling of the same words, also without a possessive 's or \
+punctuation after it}. They fix the captions and the names in graphics' text and subtext; a \
+graphic's words stay as the transcript has them. Only names you can confirm from \
 what you were given; never guess.
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \

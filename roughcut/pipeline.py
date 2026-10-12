@@ -932,7 +932,7 @@ def _finish_build(
             designer = StopAtLimit(provider)
             with progress.doing(f"making {len(plan.graphics)} motion graphics (design, then render)"):
                 if carry is not None:
-                    saved_html, house = _carry_designs(designer, plan.graphics, rough, analysis, carry, opts, extra_warnings, out_dir)
+                    saved_html, house = _carry_designs(designer, plan.graphics, rough, analysis, carry, opts, extra_warnings, out_dir, plan.spellings)
                     g_clips, placed, g_warnings = graphics.make(
                         None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
                         saved_html=saved_html, house_style=house,
@@ -940,7 +940,7 @@ def _finish_build(
                 else:
                     g_clips, placed, g_warnings = graphics.make(
                         designer, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
-                        logo=opts.graphics_logo, look=opts.graphics_look,
+                        logo=opts.graphics_logo, look=opts.graphics_look, spellings=plan.spellings,
                     )
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
@@ -1018,6 +1018,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         asked = {missing_keep_note(str(k)) for k in (revisions[-1].get("keep") or [] if revisions else [])}
         plan.flags += [f for f in saved["plan"].get("flags") or [] if isinstance(f, dict) and f.get("note") in asked and f not in plan.flags]
     plan.spellings = _saved_spellings(saved, plan.spellings)  # a revision's, with the ones it carried over
+    _shown_texts(plan.graphics, saved)
     respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
@@ -1069,6 +1070,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                         html, house = _design_new(
                             designer, missing, html, rough, analysis, house, warnings=graphics_warnings, brief=str(settings.get("context") or ""),
                             style=style, logo=_saved_logo(settings, graphics_warnings), look=tuple(str(p) for p in settings.get("graphics_look") or ()),
+                            spellings=plan.spellings,
                         )
                     limit_hit = designer.limit
                 else:
@@ -1203,7 +1205,25 @@ def undesigned(out_dir: Path) -> int:
 def _saved_spellings(saved: dict, fallback: list[dict]) -> list[dict]:
     """The name spellings a saved version used: its plan's, which hold the ones a revision carried over."""
     found = saved.get("plan", {}).get("spellings")
-    return [dict(f) for f in found if isinstance(f, dict)] if isinstance(found, list) else list(fallback)
+    if not isinstance(found, list):
+        return list(fallback)
+    # A hand-edited plan.json may hold anything: only whole pairs count.
+    return [
+        dict(f) for f in found
+        if isinstance(f, dict) and all(isinstance(f.get(k), str) and f[k].strip() for k in ("heard", "correct"))
+    ]
+
+
+def _shown_texts(specs: list, saved: dict) -> None:
+    """Graphics re-made from the model's plan, with the text and subtext the saved version gave them: a revision
+    that undid a name spelling took it off them, and the model's own plan still has it."""
+    shown: dict[tuple, list] = {}
+    for g in _saved_graphics(saved):
+        shown.setdefault((g.kind, g.segment, g.words), []).append(g)
+    for g in specs:
+        kept = (shown.get((g.kind, g.segment, g.words)) or [None]).pop(0)
+        if kept is not None and kept.text:
+            g.text, g.subtext = kept.text, kept.subtext
 
 
 def _saved_graphics(saved: dict) -> list:
@@ -1258,6 +1278,7 @@ def _saved_provider(settings: dict, source: str) -> Provider:
 def _design_new(
     provider, new: list, saved_html: dict[int, str], rough: Timeline, analysis: Analysis, house: str, *,
     warnings: list[str], brief: str, style: str, logo: str | None, look: tuple[str, ...], sample: str | None = None,
+    spellings: list[dict] | None = None,
 ) -> tuple[dict[int, str], str]:
     """Design the placed graphics `new` in the look of the ones already made. Returns (html by plan index, house style)."""
     from . import graphics
@@ -1273,7 +1294,7 @@ def _design_new(
     graphics.look_under(new, rough, analysis)
     designed = graphics.design(
         provider, new, analysis, rough.frame_duration, brief=brief, style=design_style(style, logo, look),
-        width=rough.width, height=rough.height, warnings=warnings, house_style=house, found=found,
+        width=rough.width, height=rough.height, warnings=warnings, house_style=house, found=found, spellings=spellings,
     )
     for g in new:
         if g.id in designed:
@@ -1344,6 +1365,7 @@ def _provisional_manifest(
 
 def _carry_designs(
     provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str], out_dir: Path,
+    spellings: list[dict] | None = None,
 ) -> tuple[dict[int, str], str]:
     """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look.
 
@@ -1363,7 +1385,7 @@ def _carry_designs(
     if new and provider is not None:
         saved_html, house = _design_new(
             provider, new, saved_html, rough, analysis, house, warnings=warnings, brief=opts.context, style=opts.graphics_style,
-            logo=opts.graphics_logo, look=opts.graphics_look, sample=next(iter(designs.values()), None),
+            logo=opts.graphics_logo, look=opts.graphics_look, sample=next(iter(designs.values()), None), spellings=spellings,
         )
     log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new)} new")
     return saved_html, house
@@ -1462,6 +1484,7 @@ def revise(
         # The cut as it was made: what earlier notes left out isn't in it (the model's own plan may still have it).
         enforce(previous, analysis, keep=[], avoid=made_without)
     previous.spellings = _saved_spellings(saved, previous.spellings)  # with the ones it carried over: the reviser sees them all
+    _shown_texts(previous.graphics, saved)
     respell_graphics(previous.graphics, previous.spellings)
     # Everything the editor has said to leave out, in these notes or earlier ones, unless these notes keep it.
     leave_out = standing_avoids(revisions + [{"keep": keep_ids, "avoid": avoid_ids}])
@@ -1503,6 +1526,15 @@ def revise(
         if h and c and h != c and spelling_key(h) not in heard:
             plan.spellings.append({"heard": h, "correct": c})
             heard.add(spelling_key(h))
+    # One it undid or spelled another way comes off the graphics an earlier version respelled with it
+    # ("Up Mount Baldy" is "Up the mountain" again), before the ones in force go on.
+    in_force = {(spelling_key(f["heard"]), f["correct"]) for f in plan.spellings}
+    dropped = []
+    for fix in previous.spellings:
+        h, c = clean_spelling(str(fix.get("heard") or ""), str(fix.get("correct") or ""))
+        if h and c and h != c and (spelling_key(h), c) not in in_force:
+            dropped.append({"heard": c, "correct": h})
+    respell_graphics(plan.graphics, dropped)
     respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
         raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")

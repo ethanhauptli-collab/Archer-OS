@@ -190,6 +190,21 @@ def test_a_spelling_copied_with_its_possessive_or_punctuation_is_written_once():
     tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
     words = " ".join(" ".join(c[3]) for c in cues(captions.srt(tl, a, raw["spellings"])))  # an older plan.json's pairs, as they were
     assert "Roy Choi, chef." in words and "Gina Russo's pasta bar." in words
+    # Only "correct" has the possessive or the punctuation: still only the transcript's own, once.
+    for correct in ("Roy Choi's", "Roy Choi\u2019s", "Roy Choi.", "Roy Choi!", "Roy Choi's."):
+        fix = [{"heard": "Roy Choy", "correct": correct}]
+        assert captions.clean_spelling("Roy Choy", correct) == ("Roy Choy", "Roy Choi")
+        assert _fixed("Roy Choy runs it.", fix) == "Roy Choi runs it."
+        assert _fixed("Kogi is Roy Choy's truck.", fix) == "Kogi is Roy Choi's truck."
+    # A name's own 's and an abbreviation's period stay, from either side.
+    assert captions.clean_spelling("Trader Joes", "Trader Joe's") == ("Trader Joes", "Trader Joe's")
+    assert _fixed("Lunch at Trader Joes today.", [{"heard": "Trader Joes", "correct": "Trader Joe's"}]) == "Lunch at Trader Joe's today."
+    assert captions.clean_spelling("Roy Choy junior.", "Roy Choi Jr.") == ("Roy Choy junior", "Roy Choi Jr.")
+    assert _fixed("Meet Roy Choy junior, the chef.", [{"heard": "Roy Choy junior.", "correct": "Roy Choi Jr."}]) == "Meet Roy Choi Jr., the chef."
+    assert _fixed("Acme Ink makes it.", [{"heard": "Acme Ink", "correct": "Acme Inc."}]) == "Acme Inc. makes it."
+    assert _fixed("We met on Mane St today.", [{"heard": "Mane St", "correct": "Main St."}]) == "We met on Main St. today."
+    assert _fixed("Then the US Grant.", [{"heard": "US Grant", "correct": "U.S. Grant."}]) == "Then the U.S. Grant."
+    assert captions.clean_spelling("Acme Inc.", "Acme Inc.") == ("Acme Inc.", "Acme Inc.")  # the same: no fix
 
 
 def test_a_name_with_a_filler_inside_it_is_still_fixed():
@@ -266,3 +281,74 @@ def test_graphics_spell_names_as_the_brief_does():
         ("Golden Hour Bar", "Golden Hour Bar", "Golden Hour"),  # already spelled out: not "Golden Hour Bar Bar"
     ]
     assert captions.respell("Golden Hour Bar", plan.spellings) == "Golden Hour Bar" and captions.respell("Roy Choi", plan.spellings) == "Roy Choi"
+
+
+def test_a_name_s_spelling_only_on_correct_never_adds_a_possessive_or_ends_a_sentence():
+    """{"heard": "Roy Choy", "correct": "Roy Choi's"}: the captions and the lower third say "Roy Choi", and
+    "Roy Choi." doesn't break a caption mid-sentence."""
+    speech = [(1.0, 4.0, "First up, Kogi is Roy Choy's truck."), (5.0, 8.0, "Roy Choy runs it every night.")]
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=speech)])
+    for correct in ("Roy Choi's", "Roy Choi\u2019s", "Roy Choi."):
+        raw = {
+            "sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}],
+            "spellings": [{"heard": "Roy Choy", "correct": correct}],
+            "graphics": [{"kind": "lower_third", "segment": "V01.S002", "words": "Roy Choy runs it", "text": "Roy Choy", "subtext": "Kogi", "seconds": 3, "direction": ""}],
+        }
+        plan = normalize(raw, a)
+        assert plan.spellings == [{"heard": "Roy Choy", "correct": "Roy Choi"}]
+        assert [g.text for g in plan.graphics] == ["Roy Choi"]
+        tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+        for spellings in (plan.spellings, raw["spellings"]):  # and an older plan.json's pair, as it was
+            found = [" ".join(ls) for *_, ls in cues(captions.srt(tl, a, spellings))]
+            assert "Roy Choi runs it every night." in found, found
+            assert "First up, Kogi is Roy Choi's truck." in " ".join(found)
+
+
+def test_a_respelled_name_keeps_the_quotes_and_brackets_around_it():
+    fix = [{"heard": "Roy Choy", "correct": "Roy Choi"}]
+    for said, right in [
+        ("\u201cRoy Choy changed LA.\u201d", "\u201cRoy Choi changed LA.\u201d"),
+        ("Owner (Roy Choy)", "Owner (Roy Choi)"),
+        ('"Roy Choy,"', '"Roy Choi,"'),
+        ("\u201cRoy Choy\u201d is here", "\u201cRoy Choi\u201d is here"),
+        ("(Roy Choy's truck)", "(Roy Choi's truck)"),
+        ("'Roy Choy.'", "'Roy Choi.'"),
+        ("[Roy Choy\u2019s]", "[Roy Choi\u2019s]"),
+    ]:
+        assert captions.respell(said, fix) == right
+        assert _fixed(said, fix) == right
+    assert _fixed("Meet (Roy Choy junior).", [{"heard": "Roy Choy junior", "correct": "Roy Choi Jr."}]) == "Meet (Roy Choi Jr.)."
+    assert captions.respell("Kogi\nRoy Choy  and friends", fix) == "Kogi\nRoy Choi  and friends"  # its line breaks too
+    # On a graphic, through the plan.
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=[(1.0, 4.0, "Roy Choy changed how this city eats.")])])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S001"], "broll": []}],
+        "spellings": fix,
+        "graphics": [{"kind": "quote", "segment": "V01.S001", "words": "Roy Choy changed how this city eats",
+                      "text": "\u201cRoy Choy changed how this city eats.\u201d", "subtext": "Owner (Roy Choy)", "seconds": 4, "direction": ""}],
+    }
+    assert [(g.text, g.subtext) for g in normalize(raw, a).graphics] == [("\u201cRoy Choi changed how this city eats.\u201d", "Owner (Roy Choi)")]
+
+
+def test_a_kinetic_caption_is_designed_with_the_name_as_the_brief_spells_it():
+    """The designer reveals a kinetic caption's words at their times: they show the name as spelled, one entry
+    for the whole name at its first word's time; the timing the design is noted with keeps the transcript's words."""
+    from roughcut import graphics
+
+    speech = [(1.0, 5.0, "Kogi is Roy Choy's truck, and it rules.")]
+    a = Analysis(clips=[make_clip("V01", seconds=8, sentences=speech)])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S001"], "broll": []}],
+        "spellings": [{"heard": "Roy Choy", "correct": "Roy Choi"}],
+        "graphics": [{"kind": "kinetic_caption", "segment": "V01.S001", "words": "Kogi is Roy Choy's truck", "text": "Kogi is Roy Choy's truck", "subtext": "", "seconds": 0, "direction": ""}],
+    }
+    plan = normalize(raw, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    placed = graphics.place(plan.graphics, tl, a, [])
+    times = dict(placed[0].word_times)
+    request = graphics._design_request(placed, a, tl.frame_duration, brief="", style="", width=1920, height=1080, spellings=plan.spellings)
+    item = json.loads(request.split("<graphics>")[1].split("</graphics>")[0])[0]
+    assert item["text"] == "Kogi is Roy Choi's truck" and item["said"] == "Kogi is Roy Choi's truck, and it rules."
+    assert [(w["word"], w["at"]) for w in item["words"]] == [("Kogi", times["Kogi"]), ("is", times["is"]), ("Roy Choi's", times["Roy"]), ("truck,", times["truck,"])]
+    assert [w for w, _ in placed[0].word_times] == ["Kogi", "is", "Roy", "Choy's", "truck,"]  # the timing note's words
+    assert "Choy" not in request

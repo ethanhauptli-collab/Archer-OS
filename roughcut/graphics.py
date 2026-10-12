@@ -60,6 +60,7 @@ from pathlib import Path
 
 from . import brand_fonts, ffmpeg_ops, progress
 from .analyze import ROLE_LABELS, Analysis, Clip, log
+from .captions import respell, respell_timed
 from .plan import DEFAULT_SECONDS, GraphicSpec
 from .timeline import ConnectedClip, Timeline
 
@@ -626,7 +627,10 @@ def _pictures(placed: list[PlacedGraphic], analysis: Analysis, workers: int = 4)
 def _design_request(
     placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     house_style: str = "", reference: tuple[str, str, str] | None = None, keep_out: dict[str, float] | None = None,
+    spellings: list[dict] | None = None,
 ) -> str:
+    """The design request for `placed`. Names in what's said and in the words a kinetic caption reveals are spelled as
+    the brief spells them (`spellings`, as the text already is); the timing note keeps the transcript's words."""
     items = []
     for g in placed:
         seg = analysis.segment(g.spec.segment)
@@ -637,8 +641,8 @@ def _design_request(
             "text": g.spec.text,
             "subtext": g.spec.subtext,
             "direction": g.spec.direction,
-            "said": seg.text if seg is not None else "",
-            "words": [{"word": w, "at": t} for w, t in g.word_times],
+            "said": respell(seg.text, spellings or []) if seg is not None else "",
+            "words": [{"word": w, "at": t} for w, t in respell_timed(g.word_times, spellings or [])],
         }
         if g.over:
             item["over"] = g.over
@@ -668,7 +672,7 @@ def _design_request(
 def design(
     provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     warnings: list[str], batch: int = 4, workers: int = 3, keep_out: dict[str, float] | None = None,
-    house_style: str = "", found: dict | None = None,
+    house_style: str = "", found: dict | None = None, spellings: list[dict] | None = None,
 ) -> dict[str, str]:
     """HTML for each graphic, by ID.
 
@@ -691,7 +695,8 @@ def design(
 
     def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None):
         request = _design_request(
-            group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference, keep_out=keep_out
+            group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference, keep_out=keep_out,
+            spellings=spellings,
         )
         parts: list = []
         for g in group:  # the shot under each graphic, then the request
@@ -1465,7 +1470,7 @@ def with_planned(specs: list[GraphicSpec], planned: list[GraphicSpec]) -> list[G
 def make(
     provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
-    house_style: str = "", planned: list[GraphicSpec] | None = None,
+    house_style: str = "", planned: list[GraphicSpec] | None = None, spellings: list[dict] | None = None,
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 
@@ -1475,6 +1480,7 @@ def make(
     `house_style`: the design system described when this video's graphics were first designed (kept in graphics.json).
     `planned`: with saved designs, every graphic of the plan at its index (default: `specs`). The ones this cut
     doesn't place stay in graphics.json, with their designs, for the next re-cut to place again.
+    `spellings`: the plan's name fixes, for the words the designer is shown.
     """
     from .presets import design_style, inline_logo
 
@@ -1499,7 +1505,7 @@ def make(
         progress.stage("graphics", f"Designing {len(placed)} graphics")
         html = design(
             provider, placed, analysis, tl.frame_duration, brief=brief, style=design_style(style, logo, look), width=tl.width, height=tl.height,
-            warnings=warnings, keep_out=keep_out, house_style=house_style, found=found,
+            warnings=warnings, keep_out=keep_out, house_style=house_style, found=found, spellings=spellings,
         )
         html = {k: inline_logo(v, logo) for k, v in html.items()}
     # Each design notes the timing it was made for (a new one: this cut's), and plays re-timed in a

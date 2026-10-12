@@ -593,13 +593,19 @@ def test_a_revision_can_undo_a_name_spelling(footage, tmp_path, fake, shared_cac
 
     out = tmp_path / "out"
     spellings = [{"heard": "the mountain", "correct": "Mount Baldy"}, {"heard": "long day", "correct": "Long Day"}]
-    fake.plan = {**copy.deepcopy(fake.plan), "spellings": spellings}
+    title = {**GRAPHIC, "text": "Up the mountain", "subtext": "A long day"}
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": spellings, "graphics": [title]}
     pipeline.build(_opts(footage, out, shared_cache))
-    fake.plan = {**fake.plan, "spellings": [{"heard": "The mountain.", "correct": "The mountain."}]}
+    assert [(g["text"], g["subtext"]) for g in json.loads((out / "plan.json").read_text())["plan"]["graphics"]] == [("Up Mount Baldy", "A Long Day")]
+    # The reviser keeps the graphic as it was shown, and undoes the spelling: the graphic says it as heard again.
+    shown = {**title, "text": "Up Mount Baldy", "subtext": "A Long Day"}
+    fake.plan = {**fake.plan, "spellings": [{"heard": "The mountain.", "correct": "The mountain."}], "graphics": [shown]}
     pipeline.revise(out, "The mountain isn't Mount Baldy: leave it as he says it.", Options(inputs=[]))
     previous = fake.calls[-1]["parts"][1].text.split("<previous_plan>")[1].split("</previous_plan>")[0]
     assert 'Spelling: "the mountain" -> "Mount Baldy"' in previous and 'Spelling: "long day" -> "Long Day"' in previous
+    assert "write that name in graphics' text as heard" in fake.calls[-1]["parts"][1].text
     assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == spellings[1:]
+    assert [(g["text"], g["subtext"]) for g in json.loads((out / "plan.json").read_text())["plan"]["graphics"]] == [("Up the mountain", "A Long Day")]
     srt = next(out.glob("*.srt")).read_text()
     assert "Mount Baldy" not in srt and "the mountain" in srt and "Long Day" in srt
     assert main(["render", str(out), "--style", "tight"]) == 0
@@ -608,6 +614,9 @@ def test_a_revision_can_undo_a_name_spelling(footage, tmp_path, fake, shared_cac
     fake.plan = {k: v for k, v in fake.plan.items() if k != "spellings"}  # the next revision doesn't bring it back
     pipeline.revise(out, "Tighter.", Options(inputs=[]))
     assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == spellings[1:]
+    # ...and is shown the graphic as the last version had it, not as the model first wrote it.
+    previous = fake.calls[-1]["parts"][1].text.split("<previous_plan>")[1].split("</previous_plan>")[0]
+    assert '"Up the mountain" / "A Long Day"' in previous and "Mount Baldy" not in previous
 
 
 def test_a_name_spelling_from_an_earlier_version_fixes_a_revision_s_graphics(footage, tmp_path, fake, shared_cache):
@@ -621,6 +630,44 @@ def test_a_name_spelling_from_an_earlier_version_fixes_a_revision_s_graphics(foo
     pipeline.revise(out, "Add a title card.", Options(inputs=[]))
     graphics = json.loads((out / "plan.json").read_text())["plan"]["graphics"]
     assert [(g["text"], g["subtext"], g["words"]) for g in graphics] == [("Up Mount Baldy", "heading up Mount Baldy", "heading up the mountain")]
+
+
+def test_a_revision_that_spells_a_name_another_way_respells_its_graphics(footage, tmp_path, fake, shared_cache):
+    import copy
+
+    out = tmp_path / "out"
+    title = {**GRAPHIC, "text": "Up the mountain", "subtext": ""}
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": [{"heard": "the mountain", "correct": "Mount Baldy"}], "graphics": [title]}
+    pipeline.build(_opts(footage, out, shared_cache))
+    fake.plan = {**fake.plan, "spellings": [{"heard": "the mountain", "correct": "Mt. Baldy"}], "graphics": [{**title, "text": "Up Mount Baldy"}]}
+    pipeline.revise(out, "It's Mt. Baldy on the signs.", Options(inputs=[]))
+    plan = json.loads((out / "plan.json").read_text())["plan"]
+    assert plan["spellings"] == [{"heard": "the mountain", "correct": "Mt. Baldy"}]
+    assert [g["text"] for g in plan["graphics"]] == ["Up Mt. Baldy"]
+
+
+def test_a_hand_edited_spelling_list_with_broken_entries_still_revises_and_renders(footage, tmp_path, fake, shared_cache):
+    from roughcut.analyze import Analysis
+    from roughcut.plan import Plan
+    from roughcut.revise import render_previous_plan
+
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+    saved = json.loads((out / "plan.json").read_text())
+    saved["plan"]["spellings"] = [
+        {"heard": "the mountain"}, "Mount Baldy", {"heard": "", "correct": "Mount Baldy"}, {"heard": 3, "correct": "x"}, None,
+        {"heard": "long day", "correct": "Long Day"},
+    ]
+    (out / "plan.json").write_text(json.dumps(saved))
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert "Long Day" in next(out.glob("*.srt")).read_text()
+    pipeline.revise(out, "Tighter.", Options(inputs=[]))
+    previous = fake.calls[-1]["parts"][1].text.split("<previous_plan>")[1].split("</previous_plan>")[0]
+    assert [line for line in previous.splitlines() if line.startswith("Spelling:")] == ['Spelling: "long day" -> "Long Day"']
+    assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == [{"heard": "long day", "correct": "Long Day"}]
+    # And on its own, the previous plan never trips over an incomplete pair.
+    shown = render_previous_plan(Plan(title="x", spellings=[{"heard": "Roy Choy"}, {"heard": "long day", "correct": "Long Day"}]), Analysis(clips=[]))
+    assert [line for line in shown.splitlines() if line.startswith("Spelling:")] == ['Spelling: "long day" -> "Long Day"']
 
 
 def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake, shared_cache):
@@ -729,6 +776,32 @@ def test_revise_reuses_unchanged_graphics_and_designs_only_new_ones(footage, tmp
     kept = next(g for g in after["graphics"] if g["kind"] == "title_card")
     assert "<!-- hand edit -->" in (out / kept["html"]).read_text()  # the saved (hand-edited) design, not a new one
     assert (next((out / "history").glob("v1 *")) / title["html"]).is_file()  # v1's designs are kept in history
+
+
+def test_a_kinetic_caption_is_designed_with_names_spelled_as_the_brief_spells_them(footage, tmp_path, monkeypatch, shared_cache):
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    caption = {"kind": "kinetic_caption", "segment": "V01.S003", "words": "heading up the mountain", "text": "Heading up the mountain", "subtext": "", "seconds": 0, "direction": ""}
+    plan["graphics"] = [caption]
+    plan["spellings"] = [{"heard": "the mountain", "correct": "Mount Baldy"}]
+    provider = FakeProvider(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    monkeypatch.setattr(graphics, "_render_one", lambda job: {"id": job["id"], "error": "not rendered in this test", "console": []})
+    out = tmp_path / "out"
+
+    def designed() -> dict:
+        request = [c for c in provider.calls if c["schema_name"] == "graphics"][-1]["parts"][-1].text
+        return json.loads(request.split("<graphics>")[1].split("</graphics>")[0])[0]
+
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    item = designed()
+    assert item["text"] == "Heading up Mount Baldy" and "Mount Baldy" in item["said"] and "mountain" not in item["said"]
+    assert [w["word"] for w in item["words"]][-1] == "Mount Baldy."
+    # A revision's new design too, with the spelling it carried over.
+    provider.plan = {**{k: v for k, v in plan.items() if k != "spellings"}, "graphics": [{**caption, "text": "Up the mountain"}]}
+    pipeline.revise(out, "Shorter caption.", Options(inputs=[]))
+    item = designed()
+    assert item["text"] == "Up Mount Baldy" and [w["word"] for w in item["words"]][-1] == "Mount Baldy."
 
 
 # ---------------------------------------------------------------- T4: end-of-run summary and cost

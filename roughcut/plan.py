@@ -123,7 +123,7 @@ PLAN_SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "heard": {"type": "string", "description": "The name exactly as the transcript has it, without a possessive 's or punctuation after it, e.g. 'Roy Choy'."},
-                    "correct": {"type": "string", "description": "The right spelling, e.g. 'Roy Choi'."},
+                    "correct": {"type": "string", "description": "The right spelling of the same words, also without a possessive 's or punctuation after it, e.g. 'Roy Choi'."},
                 },
                 "required": ["heard", "correct"],
                 "additionalProperties": False,
