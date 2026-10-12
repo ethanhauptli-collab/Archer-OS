@@ -215,6 +215,11 @@ def test_a_spelling_copied_with_its_possessive_or_punctuation_is_written_once():
     assert _fixed("Take Beach avenue home.", [{"heard": "Beach avenue", "correct": "Beach Ave."}]) == "Take Beach Ave. home."
     assert _fixed("She got a PhD today.", [{"heard": "PhD", "correct": "Ph.D."}]) == "She got a Ph.D. today."
     assert _fixed("Then the US Grant.", [{"heard": "US Grant", "correct": "U.S. Grant"}]) == "Then the U.S. Grant."
+    # An initialism has parts of one or two letters: a short web address isn't one.
+    for site in ("cnn.com.", "bit.ly.", "x.com.", "abc.com.", "voc.org."):
+        assert _fixed("Go to the site today.", [{"heard": "the site", "correct": site}]) == f"Go to {site[:-1]} today.", site
+    for short in ("U.S.", "Ph.D.", "D.C.", "M.B.A."):
+        assert _fixed("It was the thing today.", [{"heard": "the thing", "correct": short}]) == f"It was {short} today.", short
 
 
 def test_undoing_a_spelling_gives_the_name_back_as_heard_without_the_right_form_s_own_period():
@@ -232,11 +237,20 @@ def test_undoing_a_spelling_gives_the_name_back_as_heard_without_the_right_form_
         ("Roy Choy", "Roy Choi", "Roy Choy's truck."),
         ("the mountain", "Mount Baldy", "Up the mountain"),
         ("Mount Baldy", "Mt. Baldy", "Mount Baldy"),
+        # An ellipsis after it keeps all its dots.
+        ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior... wait"),
+        # Title Case on a graphic: a capital after the period isn't a new sentence unless lowercase words follow it.
+        ("Acme Ink", "Acme Inc.", "Acme Ink CEO"),
+        ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior Head Chef"),
+        ("Acme Ink", "Acme Inc.", "Acme Ink. Today we eat."),
+        ("Roy Choy junior", "Roy Choi Jr.", "Meet Roy Choy junior. Head Chef Roy cooks."),
     ]:
         h, c = captions.clean_spelling(heard, correct)
         shown = captions.respell(said, [{"heard": h, "correct": c}])
         assert shown != said
         assert captions.respell(shown, [{"heard": c, "correct": h}]) == said, (heard, correct, said)
+    assert captions.respell("Acme Inc. CEO", [{"heard": "Acme Inc.", "correct": "Acme Ink"}]) == "Acme Ink CEO"
+    assert captions.respell("We love Acme Inc... so good", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == "We love Acme Incorporated... so good"
     # In what's said too: a misheard short form that ends a sentence keeps the sentence's period.
     assert _fixed("Acme Inc. makes it. We love Acme Inc. So.", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == (
         "Acme Incorporated makes it. We love Acme Incorporated. So."
@@ -295,6 +309,22 @@ def test_no_caption_line_is_longer_than_42_characters():
     plan = normalize({"sections": [{"name": "x", "items": ["V01.S001"], "broll": []}]}, a)
     tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
     assert [ls for *_, ls in cues(captions.srt(tl, a))] == [["It was"], [long], ["today."]]
+
+
+def test_a_comma_never_leaves_the_end_of_a_sentence_alone_in_a_caption():
+    """The live cut captioned "And Sweet Spot, Mia Chen's dessert bar," and then "closes it out." for a second: the
+    whole sentence fits two lines, so it's one caption. A comma still breaks a sentence two lines can't hold."""
+    speech = [
+        (1.0, 4.3, "And Sweet Spot, Mia Chen's dessert bar, closes it out."),
+        (5.5, 12.0, "We drove all the way down to Laguna Beach on Sunday, and the kids loved every minute of the tide pools there."),
+    ]
+    a = Analysis(clips=[make_clip("V01", seconds=14, sentences=speech)])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    found = [" ".join(ls) for *_, ls in cues(captions.srt(tl, a))]
+    assert found[0] == "And Sweet Spot, Mia Chen's dessert bar, closes it out."
+    assert found[1].endswith("Sunday,") and " ".join(found[1:]) == speech[1][2]
+    assert all(len(line) <= captions.LINE_CHARS for *_, ls in cues(captions.srt(tl, a)) for line in ls)
 
 
 def test_a_cut_word_with_a_few_milliseconds_of_sound_kept_is_not_captioned():

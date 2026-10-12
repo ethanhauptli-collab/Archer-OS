@@ -99,10 +99,10 @@ def _bare(word: str) -> tuple[str, str]:
 
 _PUNCT = ".,;:!?…"
 _POSSESSIVE = re.compile(r"['\u2019][sS]$")
-# The last word of a name whose period is its own: an initialism ("U.S.", "Ph.D.") or a short form ("Jr.", "Inc.",
-# "Blvd."). Not a web address or any other dotted word: "ventureoc.com." ends a sentence.
+# The last word of a name whose period is its own: an initialism ("U.S.", "Ph.D.", "M.B.A.": parts of one or two letters)
+# or a short form ("Jr.", "Inc.", "Blvd."). Not a web address or any other dotted word: "cnn.com." ends a sentence.
 _ABBREVIATION = re.compile(
-    r"(?:^|\s)(?:(?:[A-Za-z]{1,3}\.)+[A-Za-z]{1,3}|Jr|Sr|Inc|Co|Corp|Ltd|Bros|St|Ave|Blvd|Rd|Mt|Ft|Dr|Mr|Mrs|Ms|Esq)\.$", re.IGNORECASE
+    r"(?:^|\s)(?:(?:[A-Za-z]{1,2}\.)+[A-Za-z]{1,2}|Jr|Sr|Inc|Co|Corp|Ltd|Bros|St|Ave|Blvd|Rd|Mt|Ft|Dr|Mr|Mrs|Ms|Esq)\.$", re.IGNORECASE
 )
 
 
@@ -174,8 +174,8 @@ def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None 
                 tail = re.search(r"\W*$", last).group()  # punctuation, a closing quote mark or bracket
                 said = last[: len(last) - len(tail)]
                 text = correct + (said[-2] + "s" if possessive and _POSSESSIVE.search(said) else "")  # its own apostrophe
-                if own_period and tail.startswith(".") and not (j < len(texts) and re.sub(r"^\W+", "", texts[j])[:1].isupper()):
-                    tail = tail[1:]  # "Jr." mid-sentence or on its own: the period goes with the abbreviation
+                if own_period and tail.startswith(".") and not tail.startswith("..") and not _sentence_starts(texts, j):
+                    tail = tail[1:]  # "Jr." mid-sentence or on its own: the period goes with the abbreviation (an ellipsis stays)
                 tail = tail[next((k for k in range(len(tail), 0, -1) if text.endswith(tail[:k])), 0) :]  # "Jr." then ".": once
                 out.append((i, j, lead + text + tail))
                 i = j
@@ -183,6 +183,17 @@ def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None 
         else:
             i += guard or 1
     return out
+
+
+def _sentence_starts(texts: list[str], j: int) -> bool:
+    """Does a sentence start at word `j`? A capital letter, then a lowercase word ("Today we eat"), or a capital in
+    text that ends its sentences elsewhere too. Title Case alone ("Acme Inc. CEO", "Jr. Head Chef") isn't one."""
+    if j >= len(texts) or not re.sub(r"^\W+", "", texts[j])[:1].isupper():
+        return False
+    if j + 1 < len(texts) and re.sub(r"^\W+", "", texts[j + 1])[:1].islower():
+        return True
+    ends = (w.rstrip("\"')]\u201d\u2019") for k, w in enumerate(texts) if k != j - 1)
+    return any(w.endswith(("?", "!", "\u2026")) or (w.endswith(".") and not _ABBREVIATION.search(w)) for w in ends)
 
 
 def respell(text: str, spellings: list[dict], keep: list[dict] | None = None) -> str:
@@ -240,21 +251,40 @@ def _lines(words: list[str]) -> list[str]:
     return [" ".join(words[:best]), " ".join(words[best:])]
 
 
+def _fits(words: list[_Word], fps: float) -> bool:
+    """One caption holds `words`: two lines of 42 at most, up no longer than MAX_SECONDS."""
+    texts = [w.text for w in words]
+    return (
+        len(" ".join(texts)) <= 2 * LINE_CHARS
+        and all(len(line) <= LINE_CHARS for line in _lines(texts))
+        and (words[-1].b - words[0].a) / fps <= MAX_SECONDS
+    )
+
+
+def _rest_of_sentence(words: list[_Word], k: int, fps: float) -> list[_Word]:
+    """`words[k]` and the rest of its sentence, up to a pause long enough to start a caption anyway."""
+    end = k
+    while end + 1 < len(words) and not words[end].text.endswith(SENTENCE_END) and (words[end + 1].a - words[end].b) / fps < PAUSE:
+        end += 1
+    return words[k : end + 1]
+
+
 def captions(tl: "Timeline", analysis: "Analysis", spellings: list[dict] | None = None) -> list[Caption]:
     fps = 1 / float(tl.frame_duration)
     groups: list[list[_Word]] = []
-    for w in fix_names(kept_words(tl, analysis), spellings or []):
+    words = fix_names(kept_words(tl, analysis), spellings or [])
+    for k, w in enumerate(words):
         cur = groups[-1] if groups else None
         if cur is not None:
             prev = cur[-1]
-            text = " ".join(x.text for x in cur + [w])
             if (
                 (w.a - prev.b) / fps >= PAUSE
                 or prev.text.endswith(SENTENCE_END)
-                or len(text) > 2 * LINE_CHARS
-                or any(len(line) > LINE_CHARS for line in _lines([x.text for x in cur + [w]]))  # no two lines of 42 hold it
-                or (w.b - cur[0].a) / fps > MAX_SECONDS
-                or (prev.text.endswith((",", ";", ":")) and len(text) > LINE_CHARS)
+                or not _fits(cur + [w], fps)
+                # Past one line, a comma starts the next caption, unless this one holds the rest of the sentence
+                # (no "closes it out." left on its own).
+                or (prev.text.endswith((",", ";", ":")) and len(" ".join(x.text for x in cur + [w])) > LINE_CHARS
+                    and not _fits(cur + _rest_of_sentence(words, k, fps), fps))
             ):
                 cur = None
         if cur is None:
