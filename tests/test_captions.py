@@ -140,7 +140,8 @@ def test_words_whisper_stretched_over_a_cut_pause_are_still_captioned(tmp_path):
     )
     (foot / "talk.json").write_text(json.dumps({"words": whisper_words(SENTENCES)}))
     out = tmp_path / "out"
-    assert main(["build", str(foot), "-o", str(out), "--provider", "none", "--cache-dir", str(tmp_path / "c"), "--no-stringout"]) == 0
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--no-stringout"]  # the .json sidecar's words
+    assert main(["build", str(foot), "-o", str(out), *common]) == 0
     text = next(out.glob("*.srt")).read_text()
     said = " ".join(t for _, _, t in SENTENCES).split()
     assert [w for w in said if w not in text.split()] == []
