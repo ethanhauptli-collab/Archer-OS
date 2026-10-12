@@ -226,11 +226,12 @@ def sound_regions(
     return regions
 
 
-def extract_frame(src: Path, at: float, dest: Path, width: int = 512) -> Path | None:
+def extract_frame(src: Path, at: float, dest: Path, width: int = 512, zoom: float = 1.0) -> Path | None:
     """Grab one JPEG frame (or scale a still) for visual description.
 
     `width` caps the longest side, so a portrait frame costs no more image tokens
     than a landscape one. Rotated phone video arrives upright (ffmpeg autorotates).
+    `zoom`: the middle of the frame, as a punch-in shows it (1.12: 1/1.12 of the width and height).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
@@ -242,7 +243,7 @@ def extract_frame(src: Path, at: float, dest: Path, width: int = 512) -> Path | 
         "-frames:v",
         "1",
         "-vf",
-        f"scale='if(gte(iw,ih),min({width},iw),-2)':'if(gte(iw,ih),-2,min({width},ih))'",
+        (f"crop=iw/{zoom:g}:ih/{zoom:g}," if zoom != 1 else "") + f"scale='if(gte(iw,ih),min({width},iw),-2)':'if(gte(iw,ih),-2,min({width},ih))'",
         "-q:v",
         "5",
         str(dest),

@@ -39,7 +39,7 @@ def write_previews(
 
     On vertical video the page can show the strips platform buttons cover (keep_out, else graphics.VERTICAL_KEEP_OUT).
     """
-    from .graphics import describe_picture, picture_under, platform_zones
+    from .graphics import describe_picture, platform_zones, shot_under
 
     folder = out_dir / "graphics"
     page = folder / PAGE
@@ -54,13 +54,13 @@ def write_previews(
     size = preview_size(tl.width, tl.height)
     jobs = []
     for g in rendered:
-        clip, at = picture_under(tl, analysis, g.start + g.frames // 2)
+        clip, at, zoom = shot_under(tl, analysis, g.start + g.frames // 2)  # a punched-in shot as Final Cut shows it
         if clip is not None and clip.media.kind == "image":
             at = 0.0
         mov = files[g.id]
         stat = mov.stat()
-        key = f"{mov.name}|{stat.st_size}|{stat.st_mtime_ns}|{clip.media.path if clip else ''}|{at:.3f}|{size}|{rate}"
-        jobs.append({"g": g, "clip": clip, "at": at, "mov": mov, "key": hashlib.sha1(key.encode()).hexdigest(), "over": describe_picture(clip)})
+        key = f"{mov.name}|{stat.st_size}|{stat.st_mtime_ns}|{clip.media.path if clip else ''}|{at:.3f}|{zoom:g}|{size}|{rate}"
+        jobs.append({"g": g, "clip": clip, "at": at, "zoom": zoom, "mov": mov, "key": hashlib.sha1(key.encode()).hexdigest(), "over": describe_picture(clip)})
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
         errors = list(pool.map(lambda job: _preview(job, previews, size, rate, float(fd)), jobs))
     for job, error in zip(jobs, errors):
@@ -88,7 +88,7 @@ def _preview(job: dict, previews: Path, size: tuple[int, int], rate: str, fd: fl
         background = ["-f", "lavfi", "-i", f"color=c=black:s={pw}x{ph}:r={rate}"]
         clip: Clip | None = job["clip"]
         if clip is not None:
-            still = extract_frame(Path(clip.media.path), job["at"], Path(tmp) / "under.jpg", width=2 * LONG_EDGE)
+            still = extract_frame(Path(clip.media.path), job["at"], Path(tmp) / "under.jpg", width=2 * LONG_EDGE, zoom=job["zoom"])
             if still is not None:
                 background = ["-loop", "1", "-framerate", rate, "-i", str(still)]
         fit = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"

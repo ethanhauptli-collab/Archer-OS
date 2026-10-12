@@ -1000,13 +1000,13 @@ def test_fuzz_audio_and_fcp_details(tmp_path):
 # ------------------------------------------------------------ punch-ins on jump cuts
 
 
-def _jumpy(*, broll_over=None, punch_in=True):
+def _jumpy(*, broll_over=None, punch_in=True, format_override=None):
     """One talking clip cut on three lines (two jump cuts), optionally with a cutaway over the second line."""
     clips = [make_clip("V01", seconds=TALK_SECONDS, sentences=SPEECH), make_clip("V02", seconds=10)]
     a = Analysis(clips=clips)
     broll = [{"clip": "V02", "over": [broll_over], "words": "", "source_in": 0, "reason": "x"}] if broll_over else []
     plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S003", "V01.S005"], "broll": broll}]}, a, source="fake:fake")
-    return a, build_timeline(plan, a, style=STYLES["tight"], name="t", punch_in=punch_in)
+    return a, build_timeline(plan, a, style=STYLES["tight"], name="t", punch_in=punch_in, format_override=format_override)
 
 
 def test_jump_cuts_alternate_a_punch_in(tmp_path):
@@ -1026,6 +1026,19 @@ def test_jump_cuts_alternate_a_punch_in(tmp_path):
     # Off (the default), nothing changes and the jump cuts stay as to-dos.
     a, plain = _jumpy(punch_in=False)
     assert all(sc.scale == 1.0 for sc in plain.spine) and [m for m in plain.markers if m.value.startswith("Jump cut")]
+
+
+def test_a_clip_that_doesnt_fill_the_frame_is_not_punched_in():
+    # A 16:9 clip in a vertical cut sits letterboxed (Final Cut fits it): punched in, its black bars grew and shrank at every cut.
+    a, tl = _jumpy(format_override="vertical")
+    assert (tl.width, tl.height) == (1080, 1920) and len(tl.review.jump_cuts) == 2
+    assert [sc.scale for sc in tl.spine] == [1.0, 1.0, 1.0] and tl.review.punched == 0
+    assert len([m for m in tl.markers if m.kind == "todo" and m.value.startswith("Jump cut")]) == 2, "left as to-dos instead"
+    lines = tl.review.lines(tl.frame_duration)
+    assert any(line.startswith("Not punched in: 2 of those cuts") and "letterboxed" in line for line in lines), lines
+    # The same shape at another size fills the frame: punched as usual.
+    a, tl = _jumpy(format_override="4k")
+    assert [sc.scale for sc in tl.spine][1] != 1.0 and tl.review.punched == 2
 
 
 def test_a_cut_b_roll_covers_is_not_punched(tmp_path):

@@ -756,6 +756,42 @@ def test_each_graphic_is_previewed_over_the_shot_it_sits_on(footage, tmp_path):
     assert write_previews(placed, {}, tl, a, out) is None and not page.exists()
 
 
+def test_previews_and_the_designers_frame_show_a_punched_in_shot(footage, tmp_path):
+    # In Final Cut every other graphic sits over a shot zoomed 12%, but it was previewed and designed over the shot as framed.
+    from roughcut import ffmpeg_ops
+    from roughcut.graphics_preview import write_previews
+    from roughcut.timeline import PUNCH_IN
+
+    talk = make_clip("V01", seconds=20, sentences=SPEECH)
+    talk.media.path = str(footage / "talk.mov")  # the real pattern clip behind the made-up transcript
+    a = Analysis(clips=[talk])
+    raw = {"sections": [{"name": "x", "items": ["V01.S001", "V01.S003", "V01.S005"], "broll": []}],
+           "graphics": [spec("lower_third", "V01.S003", "Today", "Punched in", 1.5)]}
+    plan = normalize(raw, a)
+    tl = build_timeline(plan, a, style=STYLES["tight"], name="t", format_override="640x360", punch_in=True)
+    placed = graphics.place(plan.graphics, tl, a, [])
+    graphics.look_under(placed, tl, a)
+    (g,) = placed
+    assert tl.spine_at(g.start + g.frames // 2).scale == PUNCH_IN and g.zoom == PUNCH_IN
+
+    # What Final Cut shows: the middle of the frame, 12% bigger.
+    as_shot = ffmpeg_ops.extract_frame(footage / "talk.mov", g.under[1], tmp_path / "as_shot.jpg", width=640)
+    middle = tmp_path / "middle.jpg"
+    ffmpeg("-i", str(as_shot), "-vf", f"crop=iw/{PUNCH_IN}:ih/{PUNCH_IN},scale=640:360", str(middle))
+    assert _differ(_thumb(middle), _thumb(as_shot)) > 8, "the zoom shows"
+
+    frame = tmp_path / "designer.jpg"
+    frame.write_bytes(graphics._pictures(placed, a)[g.id])  # the frame sent with the design request
+    assert _differ(_thumb(frame), _thumb(middle)) < _differ(_thumb(frame), _thumb(as_shot)) / 2
+
+    out = tmp_path / "out"
+    (out / "graphics").mkdir(parents=True)
+    files = {g.id: _transparent_mov(out / "graphics" / f"{g.slug}.mov", g.frames)}
+    write_previews(placed, files, tl, a, out)
+    poster = _thumb(out / "graphics" / "previews" / f"{g.id}.jpg")
+    assert _differ(poster, _thumb(middle)) < _differ(poster, _thumb(as_shot)) / 2
+
+
 def test_previews_are_written_next_to_their_final_files(tmp_path, monkeypatch):
     """Output folders often live on an external drive, where a rename from a temp folder fails."""
     import errno

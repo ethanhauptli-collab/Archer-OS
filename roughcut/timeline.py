@@ -632,13 +632,15 @@ def build_timeline(
     tl.target_seconds = target_seconds
     tl.review = review(tl, plan, analysis, target_seconds)
     _place_markers(tl, plan, analysis)  # first, so a jump on a line the plan flagged keeps one to-do
+    punched: set[int] = set()
+    if punch_in:  # also a cut made without AI (--provider none), which is all jump cuts
+        punched = _punch_in(tl, tl.review, analysis)
+        tl.review.punched = len(punched)
+        tl.review.not_punched = len(tl.review.jump_cuts) - len(punched)
     if plan.source != "heuristic":  # a stringout is all jump cuts by design
         _mark_bed_jumps(tl, analysis, warnings)
-        if not punch_in:
-            _mark_jump_cuts(tl, tl.review)
+        _mark_jump_cuts(tl, tl.review, skip=punched)
         tl.markers.sort(key=lambda mk: mk.frame)
-    if punch_in:  # also a cut made without AI (--provider none), which is all jump cuts
-        tl.review.punched = _punch_in(tl, tl.review)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
     _music_fades(tl, analysis)
@@ -1747,6 +1749,7 @@ class Review:
     filled_shots: int
     repeated_stills: dict[str, int]  # clip ID -> times shown
     punched: int = 0  # jump cuts smoothed with a punch-in
+    not_punched: int = 0  # with punch-ins on: jump cuts on a clip that doesn't fill the frame
 
     def length_line(self) -> str:
         line = tc.seconds_to_clock(self.seconds)
@@ -1772,6 +1775,11 @@ class Review:
                 out.append(
                     f"Punched in: {self.punched} of those cuts alternate between the shot as framed and {PUNCH_IN:.0%} "
                     "(Transform > Scale in the inspector; select the clips and reset Transform to undo)"
+                )
+            if self.not_punched:
+                out.append(
+                    f"Not punched in: {self.not_punched} of those cuts, on a clip letterboxed or pillarboxed in this format "
+                    "(the black bars would jump in size); they're to-do markers"
                 )
         else:
             out.append("Jump cuts on camera with no B-roll over them: none")
@@ -1819,25 +1827,35 @@ MAX_JUMP_MARKERS = 10
 PUNCH_IN = 1.12
 
 
-def _punch_in(tl: Timeline, rv: Review) -> int:
+def _punch_in(tl: Timeline, rv: Review, analysis: Analysis) -> set[int]:
     """At each jump cut no B-roll covers, alternate the framing: one piece as shot, the next punched in,
-    the next as shot again. A new shot, or a cut B-roll hides, starts as shot. Returns the cuts punched."""
+    the next as shot again. A new shot, or a cut B-roll hides, starts as shot. A clip that doesn't fill
+    the frame (16:9 in a vertical cut, which Final Cut letterboxes) stays as shot: punched in, its black
+    bars would grow and shrink at every cut. Returns the frames of the cuts punched."""
     jumps = {j.frame for j in rv.jump_cuts}
-    n = 0
+    punched: set[int] = set()
     prev = None
     for sc in tl.spine:
-        if prev is not None and sc.offset in jumps and sc.clip_id == prev.clip_id:
+        if prev is not None and sc.offset in jumps and sc.clip_id == prev.clip_id and _fills_frame(analysis.clip(sc.clip_id).media, tl):
             sc.scale = 1.0 if prev.scale != 1.0 else PUNCH_IN
-            n += 1
+            punched.add(sc.offset)
         else:
             sc.scale = 1.0
         prev = sc
-    return n
+    return punched
 
 
-def _mark_jump_cuts(tl: Timeline, rv: Review) -> None:
-    """To-do markers on the uncovered jump cuts that matter most: between lines first, then pause trims."""
-    marked = {m.frame for m in tl.markers if m.kind == "todo"}  # one to-do per edit
+def _fills_frame(media, tl: Timeline) -> bool:
+    """Whether a picture has the sequence's shape (within 1%), so Final Cut's Fit leaves no black bars."""
+    if not (media.width and media.height and tl.width and tl.height):
+        return True
+    return abs((media.width * tl.height) / (media.height * tl.width) - 1) <= 0.01
+
+
+def _mark_jump_cuts(tl: Timeline, rv: Review, skip: set[int] | None = None) -> None:
+    """To-do markers on the uncovered jump cuts that matter most: between lines first, then pause trims.
+    `skip`: the cuts a punch-in already smooths."""
+    marked = {m.frame for m in tl.markers if m.kind == "todo"} | (skip or set())  # one to-do per edit
     jumps = [j for j in rv.jump_cuts if j.frame not in marked]
     worst = sorted(jumps, key=lambda j: (not j.between_lines, -(abs(j.src_to - j.src_from))))[:MAX_JUMP_MARKERS]
     for j in sorted(worst, key=lambda j: j.frame):

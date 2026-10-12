@@ -173,6 +173,7 @@ class PlacedGraphic:
     word_times: list[tuple[str, float]] = field(default_factory=list)  # (word, seconds from the graphic's start)
     over: str = ""  # what's on screen under it, for the designer
     under: tuple[str, float] | None = None  # (clip id, source seconds) of that picture at its middle
+    zoom: float = 1.0  # that picture's punch-in (Transform > Scale; 1: as shot)
     # A design made for other timing (an earlier cut) plays re-timed: (seconds here, seconds in the design).
     retime: list[tuple[float, float]] | None = None
     shortened_for: int | None = None  # plan index of the graphic it was shortened to make way for
@@ -570,17 +571,23 @@ def _canvas_block(width: int, height: int, fd: Fraction, zones: dict[str, float]
 
 def picture_under(tl: Timeline, analysis: Analysis, frame: int) -> tuple[Clip | None, float]:
     """The clip on screen at a timeline frame (the topmost B-roll, else the spine clip) and the source second shown."""
+    clip, at, _ = shot_under(tl, analysis, frame)
+    return clip, at
+
+
+def shot_under(tl: Timeline, analysis: Analysis, frame: int) -> tuple[Clip | None, float, float]:
+    """picture_under, and how far that picture is punched in (a spine piece's scale; B-roll plays as shot)."""
     fd = tl.frame_duration
     covering = sorted((c for c in tl.connected if c.kind == "broll" and c.lane > 0 and c.start <= frame < c.end), key=lambda c: -c.lane)
     for c in covering:
         clip = analysis.clip(c.clip_id)
         if clip is not None and clip.media.has_video:
-            return clip, float(c.src_in + (frame - c.start) * fd)
+            return clip, float(c.src_in + (frame - c.start) * fd), 1.0
     sc = tl.spine_at(frame)
     clip = analysis.clip(sc.clip_id) if sc is not None else None
     if clip is not None and clip.media.has_video:
-        return clip, float(sc.src_in + (frame - sc.offset) * fd)
-    return None, 0.0
+        return clip, float(sc.src_in + (frame - sc.offset) * fd), sc.scale
+    return None, 0.0, 1.0
 
 
 def describe_picture(clip: Clip | None) -> str:
@@ -596,7 +603,7 @@ def describe_picture(clip: Clip | None) -> str:
 def look_under(placed: list[PlacedGraphic], tl: Timeline, analysis: Analysis) -> None:
     """Note what each graphic sits over, at its middle frame."""
     for g in placed:
-        clip, at = picture_under(tl, analysis, g.start + g.frames // 2)
+        clip, at, g.zoom = shot_under(tl, analysis, g.start + g.frames // 2)
         g.over = describe_picture(clip)
         g.under = (clip.id, 0.0 if clip.media.kind == "image" else at) if clip is not None else None
 
@@ -610,7 +617,7 @@ def _pictures(placed: list[PlacedGraphic], analysis: Analysis, workers: int = 4)
 
         def grab(g: PlacedGraphic):
             clip = analysis.clip(g.under[0])
-            return g.id, ffmpeg_ops.extract_frame(Path(clip.media.path), g.under[1], Path(tmp) / f"{g.id}.jpg", width=PICTURE_WIDTH)
+            return g.id, ffmpeg_ops.extract_frame(Path(clip.media.path), g.under[1], Path(tmp) / f"{g.id}.jpg", width=PICTURE_WIDTH, zoom=g.zoom)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return {gid: path.read_bytes() for gid, path in pool.map(grab, todo) if path is not None}

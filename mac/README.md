@@ -31,7 +31,7 @@ The build is signed ad hoc, so after each rebuild macOS may ask again to allow K
 
 - **Preset**: Venture OC, Save the Kid, or one you saved with `roughcut preset save`. Picking one fills the brief, length, pacing, format and graphics look; change anything after. A brief you'd already typed is kept, after the preset's.
 - **Pacing**: Auto (the default) takes it from the brief, what you typed before the preset's part: "Pacing: loose" said outright; "tight cuts", "keep it tight", "snappy", "punchy" or "fast-paced" cut tight; "keep it loose", "let it breathe" or "slow-paced" cut loose; anything else, or "don't cut it too tight", medium. Pick Tight, Medium or Loose to choose it yourself.
-- **Punch-ins**: a 112% zoom alternating at each jump cut no B-roll covers. Auto (the default) turns them on when the brief asks for punch-ins on the jump cuts ("punch-ins", "punch in on the jump cuts"; not "no punch-ins" or "punch in on Roy's face"); On and Off decide it yourself.
+- **Punch-ins**: a 112% zoom alternating at each jump cut no B-roll covers (not on a clip letterboxed in the cut's format). Auto (the default) turns them on when the brief asks for punch-ins on the jump cuts ("punch-ins", "punch in on the jump cuts"; not "no punch-ins" or "punch in on Roy's face"); On and Off decide it yourself.
 - **Audio**: the dialogue level every clip's speech is matched to, short fades at edits, and a **Music bed** song (it ducks under speech and ends with the cut).
 - **Output**: format, motion graphics with their style and a **Logo**, project name, Stringout, um/uh, and **Open in Final Cut Pro when it's done**.
 - **Recent rough cuts**: reopen an earlier result (right-click to show it in Finder or remove it).
