@@ -975,7 +975,18 @@ async def load_fonts(page) -> None:
 _DRAWN_JS = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
 
 
-async def _frame_png(page, cdp, canvas_: tuple[int, int, float], fast: bool, what: str) -> bytes:
+async def drawing_world(cdp, what: str) -> int:
+    """An isolated world in the page's frame (its own globals, the page's DOM and main thread), where `_DRAWN_JS`
+    waits on the browser's own requestAnimationFrame. A design may replace or shadow the page's (a no-op, or a
+    shim its window.seek runs), and the wait would never end; a page whose main thread is stuck still never draws."""
+    tree = await _bounded(cdp.send("Page.getFrameTree"), STEP_TIMEOUT, what)
+    world = await _bounded(
+        cdp.send("Page.createIsolatedWorld", {"frameId": tree["frameTree"]["frame"]["id"], "worldName": "roughcut-drawn"}), STEP_TIMEOUT, what
+    )
+    return world["executionContextId"]
+
+
+async def _frame_png(page, cdp, world: int, canvas_: tuple[int, int, float], fast: bool, what: str) -> bytes:
     """One frame as a transparent PNG at the sequence size.
 
     The fast path asks Chrome directly (about twice as quick as page.screenshot, same pixels);
@@ -984,8 +995,9 @@ async def _frame_png(page, cdp, canvas_: tuple[int, int, float], fast: bool, wha
     It first waits for the page to draw what changed since the last capture: the seek, and the
     scale that capture set and put back. A capture straight after a change can catch the compositor
     between two states, with an edge a device pixel off, so a still graphic would jitter now and then.
+    The wait runs in `world` (`drawing_world`), whatever the design does with requestAnimationFrame.
     """
-    await _bounded(cdp.send("Runtime.evaluate", {"expression": _DRAWN_JS, "awaitPromise": True}), STEP_TIMEOUT, what)
+    await _bounded(cdp.send("Runtime.evaluate", {"expression": _DRAWN_JS, "awaitPromise": True, "contextId": world}), STEP_TIMEOUT, what)
     cw, ch, scale = canvas_
     if fast:
         clip = {"x": 0, "y": 0, "width": cw, "height": ch, "scale": scale}
@@ -1041,6 +1053,7 @@ async def _render_async(job: dict) -> dict:
                     await _bounded(cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}}), STEP_TIMEOUT, "didn't start")
                     await _bounded(page.set_content(brand_fonts.embed(job["html"]), wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
                     await load_fonts(page)
+                    world = await drawing_world(cdp, "didn't start")
                     size = tuple(job.get("size") or (round(cw * scale), round(ch * scale)))
                     fast = True
                     seek_error, fonts = None, []
@@ -1063,10 +1076,10 @@ async def _render_async(job: dict) -> dict:
                             for font in await _evaluate(cdp, _FONTS_JS, STEP_TIMEOUT, "froze while checking fonts") or []:
                                 fonts.append(f"asks for the font {str(font)[:60]}, which isn't installed on this computer, so it rendered in a fallback font")
                         drawing = f"froze at frame {frame} (the page stopped drawing)"
-                        png = await _frame_png(page, cdp, (cw, ch, scale), fast, drawing)
+                        png = await _frame_png(page, cdp, world, (cw, ch, scale), fast, drawing)
                         if fast and frame == 0 and _png_size(png) != size:
                             fast = result["fast"] = False  # the quick capture came out the wrong size: use Playwright's screenshot
-                            png = await _frame_png(page, cdp, (cw, ch, scale), fast, drawing)
+                            png = await _frame_png(page, cdp, world, (cw, ch, scale), fast, drawing)
                         try:
                             ff.stdin.write(png)
                         except (BrokenPipeError, OSError):

@@ -108,6 +108,30 @@ def test_a_page_stuck_outside_seek_cant_hang_the_renderer(tmp_path, monkeypatch)
     assert not list(tmp_path.glob("*.mov"))
 
 
+# Designs that replace or shadow the page's requestAnimationFrame, so their own loops can't run on the wall clock.
+SHIMS_RAF = {
+    "noop": GRAPHIC_HTML.replace("<script>", "<script>window.requestAnimationFrame=function(cb){return 0};"),
+    "queue": GRAPHIC_HTML.replace(  # callbacks queued, and run from window.seek
+        "<script>window.seek=function(t){",
+        "<script>var q=[];window.requestAnimationFrame=function(cb){q.push(cb);return q.length};"
+        "window.seek=function(t){var c=q;q=[];c.forEach(function(f){f(t*1000)});",
+    ),
+    "decl": GRAPHIC_HTML.replace("<script>", "<script>function requestAnimationFrame(cb){return 0}"),
+}
+
+
+@needs_renderer
+@pytest.mark.parametrize("shim", sorted(SHIMS_RAF))
+def test_a_design_that_replaces_request_animation_frame_still_renders(tmp_path, monkeypatch, shim):
+    """Each frame waits for the page to draw using the browser's own requestAnimationFrame, not the design's."""
+    monkeypatch.setattr(graphics, "STEP_TIMEOUT", 8.0)
+    t0 = time.monotonic()
+    result = graphics._render_one(job_for(tmp_path, SHIMS_RAF[shim], frames=30))
+    assert result["error"] is None and (tmp_path / "G01-test.mov").is_file()
+    assert time.monotonic() - t0 < 30
+    assert _probe(tmp_path / "G01-test.mov")["codec_name"] == "prores"
+
+
 @needs_renderer
 def test_a_whole_graphic_has_a_time_budget(tmp_path):
     slow = GRAPHIC_HTML.replace("<script>window.seek=function(t){", "<script>window.seek=function(t){var e=Date.now()+150;while(Date.now()<e){}")
@@ -286,12 +310,13 @@ def test_fast_frame_capture_matches_playwrights_screenshot():
             await cdp.send("Emulation.setDefaultBackgroundColorOverride", transparent)
             await page.set_content(GRAPHIC_HTML.replace("TEXT", "Match"), wait_until="load")
             await graphics.load_fonts(page)
+            world = await graphics.drawing_world(cdp, "start")
             shots = []
             for _ in range(8):
                 await graphics._evaluate(cdp, f"({graphics._SEEK_JS})(1.0)", 5, "seek")
-                shots.append(await graphics._frame_png(page, cdp, (cw, ch, scale), True, "fast"))
+                shots.append(await graphics._frame_png(page, cdp, world, (cw, ch, scale), True, "fast"))
                 for _ in range(2):
-                    shots.append(await graphics._frame_png(page, cdp, (cw, ch, scale), False, "slow"))
+                    shots.append(await graphics._frame_png(page, cdp, world, (cw, ch, scale), False, "slow"))
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride", transparent)  # Playwright's screenshot puts the default back
             await browser.close()
             return shots
