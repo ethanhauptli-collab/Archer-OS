@@ -89,7 +89,7 @@ class Preset:
     description: str = ""
     brief: str = ""
     target: str | None = None  # "90s", "10m", "8:30"
-    style: str | None = None  # tight / medium / loose (None: the default, medium)
+    style: str | None = None  # tight / medium / loose (None: auto, from the brief)
     format: str | None = None  # 1080p, 4k, vertical... (None: from the footage)
     graphics: bool = False
     graphics_style: str = ""
@@ -112,7 +112,7 @@ class Preset:
                 bits.append(seconds_to_clock(parse_duration(self.target)))
             except ValueError:
                 bits.append(self.target)
-        bits.append(f"{self.style or 'medium'} pacing")
+        bits.append(f"{self.style} pacing" if self.style else "pacing from the brief")
         bits.append(self.format or "format from the footage")
         bits.append("graphics on" if self.graphics else "graphics off")
         if self.logo:
@@ -493,7 +493,7 @@ def add_commands(sub) -> None:
 def _print(preset: Preset) -> None:
     print(f"{preset.name} ({preset.source})" + (f": {preset.description}" if preset.description else ""))
     print(f"  target    {preset.target or 'none'}")
-    print(f"  pacing    {preset.style or 'medium'}")
+    print(f"  pacing    {preset.style or 'auto (from the brief)'}")
     print(f"  format    {preset.format or 'from the footage'}")
     print(f"  graphics  {'on' if preset.graphics else 'off'}")
     print(f"  look      {preset.graphics_style or '(the default look)'}")

@@ -927,3 +927,16 @@ def test_an_approved_look_reaches_the_designer_end_to_end(footage, config, tmp_p
     fcpxml = next(second.glob("*.fcpxml"))
     validate_dtd(fcpxml)
     check_invariants(fcpxml)
+
+
+def test_a_preset_with_no_pacing_says_auto(footage, config, capsys):
+    # It was described as "medium pacing" while the build took its pacing from the brief.
+    from roughcut import presets
+    from roughcut.cli import main
+
+    assert main(["preset", "save", "walk", "--brief", "Walk-and-talk rundown. Keep it tight.", "--no-graphics"]) == 0
+    assert "pacing from the brief" in capsys.readouterr().out
+    assert presets.load("walk").summary() == "pacing from the brief, format from the footage, graphics off"
+    assert main(["preset", "show", "walk"]) == 0
+    assert "pacing    auto (from the brief)" in capsys.readouterr().out
+    assert "tight pacing" in presets.load("venture-oc").summary()

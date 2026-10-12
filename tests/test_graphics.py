@@ -45,6 +45,16 @@ def test_names_in_a_rundown_get_a_graphic_each_where_the_brief_puts_them():
     assert 'Where the brief or a graphic\'s direction says to put graphics (e.g. "right center"), put them there' in graphics.DESIGN_SYSTEM
 
 
+def test_the_rundown_rule_applies_only_when_the_brief_asks_for_the_names():
+    # Unconditional, it contradicted the lower_third rule ("when the brief asks to show them") and the spacing rule:
+    # a promo naming three vendors in 8 seconds, with no such request, got two opposite instructions.
+    brief = render_brief("Venture OC promo", None, None, graphics=True)
+    rundown = next(line for line in brief.split("\n- ") if "one graphic each" in line)
+    assert rundown.startswith("When the brief asks to show names that come up one at a time") and "lower_third" in rundown
+    spacing = next(line for line in brief.split("\n- ") if "space them out" in line)
+    assert "Apart from a rundown the brief asks for" in spacing
+
+
 def test_plan_keeps_only_graphics_on_words_in_the_cut():
     raw = {"sections": [{"name": "x", "items": ["V01.S003", "V01.S005"], "broll": []}], "graphics": GRAPHICS}
     a, plan, _ = analysis_and_cut(raw)
