@@ -384,6 +384,26 @@ def test_a_line_the_planner_lists_as_another_take_is_one_only_when_it_reads_that
     assert another_read("Um, Dough Boy Pizza comes from, uh, Marco Belini.", line) and another_read("Dough Boy Pizza comes", line)
     assert another_read("Dough Boy Pizza comes from Marco Belini, who trained in Naples for ten years.", line)
     assert not another_read("Wait, hold on, let me redo that.", line) and not another_read("Now for pizza.", line)
+    # A retake in other words is one: it says most of the line's own words (names, places, what happens). A flub,
+    # or another line read in the same frame, isn't.
+    assert another_read("Dough Boy Pizza is Marco Belini's place.", line)
+    assert another_read("So, Dough Boy Pizza, that's Marco Belini's.", line)
+    assert another_read("Subscribe for more.", "Make sure you subscribe for more videos like this.")
+    assert another_read("Make sure you subscribe for more videos like this.", "Subscribe for more.")
+    assert another_read("So today we're", "So today we're heading up the mountain.")  # a false start
+    for flub in ("Um, wait, let me start over.", "Sorry, can we go again?", "Hold on, I messed that up.", "Okay, one more time.",
+                 "Wait, what's his name again?", "Let me redo that, sorry."):
+        assert not another_read(flub, line), flub
+    assert not another_read("Next is Sushi Kaze.", "Next is Burnt Ends.")
+    assert not another_read("Next up tonight is Sushi Kaze.", "Next up tonight is Burnt Ends.")
+    assert not another_read("Then Golden Hour for the sunset.", "Then Kogi for the tacos.")
+    # The planner lists the reworded take among the line's others and keeps both in its sections: the line plays once.
+    reworded = _rundown("Dough Boy Pizza is Marco Belini's place.")
+    raw = {"sections": [{"name": "Rundown", "items": ["V01.S007", "V01.S012", "V01.S010", "V01.S011"]}],
+           "alternates": [{"chosen": "V01.S010", "others": ["V01.S012"], "note": "The cleaner read."}]}
+    plan = normalize(raw, reworded, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S007", "V01.S010", "V01.S011"]
+    assert [(alt["chosen"], alt["others"]) for alt in plan.alternates] == [("V01.S010", ["V01.S012"])]
 
 
 # ------------------------------------------------------------ T10: fillers and pacing

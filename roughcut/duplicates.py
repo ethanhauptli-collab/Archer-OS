@@ -60,20 +60,40 @@ def same_line(a: list[str], b: list[str], same_takes: bool) -> bool:
     return sm.quick_ratio() >= need and sm.ratio() >= need
 
 
+TAKE_CONTENT = 0.5  # of the content words in the wordier of two lines (names, places, what happens), said in both
+# Words that frame a line rather than say it: two lines sharing only these ("Next up tonight is Sushi Kaze." and
+# "Next up tonight is Burnt Ends.") are two lines.
+FUNCTION_WORDS = frozenset(
+    """a an the and or but so if then than as of in on at to for from by with about into onto over under up down out off
+    i i'm i've i'd i'll me my mine we we're we've we'll we'd us our ours you you're you've you'll your yours he he's him
+    his she she's her hers it it's its they they're they've them their theirs this that that's these those there there's
+    here here's what what's which who who's whom whose when where why how is are was were be been being am do does did
+    doing done have has had having will would can could should shall may might must just not no yes yeah okay ok oh well
+    like really very too also all some any each every much many more most one now let let's get got go goes going gonna
+    wanna gotta make sure first second third next last then finally today tonight""".split()
+)
+
+
+def content_words(words: list[str]) -> set[str]:
+    """What a line says, without the words that frame it (and "Belini's" is "Belini")."""
+    return {w.removesuffix("'s") for w in words if w not in FUNCTION_WORDS}
+
+
 def another_read(a: str, b: str) -> bool:
     """Is the line `a` says another read of the line `b` says (a retake), not a flub or another line?
 
-    Most of the same words (TAKE_SIMILARITY, as alternate takes are matched in the browser),
-    the same line once um/uh are left out, or one inside the other (a false start, or a read
-    Whisper ended a sentence later).
+    Most of the same content words, however it's worded ("Dough Boy Pizza is Marco Belini's place." for "Dough Boy
+    Pizza comes from Marco Belini."), the same line once um/uh are left out, or one inside the other (a false start,
+    a shortened read, or a read Whisper ended a sentence later). A flub ("Wait, let me redo that.") shares none of the
+    line's words, and another line read in the same frame ("Next is Sushi Kaze." for "Next is Burnt Ends.") only its frame.
     """
-    wa, wb = re.findall(r"[a-z0-9']+", a.lower()), re.findall(r"[a-z0-9']+", b.lower())
-    if wa and wb:
-        sm = difflib.SequenceMatcher(None, wa, wb, autojunk=False)
-        if sm.quick_ratio() >= TAKE_SIMILARITY and sm.ratio() >= TAKE_SIMILARITY:
-            return True
     la, lb = line_words(a), line_words(b)
-    return same_line(la, lb, same_takes=True) or contains_line(la, lb, True) or contains_line(lb, la, True)
+    if not la or not lb:
+        return False
+    ca, cb = content_words(la), content_words(lb)
+    if ca and cb and len(ca & cb) >= TAKE_CONTENT * max(len(ca), len(cb)):
+        return True
+    return same_line(la, lb, same_takes=True) or contains_line(la, lb, True, min_words=2) or contains_line(lb, la, True, min_words=2)
 
 
 LINE_CONTAINED = 0.85  # of the shorter line's words found in order inside the longer one...
@@ -81,14 +101,17 @@ LINE_SPREAD = 1.3  # ...within this many times its length (not common words scat
 LINE_CONTAINED_MIN_WORDS = 4  # the shorter line, in two reads/exports of one script (LINE_REPEAT_MIN_WORDS elsewhere)
 
 
-def contains_line(long: list[str], short: list[str], same_takes: bool) -> bool:
+def contains_line(long: list[str], short: list[str], same_takes: bool, *, min_words: int | None = None) -> bool:
     """Is line `short` said again inside line `long`?
 
     Whisper's punctuation, so where sentences split, differs between reads
     of one script and between a clean voiceover and the same one over
-    music: one read's sentence is often half of the other's.
+    music: one read's sentence is often half of the other's. `min_words`:
+    the shortest `short` that counts, when it isn't the usual length.
     """
-    if len(short) < (LINE_CONTAINED_MIN_WORDS if same_takes else LINE_REPEAT_MIN_WORDS) or len(long) < len(short):
+    if min_words is None:
+        min_words = LINE_CONTAINED_MIN_WORDS if same_takes else LINE_REPEAT_MIN_WORDS
+    if len(short) < min_words or len(long) < len(short):
         return False
     if sum((Counter(short) & Counter(long)).values()) < LINE_CONTAINED * len(short):
         return False  # cheap check first, without building a matcher for every pair of lines
