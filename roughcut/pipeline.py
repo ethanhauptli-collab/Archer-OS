@@ -746,6 +746,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         else:
             if have_manifest:
                 specs, html, style = graphics.saved_designs(out_dir)
+                specs = graphics.with_planned(specs, plan.graphics)
                 house = saved_house_style(out_dir)
             else:
                 specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""

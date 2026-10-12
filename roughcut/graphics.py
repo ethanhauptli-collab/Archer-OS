@@ -38,6 +38,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -62,6 +63,7 @@ from .timeline import ConnectedClip, Timeline
 LEAD = 0.12  # a graphic starts animating in just before its words (never before the cut its words open)
 GAP_FRAMES = 2  # between one graphic leaving and the next arriving: one graphic on screen at a time
 MIN_SECONDS = 1.5  # shortest a graphic is held when it's shortened to make room for the next
+LATE_SECONDS = 1.0  # how far a graphic may wait past its lead, while its words are said, so the one before can hold
 MANIFEST = "graphics.json"
 
 # ProRes 4444 with alpha, which Final Cut layers above the footage. A fixed quantizer encodes
@@ -172,6 +174,7 @@ class PlacedGraphic:
     retime: list[tuple[float, float]] | None = None
     shortened_for: int | None = None  # plan index of the graphic it was shortened to make way for
     full_frames: int = 0  # its length before that
+    latest_start: int | None = None  # the latest frame it may start (inside its words and its piece), when the one before needs room
 
     @property
     def slug(self) -> str:
@@ -239,7 +242,14 @@ def place(specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, warnings: 
         if frames < round(fps):  # less than a second left on the timeline
             warnings.append(f"graphic {spec.text!r}: too close to the end of the cut; skipped")
             continue
-        placed.append(PlacedGraphic(id="", spec=spec, index=index, start=start, frames=frames, word_times=times))
+        # Room to wait a moment for the graphic before it: while its words are still being said, and never
+        # past the end of the clip its words are in (Final Cut connects it to the clip under its first frame).
+        piece_end = piece.offset + piece.frames if piece is not None else tl.total_frames
+        latest = min(
+            start + round(LATE_SECONDS * fps), end_frame if end_frame is not None else start, piece_end - 1,
+            start + frames - round(MIN_SECONDS * fps),  # it keeps its end, so it still holds MIN_SECONDS
+        )
+        placed.append(PlacedGraphic(id="", spec=spec, index=index, start=start, frames=frames, word_times=times, latest_start=max(start, latest)))
     placed = one_at_a_time(placed, fps, warnings)
     for n, g in enumerate(placed, 1):  # numbered in the order they appear
         g.id = f"G{n:02d}"
@@ -250,7 +260,9 @@ def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) 
     """Never two graphics on screen at once: shorten the earlier one, or leave the later one out.
 
     The earlier one ends GAP_FRAMES before the next starts, if that leaves it at least
-    MIN_SECONDS and (for a kinetic caption) time to show its last word.
+    MIN_SECONDS and (for a kinetic caption) time to show its last word. When it doesn't,
+    the later one may start up to LATE_SECONDS later, while its words are still being said
+    (names read back to back each get their graphic), before it is left out.
     """
     kept: list[PlacedGraphic] = []
     for g in sorted(placed, key=lambda g: (g.start, g.index)):
@@ -258,8 +270,14 @@ def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) 
         if prev is None or g.start >= prev.start + prev.frames:
             kept.append(g)
             continue
-        room = g.start - GAP_FRAMES - prev.start
         last_word = prev.word_times[-1][1] if prev.spec.kind == "kinetic_caption" and prev.word_times else 0.0
+        need = max(round(MIN_SECONDS * fps), math.ceil((last_word + 0.5) * fps) if last_word else 0)
+        wait = prev.start + need + GAP_FRAMES - g.start
+        if wait > 0 and g.spec.kind != "kinetic_caption" and g.latest_start is not None and g.start + wait <= g.latest_start:
+            g.start += wait
+            g.frames -= wait
+            g.word_times = [(w, round(t - wait / fps, 3)) for w, t in g.word_times if t - wait / fps >= 0]
+        room = g.start - GAP_FRAMES - prev.start
         if room >= round(MIN_SECONDS * fps) and room / fps >= last_word + 0.5:
             warnings.append(shortened_warning(prev, g, room / fps))
             prev.full_frames = prev.full_frames or prev.frames
@@ -1354,6 +1372,21 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
     empty = GraphicSpec(kind="quote", segment="", words="", text="")
     specs = [by_index.get(i, empty) for i in range(max(by_index, default=-1) + 1)]
     return specs, html, str(data.get("style", ""))
+
+
+def with_planned(specs: list[GraphicSpec], planned: list[GraphicSpec]) -> list[GraphicSpec]:
+    """Saved specs, with the plan's graphics that the saved cut left out back at their positions.
+
+    graphics.json holds the graphics a cut placed. One left out then (it would have covered
+    another, or its words weren't in that cut) may fit this cut: placing it again lets a
+    re-cut show it, and `render --design-missing` design it.
+    """
+    empty = GraphicSpec(kind="quote", segment="", words="", text="")
+    out = list(specs) + [empty] * max(0, len(planned) - len(specs))
+    for i, spec in enumerate(planned):
+        if not out[i].text and spec.text:
+            out[i] = spec
+    return out
 
 
 def make(

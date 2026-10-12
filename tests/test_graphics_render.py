@@ -12,7 +12,7 @@ from conftest import CANNED_PLAN, GRAPHIC_HTML, SPEECH, FakeProvider, ffmpeg, ma
 
 from roughcut import graphics
 from roughcut.analyze import Analysis
-from roughcut.plan import normalize
+from roughcut.plan import GraphicSpec, normalize
 from roughcut.timeline import STYLES, build_timeline
 
 needs_renderer = pytest.mark.skipif(graphics.renderer_problem() is not None, reason="no Playwright browser to render with")
@@ -586,6 +586,28 @@ def test_an_overlapping_graphic_is_left_out_when_the_one_before_cant_make_room()
     assert only.word_times[-1][1] > 2.5  # "weeks." comes well after the stat would have started
 
 
+def test_names_read_back_to_back_each_get_their_graphic():
+    # A rundown: one name ends a line, the next starts the line after. The second used to be left out.
+    first = spec("lower_third", "V01.S003", "the mountain", "Mountain", 3)
+    second = spec("lower_third", "V01.S004", "It's going to be a long day", "Long Day", 3)
+    a, plan, tl = small_cut([first, second])
+    (one, two), warnings, fps = placed_for([first, second])
+    assert one.frames >= round(graphics.MIN_SECONDS * fps) and one.start + one.frames == two.start - graphics.GAP_FRAMES
+    assert warnings == [f"graphic 'Mountain' shortened to {one.frames / fps:.1f}s so it's gone before 'Long Day'"]
+    # It waited, but only while its words are still being said, and still opens on the clip its words are in.
+    seg = a.segment("V01.S004")
+    words_start = graphics._frame_at(tl, "V01", seg.words[0].start)
+    words_end = graphics._frame_at(tl, "V01", seg.words[-1].end - 0.01)
+    assert words_start < two.start <= min(words_end, words_start + round(graphics.LATE_SECONDS * fps))
+    assert tl.spine_at(two.start) is tl.spine_at(words_start)
+    assert two.frames >= round(graphics.MIN_SECONDS * fps) and two.start + two.frames == words_start - round(graphics.LEAD * fps) + round(3 * fps)  # it kept its end
+    assert two.word_times and all(t >= 0 for _, t in two.word_times) and two.word_times[-1][0] == "day."
+    # Kinetic captions reveal word by word, so they never wait: one over a caption is still left out.
+    caption = spec("kinetic_caption", "V01.S004", "It's going to be a long day", "It's going to be a long day", 0)
+    placed, warnings, _ = placed_for([first, caption])
+    assert [g.spec.text for g in placed] == ["Mountain"] and "left out (one graphic at a time)" in warnings[0]
+
+
 def test_graphics_are_numbered_in_the_order_they_appear():
     placed, warnings, _ = placed_for([spec("stat", "V01.S005", "asking", "Later", 2), spec("lower_third", "V01.S003", "Today", "Earlier", 2)])
     assert [(g.id, g.index, g.spec.text) for g in placed] == [("G01", 1, "Earlier"), ("G02", 0, "Later")] and not warnings
@@ -944,6 +966,10 @@ def test_saved_designs_are_read_by_plan_position_in_any_order(tmp_path):
     specs, html, style = graphics.saved_designs(out)
     assert [s.text for s in specs] == ["zero", "", "two", "three"]
     assert html == {0: "<p>zero</p>", 2: "<p>two</p>", 3: "<p>three</p>"} and style == "s"
+    # A re-cut also gets back the planned graphics that cut left out (index 1, and 4 after the last saved one),
+    # so it can place them and --design-missing can design them; saved ones (maybe hand-edited) win.
+    planned = [GraphicSpec(kind="quote", segment="V01.S003", words="", text=t) for t in ("plan zero", "one", "plan two", "plan three", "four")]
+    assert [s.text for s in graphics.with_planned(specs, planned)] == ["zero", "one", "two", "three", "four"]
 
 
 def test_a_graphic_without_a_saved_design_is_reported_not_dropped_silently(tmp_path, monkeypatch):
