@@ -1048,8 +1048,10 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                             spellings=plan.spellings,
                         )
                     limit_hit = designer.limit
-                else:
+                elif any(g.text and i not in designed for i, g in enumerate(specs)):
                     log("--design-missing: this cut has no room for a graphic that has no design yet")
+                else:
+                    log("--design-missing: every graphic in the plan has a design already")
             # Only designed graphics are placed: one without a design never pushes a designed one off the timeline.
             # make() keeps the rest in graphics.json, so a later re-cut (or --design-missing) can place them.
             shown = set(html)
@@ -1236,7 +1238,8 @@ def design_missing_hint(out_dir: Path, n: int, *, after_reset: bool = False) -> 
         f"{n} graphic{'s' if n > 1 else ''} in the plan {'have' if n > 1 else 'has'} no design yet, so this cut leaves {them} out. "
         + ("After the reset, " if after_reset else "")
         + f"`roughcut render {shlex.quote(str(out_dir))} --design-missing` asks the model for {'those designs' if n > 1 else 'that design'} only "
-        f"and makes a new version with {them}; the cut and the other graphics stay as they are."
+        f"and makes a new version with {them}; the cut stays as it is and no designed graphic leaves the timeline "
+        "(one next to it may come in a moment later or leave sooner to make room)."
     )
 
 
@@ -1475,7 +1478,8 @@ def revise(
     respell_graphics(previous.graphics, previous.spellings)
     # Everything the editor has said to leave out, in these notes or earlier ones, unless these notes keep it.
     leave_out = standing_avoids(revisions + [{"keep": keep_ids, "avoid": avoid_ids}], analysis=analysis)
-    for note in wide_lifts(made_without, keep_ids, analysis):
+    # Only a clip these notes don't leave out again comes back: "--keep V01.S005 --avoid V01" keeps V01 out.
+    for note in wide_lifts([a for a in made_without if a not in leave_out], keep_ids, analysis):
         log(note)
         extra_warnings.append(note)
     request = revision_request(

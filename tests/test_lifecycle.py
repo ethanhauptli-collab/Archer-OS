@@ -638,6 +638,20 @@ def test_a_keep_lifts_only_the_avoids_it_overlaps(footage, tmp_path, fake, share
     assert "V01.S003" in items()
 
 
+def test_a_keep_of_a_clip_this_revision_avoids_again_says_nothing_about_bringing_it_back(footage, tmp_path, fake, shared_cache, capsys):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+    assert main(["revise", str(out), "No V01.", "--avoid", "V01"]) == 0
+    capsys.readouterr()
+    # The keep lifts the earlier --avoid V01, and this revision's own --avoid V01 leaves the clip out again.
+    assert main(["revise", str(out), "Keep the close but still no V01.", "--keep", "V01.S005", "--avoid", "V01"]) == 0
+    items = [i for s in json.loads((out / "plan.json").read_text())["plan"]["sections"] for i in s["items"]]
+    assert not any(i.startswith("V01") for i in items)
+    printed = capsys.readouterr()
+    assert "brings back all of V01" not in printed.out + printed.err
+    assert "brings back all of V01" not in (out / "edit_report.md").read_text()
+
+
 def test_name_spellings_last_through_revisions_and_re_cuts(footage, tmp_path, fake, shared_cache):
     import copy
 
@@ -1598,6 +1612,28 @@ def test_design_missing_never_pushes_a_designed_graphic_out(footage, tmp_path, m
     assert "Long Day" in call["parts"][-1].text.split("<graphics>")[-1] and "The Kids" not in call["parts"][-1].text.split("<graphics>")[-1]
     validate_dtd(loose.fcpxml)
     check_invariants(loose.fcpxml)
+
+
+def test_design_missing_says_when_every_graphic_has_a_design_already(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_back_to_back_names()))
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True, style="loose"))
+    _no_model(monkeypatch)
+    for style in ("loose", "tight"):  # at a tight pace one designed graphic waits in left-out: it has a design all the same
+        pipeline.rerender(out, Options(inputs=[], style=style), overrides={"style"}, design_missing=True)
+        log = (out / "roughcut.log").read_text().split("=== roughcut render started")[-1]
+        assert "--design-missing: every graphic in the plan has a design already" in log, style
+        assert "no room for a graphic that has no design yet" not in log
+
+
+def test_the_design_missing_hint_promises_only_what_it_keeps():
+    """Designing a missing graphic leaves the cut and every designed graphic on the timeline, but one beside it can
+    come in later or leave sooner (one graphic at a time)."""
+    hint = pipeline.design_missing_hint(Path("/tmp/out"), 1)
+    assert "the cut stays as it is and no designed graphic leaves the timeline" in hint
+    assert "may come in a moment later or leave sooner" in hint
+    assert "the other graphics stay as they are" not in hint
 
 
 def test_a_graphic_one_recut_left_out_comes_back_in_the_next_without_the_model(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
