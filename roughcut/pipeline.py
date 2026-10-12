@@ -783,12 +783,17 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
     plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
-    revision = next((h for h in reversed(saved.get("notes_history") or []) if isinstance(h, dict)), None)
-    if revision and revision.get("avoid") and saved.get("raw"):
-        # The model's plan, as the revision that made it left it: what it was told to avoid stays out.
-        from .revise import enforce
+    if saved.get("raw"):
+        from .revise import enforce, missing_keep_note, standing_avoids
 
-        enforce(plan, analysis, keep=[], avoid=[str(a) for a in revision["avoid"]])
+        # The model's plan, as the revisions that made it left it: what the editor said to leave out stays out...
+        revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
+        avoid = standing_avoids(revisions)
+        if avoid:
+            enforce(plan, analysis, keep=[], avoid=avoid)
+        # ...and a line the last one was asked to keep and left out keeps its to-do marker, where that revision put it.
+        asked = {missing_keep_note(str(k)) for k in (revisions[-1].get("keep") or [] if revisions else [])}
+        plan.flags += [f for f in saved["plan"].get("flags") or [] if isinstance(f, dict) and f.get("note") in asked and f not in plan.flags]
     plan.spellings = _saved_spellings(saved, plan.spellings)  # a revision's, with the ones it carried over
     respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
@@ -1162,7 +1167,7 @@ def revise(
     The planner sees the build's system prompt and media block (prompt-cached),
     the previous plan and the notes. Arguments left as None come from the saved run.
     """
-    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids
+    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids, standing_avoids
 
     t_start = time.monotonic()
     out_dir = out_dir.expanduser().resolve()
@@ -1208,14 +1213,21 @@ def revise(
     opts = replace(opts, graphics_logo=_saved_logo(settings, extra_warnings if opts.graphics else []))
     measure_missing_levels(analysis, opts)
 
+    revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
+    history = [h for h in revisions if h.get("notes")]  # a revision may be only --keep/--avoid
+    keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
     previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    made_without = standing_avoids(revisions)
+    if made_without:
+        # The cut as it was made: what earlier notes left out isn't in it (the model's own plan may still have it).
+        enforce(previous, analysis, keep=[], avoid=made_without)
     previous.spellings = _saved_spellings(saved, previous.spellings)  # with the ones it carried over: the reviser sees them all
     respell_graphics(previous.graphics, previous.spellings)
-    history = [h for h in saved.get("notes_history") or [] if isinstance(h, dict) and h.get("notes")]
-    keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
+    # Everything the editor has said to leave out, in these notes or earlier ones, unless these notes keep it.
+    leave_out = standing_avoids(revisions + [{"keep": keep_ids, "avoid": avoid_ids}])
     request = revision_request(
         previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
-        graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=avoid_ids,
+        graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,
     )
     prev_entry = versions.current(out_dir) or {}
     prev_n = prev_entry.get("n")
@@ -1237,7 +1249,7 @@ def revise(
         raise ProviderError(f"{e} Nothing changed: {still}") from e
     timings = {"revision": time.monotonic() - t}
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
-    enforced = enforce(plan, analysis, keep=keep_ids, avoid=avoid_ids, previous=previous)
+    enforced = enforce(plan, analysis, keep=keep_ids, avoid=leave_out, previous=previous)
     plan.warnings += enforced.warnings
     # Name spellings found before still hold: the revision's own first, then the earlier ones it didn't
     # repeat, except one it undid by returning it as heard ("correct" the same as "heard").
@@ -1265,7 +1277,7 @@ def revise(
     versions.snapshot(out_dir, before=version)
     new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True), "vision_model": settings.get("vision_model")}
     record = plan_record(name, plan, raw, analysis, new_settings)
-    record["notes_history"] = history + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
+    record["notes_history"] = revisions + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
         record["revision_of"] = prev_n
     prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n" + request

@@ -3,7 +3,8 @@
 The planner gets the same system prompt and the same (prompt-cached) media
 block as the build, then the previous plan and the notes, and returns a whole
 new plan. It still only names segment IDs; `plan.normalize` checks them as
-always. Afterwards `--avoid` is enforced, missing `--keep` IDs are flagged,
+always. Afterwards `--avoid` is enforced (this revision's and every earlier
+one's, until a later `--keep` names it), missing `--keep` IDs are flagged,
 and the paper edit lists exactly what changed.
 """
 
@@ -111,6 +112,34 @@ def split_ids(values: list[str]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _lifts(keep: str, avoid: str) -> bool:
+    """A --keep undoes an earlier --avoid of the same line, or of the clip (or the part of a clip) it's from.
+
+    A line left out by name stays out until it's kept by name: keeping its clip doesn't bring it back.
+    """
+    if keep == avoid:
+        return True
+    if _SEG.match(avoid):
+        return False
+    return re.split(r"[.@]", keep, maxsplit=1)[0] == re.split(r"[.@]", avoid, maxsplit=1)[0]
+
+
+def standing_avoids(history: list, keep: list[str] | None = None) -> list[str]:
+    """Every --avoid of the revisions in `history` (plan.json's notes_history, oldest first) still in force.
+
+    What the editor said to leave out stays out of every later version and re-cut, until a later
+    --keep (an entry's own, or `keep`: this run's) names it again.
+    """
+    out: list[str] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        lifted = split_ids([str(k) for k in entry.get("keep") or []])
+        out = [a for a in out if not any(_lifts(k, a) for k in lifted)]
+        out += [a for a in split_ids([str(a) for a in entry.get("avoid") or []]) if a not in out]
+    return [a for a in out if not any(_lifts(k, a) for k in keep or [])]
+
+
 @dataclass
 class _Rule:
     clip: str
@@ -176,6 +205,11 @@ def _anchor(missing: str, previous: Plan | None, plan: Plan) -> str | None:
     return now[0]
 
 
+def missing_keep_note(token: str) -> str:
+    """The to-do marker's note for a --keep the revision left out."""
+    return f"You asked to keep {token} (--keep), but the revision left it out."
+
+
 def enforce(plan: Plan, analysis: Analysis, *, keep: list[str], avoid: list[str], previous: Plan | None = None) -> Enforced:
     """Apply --avoid to the revised plan and check --keep. Never raises."""
     result = Enforced()
@@ -229,7 +263,7 @@ def enforce(plan: Plan, analysis: Analysis, *, keep: list[str], avoid: list[str]
             result.missing_keeps.append(token)
             # The marker goes where the line was (it can't sit on something that isn't in the cut).
             anchor = _anchor(token, previous, plan) or token
-            plan.flags.append({"ref": anchor, "note": f"You asked to keep {token} (--keep), but the revision left it out."})
+            plan.flags.append({"ref": anchor, "note": missing_keep_note(token)})
     return result
 
 

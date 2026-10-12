@@ -480,6 +480,63 @@ def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake, 
     assert main(["render", str(out), "--style", "tight"]) == 0
     paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1]
     assert "V01.S003" not in paper.split("## Alternate", 1)[0] and "V03@" not in paper and "V02" not in paper.split("## Alternate", 1)[0]
+    # ...and the to-do marker for the line it was asked to keep, where the revision put it.
+    assert "You asked to keep V01.S002" in (out / _top_fcpxml(out)[0]).read_text()
+
+
+def test_an_avoid_lasts_through_later_revisions_until_a_keep_lifts_it(footage, tmp_path, fake, shared_cache):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+
+    def cut_of(n: int) -> tuple[list[str], list[str]]:
+        plan = json.loads((out / "plan.json").read_text())["plan"]
+        assert json.loads((out / "result.json").read_text())["version"] == n
+        return [i for s in plan["sections"] for i in s["items"]], [b["clip"] for s in plan["sections"] for b in s["broll"]]
+
+    # The fake model returns the same plan every time, as one that keeps what it's shown would.
+    assert main(["revise", str(out), "No test bars, and lose the wrap line.", "--avoid", "V02@0-4", "--avoid", "V01.S006"]) == 0
+    items, broll = cut_of(2)
+    assert "V01.S006" not in items and "V02" not in broll
+
+    assert main(["revise", str(out), "Shorter wrap."]) == 0
+    request = fake.calls[-1]["parts"][1].text
+    assert "<leave_out>\nV02@0-4, V01.S006\n</leave_out>" in request  # still asked for
+    previous = request.split("<previous_plan>", 1)[1].split("</previous_plan>", 1)[0]
+    assert "B-roll V02" not in previous and '  V01.S006 "' not in previous  # the cut as it was made, not the model's plan before --avoid
+    items, broll = cut_of(3)
+    assert "V01.S006" not in items and "V02" not in broll
+    report = (out / "edit_report.md").read_text()
+    assert "Changes from v2:" in report and "Added **V01.S006**" not in report
+
+    # A re-cut keeps every earlier revision's --avoid, not only the last one's.
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1].split("## Alternate", 1)[0]
+    assert "V01.S006" not in paper and "V02" not in paper
+
+    # Until a later --keep names it.
+    assert main(["revise", str(out), "Bring the wrap line back.", "--keep", "V01.S006"]) == 0
+    assert "<leave_out>\nV02@0-4\n</leave_out>" in fake.calls[-1]["parts"][1].text
+    items, broll = cut_of(5)
+    assert "V01.S006" in items and "V02" not in broll
+    assert main(["render", str(out), "--style", "loose"]) == 0
+    paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1].split("## Alternate", 1)[0]
+    assert "V01.S006" in paper and "V02" not in paper
+
+
+def test_standing_avoids_last_until_a_keep_names_them():
+    from roughcut.revise import standing_avoids
+
+    history = [
+        {"notes": "a", "keep": [], "avoid": ["V01.S006", "V02@0-4", "V03"]},
+        {"notes": "b", "keep": ["V01.S006"], "avoid": ["V01.S002"]},
+        {"notes": "c", "keep": [], "avoid": ["V01.S006"]},  # left out again
+    ]
+    assert standing_avoids(history) == ["V02@0-4", "V03", "V01.S002", "V01.S006"]
+    # A kept line or clip lifts an avoid of that line, or of the clip (or part of the clip) it's from; keeping a clip
+    # doesn't bring back a line of it that was left out by name.
+    assert standing_avoids(history, ["V02.S001", "V01"]) == ["V03", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V03"]) == ["V02@0-4", "V01.S002", "V01.S006"]
+    assert standing_avoids([{"notes": "old folder"}, "junk"]) == []
 
 
 def test_name_spellings_last_through_revisions_and_re_cuts(footage, tmp_path, fake, shared_cache):
