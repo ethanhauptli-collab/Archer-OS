@@ -90,6 +90,7 @@ The CLI was first built in a Linux cloud session; the owner runs it from Termina
 - A Claude-planned cut of real footage end to end (only synthetic footage has been planned live), and the planner's use of B-roll `words` and kept lengths on a long shoot.
 - Level matching on real sources (thresholds to tune: busy-background note 20 dB, music lift 8 dB, spine B-roll −6 dB), breath detection, music-bed promo detection.
 - Interactive use of the app: presets, music picker, revise box, notifications, Finish without AI, Update Roughcut.
+- Captions (`<name> vN.srt`) imported with File > Import > Captions onto the project, and punch-ins (`<adjust-transform scale>` on spine clips) as they look in the viewer, including a 16:9 clip in a vertical cut.
 
 ### First run on the Mac: checklist
 
@@ -100,6 +101,7 @@ The CLI was first built in a Linux cloud session; the owner runs it from Termina
 5. Field-recorder WAVs: the asset `start` comes from the BWF `time_reference`. Confirm FCP agrees; if not, clips will read "outside the media".
 6. Mixed frame rates: we now write FCP's own `<conform-rate scaleEnabled="0">` (play at real speed) and the clip's `format`. Check that a 25p clip in a 23.98 cut plays at real speed with cuts on the words, and that 16:9 clips fit a vertical cut.
 8. Roles: subroles are written on the clip (`audioRole="dialogue.Narration"`); real exports put subroles on `<audio-channel-source>`. Check Timeline Index > Roles shows Narration, Music Bed, Nat Sound, Planned, Auto-fill and Graphics; if not, move the subrole to `audio-channel-source`.
+9. Captions and punch-ins: File > Import > Captions with the project open (they should sit on the words, names spelled as in the brief); build once with "punch in on jump cuts" in the brief and check the alternating 112% framing.
 7. If FCP rejects the XML, it names the line. Fix `fcpxml.py`, add a regression test, and re-validate against the DTD.
 
 ## Roadmap
