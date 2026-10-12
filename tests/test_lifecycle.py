@@ -453,10 +453,11 @@ def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_pa
 def test_revise_notes_about_pacing_or_punch_ins_say_how_to_change_them(footage, tmp_path, fake, shared_cache):
     # The planner can't change cut settings, so notes asking for them used to vanish without a word.
     out = tmp_path / "out"
-    pipeline.build(_opts(footage, out, shared_cache, context="Family trip"))
+    pipeline.build(_opts(footage, out, shared_cache, context="Short and punchy.\n\nFamily trip", preset_brief="Short and punchy.", style="medium"))
     result = pipeline.revise(out, "Make it looser, let it breathe, and punch in on the jump cuts.", Options(inputs=[]))
     settings = json.loads((out / "plan.json").read_text())["settings"]
     assert (settings["style"], settings["punch_in"]) == ("medium", False), "notes don't change cut settings"
+    assert settings["preset_brief"] == "Short and punchy.", "which part of the brief is the preset's, kept"
     pace = next(w for w in result.warnings if w.startswith("Your notes ask for loose pacing"))
     punch = next(w for w in result.warnings if w.startswith("Your notes ask for punch-ins"))
     assert '("looser")' in pace and "Re-cut" in pace and f"roughcut render {out} --style loose" in pace

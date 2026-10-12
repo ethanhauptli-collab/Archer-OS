@@ -248,7 +248,7 @@ _CLAUSE_END = re.compile(r"[.;:!?,()\n]|\s[-–—]\s|[–—]|\b(?:and|but|so|t
 # "no"/"without"/"skip" turn down only what they name ("no punch-ins", "without zoom cuts"), not
 # a request after it ("without B-roll we need punch-ins"); "don't"/"never"/"avoid" reach further
 # ("we really don't want you to punch in").
-_NOUN_NOT = r"\b(?:no|without|skip|none of|nothing|zero|less)\b"
+_NOUN_NOT = r"\b(?:no|without|skip|none of|nothing|zero|less)\b(?!-)"  # not "a no-nonsense promo"
 _VERB_NOT = r"\b(?:not|never|avoid(?:ing)?|cannot|(?:do|does|did|is|are|was|were|wo|ca|should|would|could|must)n['’]?t|no need (?:to|for))\b"
 _NOT = re.compile(rf"(?P<noun>{_NOUN_NOT})|(?P<verb>{_VERB_NOT})", re.I)
 # Negative words that ask for it anyway: "don't forget to punch in", "I don't mind punch-ins".
@@ -1420,6 +1420,7 @@ def revise(
         opts,
         stringout=False,  # one new Rough Cut; the stringout doesn't change with notes
         context=settings.get("context") or "",
+        preset_brief=settings.get("preset_brief") or "",
         script=settings.get("script"),
         target_seconds=target_seconds if target_seconds is not None else settings.get("target_seconds"),
         graphics=graphics if graphics is not None else bool(settings.get("graphics")),

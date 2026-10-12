@@ -41,6 +41,7 @@ TIGHT = [
     "no filler and tight cuts",
     "no dead air, keep it tight",
     "without music, punchy",
+    "A no-nonsense punchy promo.",
     "Keep it tight but not rushed.",
     "Keep it tight, not too loose",
     "Fast-paced, but don't cut off his laughs.",
