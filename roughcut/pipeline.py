@@ -55,6 +55,7 @@ class Options:
     fades: bool = True  # de-click fades at audio edits, soft fades on B-roll nat sound
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
+    punch_in: bool | None = None  # punch in on jump cuts; None: when the brief asks for it
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
     graphics_style: str = ""  # look and brand for them: colors, fonts, mood
     graphics_logo: str | None = None  # logo file designs may show (<img src="brand:logo">)
@@ -189,7 +190,7 @@ def visual_coverage(analysis: Analysis) -> dict:
 
 
 # Cut settings `roughcut render` takes from the saved run unless a flag overrides them.
-RENDER_FIELDS = ("style", "format", "keep_fillers", "broll_db", "music_db", "fill", "stringout", "dialogue_level", "fades")
+RENDER_FIELDS = ("style", "format", "keep_fillers", "broll_db", "music_db", "fill", "stringout", "dialogue_level", "fades", "punch_in")
 
 
 def run_settings(opts: Options, provider: Provider | None = None) -> dict:
@@ -237,6 +238,9 @@ _LOOSE = re.compile(
     r"|breathing room|slow[- ]paced|slower pac(?:e|ing)|unhurried|relaxed pac(?:e|ing))",
     re.I,
 )
+
+
+_PUNCH_IN = re.compile(r"\bpunch(?:[- ]?ins?\b|ing in\b)|\bzoom(?:s|ing)? (?:in )?on (?:the )?jump ?cuts|\bzoom cuts\b", re.I)
 
 
 def style_from_brief(brief: str) -> tuple[str, str]:
@@ -405,7 +409,7 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
     rough = build_timeline(
         plan, analysis, style=style, name=f"{name} - Rough Cut", format_override=opts.format, broll_db=opts.broll_db, music_db=opts.music_db, fill=opts.fill,
         dialogue_level=opts.dialogue_level, fades=opts.fades,
-        target_seconds=plan.target_seconds,
+        target_seconds=plan.target_seconds, punch_in=bool(opts.punch_in),
     )
     stringout = None
     if opts.stringout:
@@ -546,6 +550,11 @@ def build(opts: Options) -> Result:
         style, why = style_from_brief(opts.context)
         opts = replace(opts, style=style)
         log(f"pacing: {style} ({why})")
+    if opts.punch_in is None:
+        asked = _PUNCH_IN.search(opts.context or "")
+        opts = replace(opts, punch_in=bool(asked))
+        if asked:
+            log(f'punching in on jump cuts (the brief says "{asked.group(0)}")')
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.

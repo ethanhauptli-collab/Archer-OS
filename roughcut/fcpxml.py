@@ -306,6 +306,9 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
             seq_fd=fd,
         )
         parent_format = el.get("format") or fmt  # what its connected clips inherit
+        if sc.scale != 1 and el.tag == "asset-clip" and clip.media.has_video:
+            # A punch-in. The DTD puts video adjustments after <note> and <conform-rate>, before <adjust-volume>.
+            ET.SubElement(el, "adjust-transform", {"scale": f"{sc.scale:g} {sc.scale:g}"})
         _volume(el, clip, sc.volume_db, sc.fade_in, sc.fade_out)
         # Child order follows the FCPXML DTD: volume, anchored clips, then markers.
         for cc in sorted(attached[i]["clips"], key=lambda c: (c.start, c.lane)):

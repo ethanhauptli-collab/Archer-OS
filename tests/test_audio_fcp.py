@@ -995,3 +995,55 @@ def fuzz_one(seed: int, tmp) -> None:
 def test_fuzz_audio_and_fcp_details(tmp_path):
     for seed in range(30):
         fuzz_one(seed, tmp_path)
+
+
+# ------------------------------------------------------------ punch-ins on jump cuts
+
+
+def _jumpy(*, broll_over=None, punch_in=True):
+    """One talking clip cut on three lines (two jump cuts), optionally with a cutaway over the second line."""
+    clips = [make_clip("V01", seconds=TALK_SECONDS, sentences=SPEECH), make_clip("V02", seconds=10)]
+    a = Analysis(clips=clips)
+    broll = [{"clip": "V02", "over": [broll_over], "words": "", "source_in": 0, "reason": "x"}] if broll_over else []
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S003", "V01.S005"], "broll": broll}]}, a, source="fake:fake")
+    return a, build_timeline(plan, a, style=STYLES["tight"], name="t", punch_in=punch_in)
+
+
+def test_jump_cuts_alternate_a_punch_in(tmp_path):
+    from roughcut.timeline import PUNCH_IN
+
+    a, tl = _jumpy()
+    assert [sc.scale for sc in tl.spine] == [1.0, PUNCH_IN, 1.0] and tl.review.punched == 2
+    assert not [m for m in tl.markers if m.kind == "todo" and m.value.startswith("Jump cut")], "punched in, not left as to-dos"
+    assert any(line.startswith("Punched in: 2 of those cuts") for line in tl.review.lines(tl.frame_duration))
+    path = _write(tmp_path, [tl], a)
+    validate_dtd(path)
+    check_invariants(path)
+    spine = list(ET.parse(path).getroot().find(".//project/sequence/spine"))
+    assert [el.find("adjust-transform").get("scale") if el.find("adjust-transform") is not None else None for el in spine] == [None, "1.12 1.12", None]
+    second = [child.tag for child in spine[1]]
+    assert second.index("adjust-transform") < second.index("adjust-volume"), "the DTD's order: video adjustments, then volume"
+    # Off (the default), nothing changes and the jump cuts stay as to-dos.
+    a, plain = _jumpy(punch_in=False)
+    assert all(sc.scale == 1.0 for sc in plain.spine) and [m for m in plain.markers if m.value.startswith("Jump cut")]
+
+
+def test_a_cut_b_roll_covers_is_not_punched(tmp_path):
+    a, tl = _jumpy(broll_over="V01.S003")
+    # The cutaway runs over all of S003, so it hides both cuts (into S003 and out of it): nothing to punch.
+    assert [c.clip_id for c in tl.connected] == ["V02"] and not tl.review.jump_cuts
+    assert [sc.scale for sc in tl.spine] == [1.0, 1.0, 1.0] and tl.review.punched == 0
+
+
+def test_the_brief_turns_punch_ins_on_and_re_cuts_keep_them(footage, tmp_path, capsys):
+    from roughcut.cli import main
+
+    out = tmp_path / "out"
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
+    assert main(["build", str(footage), "-o", str(out), "-c", "Punch in on the jump cuts.", *common]) == 0
+    assert "punching in on jump cuts" in capsys.readouterr().err
+    assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is True
+    assert main(["render", str(out), "--style", "loose"]) == 0
+    assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is True
+    assert main(["render", str(out), "--no-punch-in"]) == 0
+    assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is False

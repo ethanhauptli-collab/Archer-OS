@@ -292,6 +292,16 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertFalse(o.arguments().contains { $0.contains("open") })  // app-side setting, not a CLI flag
     }
 
+    func testPunchInIsSentOnlyWhenOn() throws {
+        var o = options()
+        XCTAssertFalse(o.arguments().contains("--punch-in"))  // off: the CLI decides from the brief
+        o.punchIn = true
+        XCTAssertEqual(o.arguments()[3...6], ["--style", "auto", "--punch-in", "--provider"])
+        let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
+        XCTAssertTrue(back.punchIn)
+        XCTAssertFalse(try JSONDecoder().decode(BuildOptions.self, from: Data("{}".utf8)).punchIn)
+    }
+
     func testPacingSavedBeforeAutoExisted() throws {
         func decoded(_ json: String) throws -> CutStyle {
             try JSONDecoder().decode(BuildOptions.self, from: Data(json.utf8)).style

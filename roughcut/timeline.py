@@ -65,6 +65,7 @@ class SpineClip:
     wb: float | None = None
     fade_in: Fraction = Fraction(0)  # seconds of audio fade at each end
     fade_out: Fraction = Fraction(0)
+    scale: float = 1.0  # a punch-in on a jump cut (Final Cut's Transform > Scale); 1: as shot
 
     @property
     def end(self) -> int:
@@ -538,6 +539,7 @@ def build_timeline(
     fades: bool = True,
     music_beds: bool = True,
     target_seconds: float | None = None,
+    punch_in: bool = False,
 ) -> Timeline:
     warnings: list[str] = []
     raw_pieces: list[_Piece] = []
@@ -632,7 +634,10 @@ def build_timeline(
     _place_markers(tl, plan, analysis)  # first, so a jump on a line the plan flagged keeps one to-do
     if plan.source != "heuristic":  # a stringout is all jump cuts by design
         _mark_bed_jumps(tl, analysis, warnings)
-        _mark_jump_cuts(tl, tl.review)
+        if punch_in:
+            tl.review.punched = _punch_in(tl, tl.review)
+        else:
+            _mark_jump_cuts(tl, tl.review)
         tl.markers.sort(key=lambda mk: mk.frame)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
@@ -1741,6 +1746,7 @@ class Review:
     filled_seconds: float
     filled_shots: int
     repeated_stills: dict[str, int]  # clip ID -> times shown
+    punched: int = 0  # jump cuts smoothed with a punch-in
 
     def length_line(self) -> str:
         line = tc.seconds_to_clock(self.seconds)
@@ -1762,6 +1768,11 @@ class Review:
             ]
             more = f" and {len(self.jump_cuts) - 12} more" if len(self.jump_cuts) > 12 else ""
             out.append(f"Jump cuts on camera with no B-roll over them: {len(self.jump_cuts)}: " + "; ".join(shown) + more)
+            if self.punched:
+                out.append(
+                    f"Punched in: {self.punched} of those cuts alternate between the shot as framed and {PUNCH_IN:.0%} "
+                    "(Transform > Scale in the inspector; select the clips and reset Transform to undo)"
+                )
         else:
             out.append("Jump cuts on camera with no B-roll over them: none")
         if self.filled_shots:
@@ -1804,6 +1815,24 @@ def review(tl: Timeline, plan: Plan, analysis: Analysis, target_seconds: float |
 
 
 MAX_JUMP_MARKERS = 10
+# How far a punch-in zooms: enough to read as a new framing, little enough to keep 4K sharp in HD and the framing intact.
+PUNCH_IN = 1.12
+
+
+def _punch_in(tl: Timeline, rv: Review) -> int:
+    """At each jump cut no B-roll covers, alternate the framing: one piece as shot, the next punched in,
+    the next as shot again. A new shot, or a cut B-roll hides, starts as shot. Returns the cuts punched."""
+    jumps = {j.frame for j in rv.jump_cuts}
+    n = 0
+    prev = None
+    for sc in tl.spine:
+        if prev is not None and sc.offset in jumps and sc.clip_id == prev.clip_id:
+            sc.scale = 1.0 if prev.scale != 1.0 else PUNCH_IN
+            n += 1
+        else:
+            sc.scale = 1.0
+        prev = sc
+    return n
 
 
 def _mark_jump_cuts(tl: Timeline, rv: Review) -> None:

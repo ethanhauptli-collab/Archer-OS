@@ -62,6 +62,10 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
         help="short de-click fades at audio edits and soft fades on B-roll nat sound (default: on); the music bed fades in and out either way",
     )
     g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
+    g.add_argument(
+        "--punch-in", action=argparse.BooleanOptionalAction,
+        help="alternate a 112%% punch-in at each jump cut no B-roll covers (default: when the brief asks for it, e.g. 'punch in on jump cuts')",
+    )
     g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
     p.add_argument("--name", help="project/event name (default: folder name)")
     p.add_argument("--open", action="store_true", help="open the new cut in Final Cut Pro when it's done (Mac)")
@@ -615,6 +619,7 @@ def _run(args, json_mode: bool) -> int:
             music_db=args.music_db,
             stringout=args.stringout,
             fill=args.fill,
+            punch_in=args.punch_in,
             dialogue_level=args.dialogue_level,
             fades=None if args.fades is None else args.fades == "on",
         ).items()

@@ -221,6 +221,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var dialogueLevel: DialogueLevel = .standard
     /// De-click fades at audio edits and soft fades on B-roll nat sound (`--fades`).
     public var fades: Bool = true
+    /// Alternate a punch-in at each jump cut no B-roll covers (`--punch-in`). Off: the CLI still
+    /// punches in when the brief asks for it.
+    public var punchIn: Bool = false
     /// A logo file graphics may show (`--graphics-logo`).
     public var graphicsLogo: String = ""
     /// Approved graphics (.html) new designs match (`--graphics-look`).
@@ -232,7 +235,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         case sources, outputFolder, projectName, brief, targetLength, format, provider, model, visionModel
         case style = "pacing"
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
-        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook
+        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn
     }
 
     /// How apps from before Auto pacing saved it.
@@ -281,6 +284,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         fades = value(.fades, d.fades)
         graphicsLogo = value(.graphicsLogo, d.graphicsLogo)
         graphicsLook = value(.graphicsLook, d.graphicsLook)
+        punchIn = value(.punchIn, d.punchIn)
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -345,6 +349,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         args += ["--style", style.rawValue]
         if format != .auto {
             args += format.arguments
+        }
+        if punchIn {
+            args.append("--punch-in")
         }
         args += ["--provider", provider.rawValue]
         if provider != .none {
