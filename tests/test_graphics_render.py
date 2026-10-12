@@ -1249,3 +1249,41 @@ def test_a_graphic_shortened_for_one_that_didnt_render_is_rendered_again_at_its_
     entry = json.loads((tmp_path / "out" / "graphics.json").read_text())["graphics"][0]
     assert entry["frames"] == lower.frames and entry["rendered"] == entry["digest"] and entry["file"].endswith(f"-{entry['digest'][:6]}.mov")
     assert next(c for c in tl.connected if c.clip_id == "G01").frames == lower.frames
+
+
+def test_a_graphic_that_waited_for_one_that_never_arrives_starts_on_its_words(tmp_path, monkeypatch):
+    # Names read back to back: "Long Day" waits for "Mountain" to have its time on screen (see
+    # test_names_read_back_to_back_each_get_their_graphic). When "Mountain" doesn't make it onto the
+    # timeline after all, "Long Day" starts on its words again, as if it had been placed alone.
+    first = spec("lower_third", "V01.S003", "the mountain", "Mountain", 3)
+    second = spec("lower_third", "V01.S004", "It's going to be a long day", "Long Day", 3)
+    a, plan, tl = small_cut([first, second])
+    (alone,) = graphics.place(plan.graphics[1:], tl, a, [])
+    (_, waited), _, _ = placed_for([first, second])
+    assert waited.start > alone.start and len(waited.word_times) < len(alone.word_times)
+
+    class NoMountainDesign(FakeProvider):
+        def complete_json(self, system, parts, schema, *, schema_name, **kw):
+            reply = super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+            reply["graphics"] = [g for g in reply["graphics"] if g["id"] != "G01"]
+            return reply
+
+    jobs: list[dict] = []
+    fake_renderer(monkeypatch, [], jobs=jobs)
+    clips, placed, warnings = graphics.make(NoMountainDesign(), plan.graphics, tl, a, tmp_path / "out", brief="", style="", workers=2)
+    long_day = next(g for g in placed if g.spec.text == "Long Day")
+    assert (long_day.start, long_day.frames, long_day.word_times) == (alone.start, alone.frames, alone.word_times)
+    assert [(j["id"], j["frames"]) for j in jobs] == [(long_day.id, alone.frames)]
+    assert next(c for c in tl.connected if c.clip_id == long_day.id).start == alone.start
+
+    # The same when the one it waited for doesn't render: it's rendered again, on its words.
+    a, plan, tl = small_cut([first, second])
+    jobs.clear()
+    fake_renderer(monkeypatch, [], jobs=jobs, fail={"G01 <span"})
+    clips, placed, warnings = graphics.make(FakeProvider(), plan.graphics, tl, a, tmp_path / "out2", brief="", style="", workers=2)
+    long_day = next(g for g in placed if g.spec.text == "Long Day")
+    assert [c.id for c in clips] == [long_day.id] and (long_day.start, long_day.frames, long_day.word_times) == (alone.start, alone.frames, alone.word_times)
+    assert [j["frames"] for j in jobs if j["id"] == long_day.id] == [waited.frames, alone.frames]
+    assert next(c for c in tl.connected if c.clip_id == long_day.id).start == alone.start
+    entry = next(g for g in json.loads((tmp_path / "out2" / "graphics.json").read_text())["graphics"] if g["id"] == long_day.id)
+    assert (entry["start_frame"], entry["frames"]) == (alone.start, alone.frames) and entry["rendered"] == entry["digest"]

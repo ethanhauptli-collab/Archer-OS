@@ -810,6 +810,19 @@ def test_approved_designs_are_picked_from_an_earlier_run(tmp_path):
         presets.approved_from_run(tmp_path / "nothing here", [])
 
 
+def test_a_design_the_cut_left_out_is_not_offered_for_approval(tmp_path):
+    from roughcut import presets
+
+    run = _run_with_graphics(tmp_path, "Promo_roughcut")
+    manifest = json.loads((run / "graphics.json").read_text())
+    (run / "graphics" / "left-out").mkdir()
+    (run / "graphics" / "left-out" / "05-quote.html").write_text("<html><body>Not in this cut</body></html>")
+    manifest["graphics"].append({"index": 4, "kind": "quote", "text": "Not in this cut", "placed": False, "html": "graphics/left-out/05-quote.html"})
+    (run / "graphics.json").write_text(json.dumps(manifest))
+    with pytest.raises(presets.PresetError, match=r"no design for G09; it has G01, G02, G03, G04\.$"):
+        presets.approved_from_run(run, ["G09"])
+
+
 def test_a_preset_with_a_logo_still_checks_its_approved_designs(tmp_path):
     from roughcut import presets
 

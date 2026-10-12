@@ -154,13 +154,17 @@ def run_summary(
     visual_log: dict | None = None,
     graphics_note: str | None = None,
     planned_graphics: int | None = None,
+    undesigned: int = 0,
 ) -> dict:
-    """Counts for the end of a run: graphics planned/placed/rendered, visual-log coverage, what was skipped, cost."""
+    """Counts for the end of a run: graphics planned/placed/rendered, visual-log coverage, what was skipped, cost.
+
+    `undesigned`: graphics with no design yet that would have a place in this cut; "placed" counts them too.
+    """
     graphics = None
     if graphics_on:
         graphics = {
             "planned": len(plan.graphics) if planned_graphics is None else planned_graphics,
-            "placed": len(placed),
+            "placed": len(placed) + undesigned,
             "rendered": sum(1 for c in with_graphics.clips if c.role == "graphic"),
             "note": graphics_note,
         }
@@ -828,18 +832,17 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
             graphics_note = "left out: the renderer isn't available"
         else:
             if have_manifest:
+                # Every graphic of the plan at its index: graphics.json has the last cut's, placed or left out (with
+                # their designs), and the plan any an older folder's graphics.json doesn't list.
                 specs, html, style = graphics.saved_designs(out_dir)
-                if design_missing:
-                    # Graphics the saved cut left out (one would have covered another, or its words were cut)
-                    # may fit this one: designing them is what --design-missing asks for. A plain re-cut keeps
-                    # to the designed ones, so one without a design never pushes a designed one out.
-                    specs = graphics.with_planned(specs, _saved_graphics(saved))
+                specs = graphics.with_planned(specs, _saved_graphics(saved))
                 house = saved_house_style(out_dir)
             else:
                 specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""
             planned_graphics = sum(1 for g in specs if g.text)
+            # The graphics without a design that would have a place in this cut: what --design-missing designs.
+            missing = [g for g in graphics.place(specs, rough, analysis, []) if g.index not in html]
             if design_missing:
-                missing = [g for g in graphics.place(specs, rough, analysis, []) if g.index not in html]
                 if missing:
                     designer = StopAtLimit(_saved_provider(settings, source))
                     usage.append(designer.usage)
@@ -851,16 +854,24 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                     limit_hit = designer.limit
                 else:
                     log("--design-missing: no graphic placed in this cut is missing a design")
+            # Only designed graphics are placed: one without a design never pushes a designed one off the timeline.
+            # make() keeps the rest in graphics.json, so a later re-cut (or --design-missing) can place them.
+            ready = [g if i in html else replace(g, text="") for i, g in enumerate(specs)]
             # make() rewrites graphics.json and the designs: keep this version's copies first.
             versions.snapshot(out_dir, before=version)
             versions.adopt_old_graphics(out_dir)  # clips named before the digest was in the name are reused, not rendered again
             with progress.doing("rendering the saved motion graphics"):
                 g_clips, placed, g_warnings = graphics.make(
-                    None, specs, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=house
+                    None, ready, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=house, planned=specs,
                 )
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
-            undone = sum(1 for g in placed if g.index not in html)
+            undone = sum(1 for g in missing if g.index not in html)
+            fits = {g.index for g in missing}
+            graphics_warnings += [
+                f"graphic {g.text!r} has no design yet, and no room in this cut (its words aren't in it, or it would cover another graphic); left out"
+                for i, g in enumerate(specs) if g.text and i not in html and i not in fits
+            ]
             if undone:
                 graphics_note = (
                     f"{undone} not designed: the usage limit was reached" if limit_hit is not None
@@ -874,7 +885,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     warnings = plan.warnings + rough.warnings + graphics_warnings
     summary = run_summary(
         plan, graphics_on=graphics_on, placed=placed, with_graphics=with_graphics, planned_graphics=planned_graphics, graphics_note=graphics_note,
-        visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None, usage=usage,
+        visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None, usage=usage, undesigned=undone,
     )
     result = save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
@@ -962,12 +973,12 @@ class StopAtLimit:
 
 
 def undesigned(out_dir: Path) -> int:
-    """Graphics in this folder's graphics.json that have no saved design."""
+    """Graphics placed in this folder's graphics.json that have no saved design (not the ones the cut left out)."""
     try:
         entries = json.loads((out_dir / "graphics.json").read_text()).get("graphics") or []
     except (OSError, ValueError, AttributeError):
         return 0
-    return sum(1 for g in entries if isinstance(g, dict) and g.get("text") and not g.get("html"))
+    return sum(1 for g in entries if isinstance(g, dict) and g.get("text") and not g.get("html") and g.get("placed") is not False)
 
 
 def _saved_spellings(saved: dict, fallback: list[dict]) -> list[dict]:
@@ -1047,7 +1058,8 @@ def _design_new(
     )
     for g in new:
         if g.id in designed:
-            saved_html[g.index] = inline_logo(designed[g.id], logo)
+            # With the timing it was made for: the cut may place it differently once every design is in.
+            saved_html[g.index] = graphics.with_timing(inline_logo(designed[g.id], logo), g.timing(rough.frame_duration))
     return saved_html, found["house_style"]
 
 
@@ -1093,18 +1105,22 @@ def _carried_manifest(out_dir: Path, specs: list, carry: dict, style: str) -> No
     atomic_write(out_dir / "graphics.json", json.dumps({"style": style, **({"house_style": house} if house else {}), "graphics": entries}, indent=1))
 
 
-def _provisional_manifest(out_dir: Path, placed: list, saved_html: dict[int, str], rough: Timeline, style: str, house: str, notes_by_file: dict) -> None:
+def _provisional_manifest(
+    out_dir: Path, specs: list, placed: list, saved_html: dict[int, str], rough: Timeline, style: str, house: str, notes_by_file: dict,
+) -> None:
     """graphics.json for this version before any new design is asked for: the carried designs, the clips
-    they already have, and those clips' QC notes. If the run stops while new ones are designed,
-    `roughcut render` re-times these and says the rest have no design yet."""
+    they already have, and those clips' QC notes (and the planned graphics this cut leaves out, with any
+    design they have). If the run stops while new ones are designed, `roughcut render` re-times these and
+    says the rest have no design yet."""
     from . import graphics
 
     html = {g.id: saved_html[g.index] for g in placed if g.index in saved_html}
     folder = out_dir / "graphics"
     graphics.save_designs(placed, html, folder)
+    waiting = graphics.keep_left_out(specs, placed, saved_html, out_dir)
     kept = graphics.unchanged(placed, html, folder, rough, {})
     notes = {gid: list(notes_by_file[path.name]) for gid, path in kept.items() if path.name in notes_by_file}
-    graphics.write_manifest(out_dir, placed, kept, html, rough, style, notes=notes, house_style=house)
+    graphics.write_manifest(out_dir, placed, kept, html, rough, style, notes=notes, house_style=house, left_out=waiting)
 
 
 def _carry_designs(
@@ -1121,7 +1137,7 @@ def _carry_designs(
     saved_html = {i: designs[_spec_key(spec)] for i, spec in enumerate(specs) if _spec_key(spec) in designs}
     placed = graphics.place(specs, rough, analysis, [])  # make() places again and reports what didn't fit
     if placed:
-        _provisional_manifest(out_dir, placed, saved_html, rough, opts.graphics_style, house, carry.get("notes") or {})
+        _provisional_manifest(out_dir, specs, placed, saved_html, rough, opts.graphics_style, house, carry.get("notes") or {})
     else:
         (out_dir / "graphics.json").unlink(missing_ok=True)  # none fit this cut: this version has no graphics
     new = [g for g in placed if g.index not in saved_html]

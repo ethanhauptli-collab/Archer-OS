@@ -1261,6 +1261,105 @@ def test_a_recut_keeps_the_previous_versions_graphics_manifest_in_history(footag
     assert (next((out / "history").glob("v1 *")) / "graphics.json").read_text() == v1_manifest  # v1's own, not v2's
 
 
+def _back_to_back_names() -> dict:
+    """Two lower thirds on names read back to back: at a loose pace each gets its graphic; at a tight one the
+    second can't wait long enough for the first, so one graphic at a time leaves it out."""
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["sections"] = [{"name": "Names", "purpose": "", "items": ["V01.S003", "V01.S004", "V01.S005", "V01.S006"], "broll": []}]
+    plan["alternates"], plan["flags"], plan["music"] = [], [], []
+    plan["graphics"] = [
+        {"kind": "lower_third", "segment": "V01.S004", "words": "long day.", "text": "Long Day", "subtext": "", "seconds": 3, "direction": ""},
+        {"kind": "lower_third", "segment": "V01.S005", "words": "The kids", "text": "The Kids", "subtext": "", "seconds": 3, "direction": ""},
+    ]
+    return plan
+
+
+class LeavesOutG01(FakeProvider):
+    """A design reply without G01: a failed design batch, or a plan that ran out part-way."""
+
+    def complete_json(self, system, parts, schema, *, schema_name, **kw):
+        reply = super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+        if schema_name == "graphics":
+            reply = {**reply, "graphics": [g for g in reply["graphics"] if g["id"] != "G01"]}
+        return reply
+
+
+def _no_model(monkeypatch) -> None:
+    def never(*a, **k):
+        raise AssertionError("a re-cut must not call the model")
+
+    monkeypatch.setattr(pipeline, "make_provider", never)
+
+
+def _on_timeline(result) -> list[str]:
+    return [c.note for c in sorted(result.timeline.connected, key=lambda c: c.start) if c.kind == "graphic"]
+
+
+def _graphics_manifest(out: Path) -> dict[str, dict]:
+    return {g["text"]: g for g in json.loads((out / "graphics.json").read_text())["graphics"]}
+
+
+def test_a_recut_never_lets_a_graphic_without_a_design_push_a_designed_one_out(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: LeavesOutG01(_back_to_back_names()))
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    built = pipeline.build(_opts(footage, out, shared_cache, graphics=True, style="loose"))
+    assert _on_timeline(built) == ["The Kids"]  # "Long Day" never got its design
+
+    _no_model(monkeypatch)
+    for style in ("tight", "loose"):  # the app's Re-cut, and back
+        again = pipeline.rerender(out, Options(inputs=[], style=style), overrides={"style"})
+        assert _on_timeline(again) == ["The Kids"], style  # "Long Day" would leave it out at a tight pace, but it has no design to show
+        assert again.summary["graphics"] == {
+            "planned": 2, "placed": 2, "rendered": 1, "note": "1 not designed yet; `roughcut render --design-missing` adds it",
+        }
+        manifest = _graphics_manifest(out)
+        assert set(manifest) == {"Long Day", "The Kids"} and manifest["The Kids"].get("html") and not manifest["Long Day"].get("html")
+        validate_dtd(again.fcpxml)
+        check_invariants(again.fcpxml)
+
+
+def test_a_graphic_one_recut_left_out_comes_back_in_the_next_without_the_model(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider(_back_to_back_names()))
+    rendered = _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    built = pipeline.build(_opts(footage, out, shared_cache, graphics=True, style="loose"))
+    assert _on_timeline(built) == ["Long Day", "The Kids"]
+    kids = _graphics_manifest(out)["The Kids"]
+    (out / kids["html"]).write_text((out / kids["html"]).read_text() + "<!-- hand edit -->")
+    first_clip = out / kids["file"]
+
+    _no_model(monkeypatch)
+    tight = pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
+    assert _on_timeline(tight) == ["Long Day"]
+    assert any("graphic 'The Kids' would cover 'Long Day'; left out" in w for w in tight.warnings)
+    assert tight.summary["graphics"] == {"planned": 2, "placed": 1, "rendered": 1, "note": None}  # 1 of 2, not 1 of 1
+    left_out = _graphics_manifest(out)["The Kids"]
+    assert left_out.get("placed") is False and "id" not in left_out and "<!-- hand edit -->" in (out / left_out["html"]).read_text()
+    assert not graphics.DESIGN_FILE.fullmatch(Path(left_out["html"]).name)  # never renumbered over, or put aside as stale
+
+    rendered.clear()
+    loose = pipeline.rerender(out, Options(inputs=[], style="loose"), overrides={"style"})
+    assert _on_timeline(loose) == ["Long Day", "The Kids"]
+    assert loose.summary["graphics"] == {"planned": 2, "placed": 2, "rendered": 2, "note": None}
+    kids = _graphics_manifest(out)["The Kids"]
+    assert kids["id"] == "G02" and "<!-- hand edit -->" in (out / kids["html"]).read_text()
+    assert len(rendered) == 1  # the hand-edited design renders once; "Long Day" is reused
+    assert first_clip.is_file()  # v1 in Final Cut still uses its clip
+    validate_dtd(loose.fcpxml)
+    check_invariants(loose.fcpxml)
+
+    # A folder whose graphics.json lists only what its cut placed (as older versions wrote it): the plan still counts the
+    # graphic it lost, and the re-cut says why it isn't there.
+    pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
+    manifest = json.loads((out / "graphics.json").read_text())
+    manifest["graphics"] = [g for g in manifest["graphics"] if g.get("placed") is not False]
+    (out / "graphics.json").write_text(json.dumps(manifest))
+    older = pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
+    assert older.summary["graphics"] == {"planned": 2, "placed": 1, "rendered": 1, "note": None}
+    assert any(w.startswith("graphic 'The Kids' has no design yet, and no room in this cut") for w in older.warnings)
+
+
 def test_a_cut_written_before_its_graphics_has_a_matching_result_json(footage, tmp_path, monkeypatch, fake, shared_cache):
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache))

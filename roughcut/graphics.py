@@ -24,7 +24,10 @@ that stopped there without asking the model again. Edit a design's HTML
 and run `roughcut render` to re-render only what changed. Designs are
 matched to graphics by their position in the plan ("index"), never by ID:
 IDs follow timeline order and can change with the cut. Designs no graphic
-uses any more move to graphics/old/.
+uses any more move to graphics/old/. A designed graphic a re-cut can't
+place (it would cover another, or its words aren't in that cut) keeps its
+design in graphics/left-out/, named by its position in the plan, and the
+next re-cut places it again.
 
 Each saved design ends with a note of the timing it was made for (its
 length and when its words come). A re-cut that moves the words (another
@@ -51,7 +54,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -175,6 +178,8 @@ class PlacedGraphic:
     shortened_for: int | None = None  # plan index of the graphic it was shortened to make way for
     full_frames: int = 0  # its length before that
     latest_start: int | None = None  # the latest frame it may start (inside its words and its piece), when the one before needs room
+    waited_for: int | None = None  # plan index of the graphic it starts late for
+    on_time: tuple[int, list[tuple[str, float]]] | None = None  # its start and word times before that
 
     @property
     def slug(self) -> str:
@@ -274,6 +279,7 @@ def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) 
         need = max(round(MIN_SECONDS * fps), math.ceil((last_word + 0.5) * fps) if last_word else 0)
         wait = prev.start + need + GAP_FRAMES - g.start
         if wait > 0 and g.spec.kind != "kinetic_caption" and g.latest_start is not None and g.start + wait <= g.latest_start:
+            g.waited_for, g.on_time = prev.index, (g.start, list(g.word_times))
             g.start += wait
             g.frames -= wait
             g.word_times = [(w, round(t - wait / fps, 3)) for w, t in g.word_times if t - wait / fps >= 0]
@@ -292,32 +298,63 @@ def shortened_warning(prev: PlacedGraphic, g: PlacedGraphic, seconds: float) -> 
     return f"graphic {prev.spec.text!r} shortened to {seconds:.1f}s so it's gone before {g.spec.text!r}"
 
 
-def make_way_back(placed: list[PlacedGraphic], present: set[str]) -> dict[str, int]:
-    """Lengths to give back to graphics shortened for a later one that isn't there after all (no design, or it didn't render).
+def make_way_back(placed: list[PlacedGraphic], present: set[str]) -> dict[str, tuple[int, int]]:
+    """Where graphics that made way for one that isn't there after all (no design, or it didn't render) go back to.
 
-    Only as far as the next graphic that is there. Returns {graphic ID: frames} for those that can grow.
+    One that waited for it starts on its words again (keeping its end), once the graphic before it is
+    gone; one shortened for it holds longer, as far as the next graphic that is there.
+    Returns {graphic ID: (start, frames)} for those that change.
     """
     there = sorted((g for g in placed if g.id in present), key=lambda g: g.start)
-    longer = {}
+    indexes = {g.index for g in there}
+    starts, end = {}, None
+    for g in there:
+        starts[g.id] = g.start
+        if g.on_time is not None and g.waited_for not in indexes:
+            earliest = g.on_time[0] if end is None else max(g.on_time[0], end + GAP_FRAMES)
+            starts[g.id] = min(g.start, earliest)
+        end = g.start + g.frames
+    back = {}
     for n, g in enumerate(there):
-        if g.shortened_for is None or any(o.index == g.shortened_for for o in there):
-            continue
-        limit = there[n + 1].start - GAP_FRAMES - g.start if n + 1 < len(there) else g.full_frames
-        frames = min(g.full_frames, limit)
-        if frames > g.frames:
-            longer[g.id] = frames
-    return longer
+        start = starts[g.id]
+        frames = g.frames + g.start - start
+        if g.shortened_for is not None and g.shortened_for not in indexes:
+            full = g.full_frames + g.start - start
+            limit = starts[there[n + 1].id] - GAP_FRAMES - start if n + 1 < len(there) else full
+            frames = max(frames, min(full, limit))
+        if (start, frames) != (g.start, g.frames):
+            back[g.id] = (start, frames)
+    return back
 
 
-def _lengthened(g: PlacedGraphic, frames: int, was: int, placed: list[PlacedGraphic], fps: float, warnings: list[str]) -> None:
-    """g holds for `frames` (not `was`) after all: the one it was shortened for isn't on the timeline. Drops the stale warning."""
-    gone = next((o for o in placed if o.index == g.shortened_for), None)
-    if gone is not None:
-        stale = shortened_warning(g, gone, was / fps)
-        if stale in warnings:
-            warnings.remove(stale)
-        log(f"{g.slug}: back to {frames / fps:.1f}s, since {gone.spec.text!r} isn't on the timeline")
-    g.frames, g.shortened_for = frames, None
+def _move_back(g: PlacedGraphic, start: int, frames: int, fps: float) -> None:
+    """Put g where make_way_back says: starting at `start` (on its words again, keeping its end) and holding `frames`."""
+    shift = g.start - start
+    if shift and g.on_time is not None:
+        early, words = g.on_time
+        late = (start - early) / fps
+        g.word_times = [(w, round(t - late, 3)) for w, t in words if t - late >= 0]
+        if g.full_frames:
+            g.full_frames += shift
+        g.start, g.waited_for, g.on_time = start, None, None
+    if frames > g.frames + shift:
+        g.shortened_for = None
+    g.frames = frames
+
+
+def _said_back(g: PlacedGraphic, was: PlacedGraphic, placed: list[PlacedGraphic], fps: float, warnings: list[str]) -> None:
+    """g (placed as `was`) didn't have to make way after all: say so, and drop the warning that said it did."""
+    if g.start < was.start:
+        gone = next((o for o in placed if o.index == was.waited_for), None)
+        if gone is not None:
+            log(f"{g.slug}: starts {(was.start - g.start) / fps:.1f}s sooner, on its words, since {gone.spec.text!r} isn't on the timeline")
+    if was.shortened_for is not None and g.shortened_for is None:
+        gone = next((o for o in placed if o.index == was.shortened_for), None)
+        if gone is not None:
+            stale = shortened_warning(g, gone, was.frames / fps)
+            if stale in warnings:
+                warnings.remove(stale)
+            log(f"{g.slug}: back to {g.frames / fps:.1f}s, since {gone.spec.text!r} isn't on the timeline")
 
 
 # ------------------------------------------------------------------ re-timing a design for another cut
@@ -1088,18 +1125,44 @@ def save_designs(placed: list[PlacedGraphic], html: dict[str, str], folder: Path
 
 
 DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")  # a graphic's saved design, e.g. G01-lower-third.html
+LEFT_OUT = "left-out"  # graphics/left-out/: designs of planned graphics a cut couldn't place, kept for the next re-cut
 
 
-def _put_aside_old_designs(folder: Path, placed: list[PlacedGraphic], html: dict[str, str]) -> None:
+def keep_left_out(specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_html: dict[int, str], out_dir: Path) -> list[dict]:
+    """graphics.json entries for the planned graphics this cut doesn't place (one would have covered another,
+    or its words aren't in this cut), so the next re-cut can place them again without the model.
+
+    A designed one keeps its design in graphics/left-out/, named by its place in the plan (01 is the
+    plan's first graphic): renumbering never writes over it, and it isn't put aside as unused.
+    """
+    there = {g.index for g in placed}
+    entries = []
+    for index, spec in enumerate(specs):
+        if not spec.text or index in there:
+            continue
+        entry = {"index": index, **asdict(spec), "placed": False}
+        if index in saved_html:
+            rel = f"graphics/{LEFT_OUT}/{index + 1:02d}-{spec.kind.replace('_', '-')}.html"
+            (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out_dir / rel).write_text(saved_html[index], encoding="utf-8")
+            entry["html"] = rel
+        entries.append(entry)
+    return entries
+
+
+def _put_aside_old_designs(folder: Path, placed: list[PlacedGraphic], html: dict[str, str], left_out: list[dict] | None = None) -> None:
     """Move designs this run doesn't use into graphics/old/, so the folder only holds the live ones.
 
     Graphics are numbered in timeline order, so a re-cut (or an older folder) can leave
     G01-quote.html beside the live G02-quote.html; editing it would do nothing. Their content is
     kept (it may hold hand edits). Rendered .mov files stay where they are: a project already
-    imported into Final Cut may still use them.
+    imported into Final Cut may still use them. A design in graphics/left-out/ goes too once its
+    graphic is placed again (its live copy is then the numbered one) or leaves the plan.
     """
     live = {f"{g.slug}.html" for g in placed if g.id in html}
     stale = [p for p in folder.glob("G*.html") if DESIGN_FILE.fullmatch(p.name) and p.name not in live]
+    waiting = {Path(str(e["html"])).name for e in left_out or [] if e.get("html")}
+    stale += [p for p in (folder / LEFT_OUT).glob("*.html") if p.name not in waiting]
     if not stale:
         return
     old = folder / "old"
@@ -1305,12 +1368,13 @@ def _read_manifest(out_dir: Path) -> dict:
 
 def write_manifest(
     out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str,
-    notes: dict[str, list[str]] | None = None, house_style: str = "",
+    notes: dict[str, list[str]] | None = None, house_style: str = "", left_out: list[dict] | None = None,
 ) -> None:
     """graphics.json: every placed graphic, its design, and the clip rendered from it (if any).
 
     `house_style` is the designer's description of its design system, for later designs to match.
-    "retime" is how a design made for other timing plays in this cut ((seconds here, seconds in the design))."""
+    "retime" is how a design made for other timing plays in this cut ((seconds here, seconds in the design)).
+    `left_out`: entries for the planned graphics this cut couldn't place (keep_left_out), listed after the placed ones."""
     entries = []
     for g in placed:
         entry = {"id": g.id, "index": g.index, **asdict(g.spec), "start_frame": g.start, "frames": g.frames}
@@ -1327,6 +1391,7 @@ def write_manifest(
         if notes and notes.get(g.id):
             entry["notes"] = notes[g.id]
         entries.append(entry)
+    entries += left_out or []
     from .versions import atomic_write
 
     data = {"style": style, **({"house_style": house_style} if house_style else {}), "graphics": entries}
@@ -1377,9 +1442,9 @@ def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str
 def with_planned(specs: list[GraphicSpec], planned: list[GraphicSpec]) -> list[GraphicSpec]:
     """Saved specs, with the plan's graphics that the saved cut left out back at their positions.
 
-    graphics.json holds the graphics a cut placed. One left out then (it would have covered
-    another, or its words weren't in that cut) may fit this cut: placing it again lets a
-    re-cut show it, and `render --design-missing` design it.
+    A build's graphics.json (or an older folder's) holds only the graphics its cut placed. One
+    left out then (it would have covered another, or its words weren't in that cut) may fit this
+    cut: `render --design-missing` can design it, and the re-cut after that show it.
     """
     empty = GraphicSpec(kind="quote", segment="", words="", text="")
     out = list(specs) + [empty] * max(0, len(planned) - len(specs))
@@ -1393,7 +1458,7 @@ def with_planned(specs: list[GraphicSpec], planned: list[GraphicSpec]) -> list[G
 def make(
     provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
-    house_style: str = "",
+    house_style: str = "", planned: list[GraphicSpec] | None = None,
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 
@@ -1401,15 +1466,21 @@ def make(
     With a `logo`, designs may show it as <img src="brand:logo">; the saved HTML carries it inline.
     `look` is approved designs (.html) from an earlier run for new ones to match.
     `house_style`: the design system described when this video's graphics were first designed (kept in graphics.json).
+    `planned`: with saved designs, every graphic of the plan at its index (default: `specs`). The ones this cut
+    doesn't place stay in graphics.json, with their designs, for the next re-cut to place again.
     """
     from .presets import design_style, inline_logo
 
     warnings: list[str] = []
     placed = place(specs, tl, analysis, warnings)
+    folder = out_dir / "graphics"
     if not placed:
+        waiting = keep_left_out(planned if planned is not None else specs, [], saved_html, out_dir) if saved_html is not None else []
+        if waiting:
+            write_manifest(out_dir, [], {}, {}, tl, style, house_style=house_style, left_out=waiting)
+            _put_aside_old_designs(folder, [], {}, waiting)
         return [], [], warnings
     look_under(placed, tl, analysis)
-    folder = out_dir / "graphics"
     found = {"house_style": house_style}
     if saved_html is not None:
         progress.stage("graphics", f"Re-timing {len(placed)} graphics")
@@ -1429,45 +1500,50 @@ def make(
     fd = tl.frame_duration
     fps = 1 / float(fd)
     note_new_designs(placed, html, fd)
-    grow = make_way_back(placed, set(html))  # made way for a graphic that has no design: hold for the full length after all
+    # Made way for a graphic that has no design: start on its words, and hold for the full length, after all.
+    back = make_way_back(placed, set(html))
     for g in placed:
-        if g.id in grow:
-            _lengthened(g, grow[g.id], g.frames, placed, fps, warnings)
+        if g.id in back:
+            was = replace(g)
+            _move_back(g, *back[g.id], fps)
+            _said_back(g, was, placed, fps, warnings)
     retime(placed, html, fd, warnings)
     # Every design is on disk before rendering starts, and each render is recorded as it finishes:
     # if rendering fails or is stopped, `roughcut render` renders only what's missing, without
     # asking the model again.
     previous = _read_manifest(out_dir)
     save_designs(placed, html, folder)
+    waiting = keep_left_out(planned if planned is not None else specs, placed, saved_html, out_dir) if saved_html is not None else []
     kept = unchanged(placed, html, folder, tl, previous)
     notes: dict[str, list[str]] = _old_notes(previous, placed, html, tl, kept)
-    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"])
+    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
     files: dict[str, Path] = {}
 
     def record(done: dict[str, Path]) -> None:
-        write_manifest(out_dir, placed, {**files, **done}, html, tl, style, notes=notes, house_style=found["house_style"])
+        write_manifest(out_dir, placed, {**files, **done}, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
 
     files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
-    # Made way for a graphic that didn't render: render it again at its full length (the old clip stays if that fails).
-    grow = make_way_back(placed, set(files))
-    if grow:
-        redo = [g for g in placed if g.id in grow]
-        before = {g.id: (g.frames, g.shortened_for, g.retime, files.pop(g.id), notes.get(g.id)) for g in redo}
+    # Made way for a graphic that didn't render: render it again on its words and at its full length (the old clip stays if that fails).
+    back = make_way_back(placed, set(files))
+    if back:
+        redo = [g for g in placed if g.id in back]
+        before = {g.id: (replace(g), files.pop(g.id), notes.get(g.id)) for g in redo}
         for g in redo:
-            g.frames = grow[g.id]
+            _move_back(g, *back[g.id], fps)
         retime(redo, html, fd, warnings)
         again = render(redo, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
         for g in redo:
+            was, clip, said = before[g.id]
             if g.id in again:
-                _lengthened(g, grow[g.id], before[g.id][0], placed, fps, warnings)
+                _said_back(g, was, placed, fps, warnings)
                 files[g.id] = again[g.id]
-            else:  # keep the shorter clip
-                g.frames, g.shortened_for, g.retime, files[g.id], said = before[g.id]
-                notes[g.id] = said or []
+            else:  # keep the clip it has
+                vars(g).update(vars(was))
+                files[g.id], notes[g.id] = clip, said or []
     warnings += note_warnings(placed, notes)
     clips = attach(tl, placed, files, warnings)
-    write_manifest(out_dir, placed, files, html, tl, style, notes=notes, house_style=found["house_style"])
-    _put_aside_old_designs(folder, placed, html)
+    write_manifest(out_dir, placed, files, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
+    _put_aside_old_designs(folder, placed, html, waiting)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     try:
         from .graphics_preview import write_previews

@@ -342,7 +342,7 @@ def approved_from_run(out_dir: Path, ids: list[str]) -> tuple[str, ...]:
     designs: dict[str, tuple[str, Path]] = {}
     entries = data.get("graphics") if isinstance(data, dict) else None
     for g in entries if isinstance(entries, list) else []:
-        if isinstance(g, dict) and g.get("html") and (out_dir / str(g["html"])).is_file():
+        if isinstance(g, dict) and g.get("id") and g.get("html") and (out_dir / str(g["html"])).is_file():  # not one the cut left out
             designs[str(g.get("id", "")).upper()] = (str(g.get("kind", "")), out_dir / str(g["html"]))
     if not designs:
         raise PresetError(f"{out_dir} has no saved graphic designs to approve.")
