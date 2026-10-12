@@ -352,3 +352,54 @@ def test_the_apps_preset_brief_is_sent_apart_and_not_twice(footage, tmp_path, ca
     settings = json.loads((out / "plan.json").read_text())["settings"]
     assert settings["context"] == f"{preset_brief}\n\nLet the chefs' stories breathe.", "the preset's brief once"
     assert settings["preset_brief"] == preset_brief
+
+
+# ------------------------------------------------------------ a brief that asks for graphics while they're off
+
+SCALE_BRIEF = (
+    "do tight cuts of dead space and list the restaurants and chef names based on this script "
+    "with motion graphics in the right center side of frame:\nKogi - Roy Choi\nOx Burger - Damon Cho"
+)
+
+
+def test_a_brief_asking_for_graphics_while_theyre_off_says_how_to_add_them(footage, tmp_path, monkeypatch):
+    from conftest import FakeProvider
+
+    from roughcut import pipeline
+
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
+    out = tmp_path / "out"
+    opts = pipeline.Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=tmp_path / "c", context=SCALE_BRIEF, style="auto")
+    result = pipeline.build(opts)
+    note = next(w for w in result.warnings if w.startswith("The brief asks for graphics"))
+    assert '"list the restaurants and chef names"' in note and "motion graphics are off" in note
+    assert "roughcut revise" in note and "--graphics" in note and "--graphics in Terminal" in note
+    report = (out / "edit_report.md").read_text()
+    top = report.split("- **Rough cut:**")[0]
+    assert note in top, "at the top of the report, not only in its Warnings"
+    assert note in json.loads((out / "result.json").read_text())["warnings"]
+    assert note in (out / "roughcut.log").read_text()
+
+
+def test_no_graphics_note_when_the_brief_turns_them_down_or_theyre_on(footage, tmp_path, monkeypatch):
+    from conftest import FakeProvider
+
+    from roughcut import pipeline
+
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
+    opts = pipeline.Options(inputs=[footage], out=tmp_path / "o1", name="footage", transcriber="none", cache_dir=tmp_path / "c", context="No graphics, tight cuts.")
+    assert not any("asks for graphics" in w for w in pipeline.build(opts).warnings)
+    # A preset's brief that describes its graphics, with graphics turned off on purpose: not a request of yours.
+    stk = presets.SAVE_THE_KID_BRIEF
+    opts = pipeline.Options(inputs=[footage], out=tmp_path / "o2", name="footage", transcriber="none", cache_dir=tmp_path / "c", context=stk + "\n\nThe hike.", preset_brief=stk)
+    assert not any("asks for graphics" in w for w in pipeline.build(opts).warnings)
+
+
+def test_a_cut_without_ai_says_the_graphics_need_it(footage, tmp_path, capsys):
+    from roughcut.cli import main
+
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "-c", "Add lower thirds for each chef.", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 0
+    captured = capsys.readouterr()
+    assert 'The brief asks for graphics ("lower thirds"), but this cut was made without AI' in captured.out, "in the CLI's summary, not only the log"
+    assert "--provider claude-code" in captured.out

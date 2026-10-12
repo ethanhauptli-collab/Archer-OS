@@ -16,6 +16,11 @@ def _tc(frames: int, tl: Timeline) -> str:
     return seconds_to_clock(float(frames * tl.frame_duration))
 
 
+# Warnings about what the brief or the revise notes asked for that this cut doesn't do: also at the top
+# of the report and at the end of the CLI's output, not only in the Warnings.
+HEADLINE_WARNINGS = ("The brief asks for graphics", "Your notes ask for")
+
+
 def collapse_warnings(warnings: list[str]) -> list[str]:
     """Merge warnings that differ only in clip IDs ("visual log failed for V01, I002: X" x 46)."""
     groups: dict[str, list[str]] = {}
@@ -84,6 +89,9 @@ def build_report(
     if failures:
         L += ["> **The AI didn't plan this cut.** It's the stringout: all speech in recording order with dead air removed, no B-roll.", ">"]
         L += [f"> {w}" for w in failures] + [""]
+    for w in extra_warnings or []:
+        if w.startswith(HEADLINE_WARNINGS) and not any(w in line for line in revision or []):
+            L += [f"> {w}", ""]
     if revision:  # `roughcut revise`: the notes and what they changed, before anything else
         L += list(revision)
     if plan.logline:

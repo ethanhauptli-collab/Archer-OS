@@ -447,6 +447,24 @@ def graphics_from_brief(brief: str) -> str:
     return next((m.group(0) for m, down in _cues(_GRAPHICS, brief or "") if not down), "")
 
 
+def graphics_off_note(opts: Options, out_dir: Path, *, made_without_ai: bool) -> str | None:
+    """With motion graphics off, a brief that asks for them gets none: say so, and how to add them.
+    Only your own words count: a preset's brief describing its graphics, turned off on purpose, doesn't."""
+    asked = graphics_from_brief(_own_words(opts.context, opts.preset_brief))
+    if opts.graphics or not asked:
+        return None
+    add = f"`roughcut revise {shlex.quote(str(out_dir))} --graphics {shlex.quote('add the graphics the brief asks for')}`"
+    if made_without_ai:
+        return (
+            f'The brief asks for graphics ("{asked}"), but this cut was made without AI, which designs them, so it has none. '
+            f"{add} adds them without re-transcribing (with your Claude plan: add --provider claude-code)."
+        )
+    return (
+        f'The brief asks for graphics ("{asked}"), but motion graphics are off, so this cut has none. '
+        f"Turn on Motion graphics (--graphics in Terminal) and build again, or {add} adds them without re-transcribing."
+    )
+
+
 def analysis_digest(analysis: Analysis) -> str:
     """Which clips, in which order: segment IDs only mean the same thing for the same digest."""
     h = hashlib.sha1()
@@ -753,6 +771,9 @@ def build(opts: Options) -> Result:
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
     provider = make_provider(opts.provider, model=opts.model, base_url=opts.base_url, api_key_env=opts.api_key_env, effort=opts.effort)
+    asks_graphics = graphics_off_note(opts, out_dir, made_without_ai=provider is None)
+    if asks_graphics:
+        log(asks_graphics)  # now, while there's time to stop and turn them on
     if provider is not None:
         log(f"checking {provider.name} access ({provider.model})")
         provider.verify()
@@ -772,7 +793,7 @@ def build(opts: Options) -> Result:
     visual_log = None
 
     usage = []
-    extra_warnings: list[str] = []
+    extra_warnings: list[str] = [asks_graphics] if asks_graphics else []
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision

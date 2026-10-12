@@ -606,6 +606,7 @@ FORMAT_FROM_FOOTAGE = ("auto", "footage", "from footage")
 
 def _run(args, json_mode: bool) -> int:
     from .pipeline import Options, build, rerender, result_summary
+    from .report import HEADLINE_WARNINGS
 
     # Only the cut settings given on the command line; the rest are defaults (build) or the saved run's (render).
     given = {
@@ -752,7 +753,7 @@ def _run(args, json_mode: bool) -> int:
         talk, kept = result.dead_air
         print(f"Dead air removed: {seconds_to_clock(max(0.0, talk - kept))} of {seconds_to_clock(talk)} talking footage ({max(0.0, 1 - kept / talk):.0%})")
     for w in result.warnings:
-        if "almost no pauses" in w:
+        if "almost no pauses" in w or w.startswith(HEADLINE_WARNINGS):
             print(f"  ! {w}")
     for line in summary_lines(result.summary):
         print(line)
