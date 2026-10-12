@@ -537,7 +537,12 @@ def as_played(raw: dict, sections, analysis: Analysis) -> dict:
         others = alt.get("others") if isinstance(alt, dict) and isinstance(alt.get("others"), list) else []
         if chosen and chosen not in played:
             # Not a take an earlier alternate chose: alternates that contradict each other stay as they are.
-            took = next((seg for seg in (_seg_ref(o, analysis) for o in others) if seg in played and seg not in chosen_before), None)
+            # Only a real retake: a flub the planner listed among the takes never becomes the one that played.
+            took = next(
+                (seg for seg in (_seg_ref(o, analysis) for o in others)
+                 if seg in played and seg not in chosen_before and another_read(analysis.segment(seg).text, analysis.segment(chosen).text)),
+                None,
+            )
             if took:
                 alt = {**alt, "chosen": took, "others": [chosen] + [o for o in others if _seg_ref(o, analysis) != took]}
                 chosen = took

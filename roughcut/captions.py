@@ -270,7 +270,14 @@ def _fits(words: list[_Word], fps: float) -> bool:
     )
 
 
-_TITLE = re.compile(r"(?:^|\s)(?:Dr|Mr|Mrs|Ms|Mt|Ft)\.$", re.IGNORECASE)  # before a name: "Dr. Lee", "Mt. Baldy"
+_TITLE = re.compile(r"(?:^|\s)(?:Mr|Mrs|Ms)\.$", re.IGNORECASE)  # always before a name: "Mr. Lee"
+# Before a name too ("Dr. Lee", "Mt. Baldy"), but these can also end a sentence ("We live on Ocean Dr."):
+# then the next word is one a sentence starts with.
+_PLACE_TITLE = re.compile(r"(?:^|\s)(?:Dr|Mt|Ft)\.$", re.IGNORECASE)
+_OPENERS = {
+    "the", "then", "we", "i", "it", "it's", "this", "that", "and", "but", "so", "they", "he", "she", "you", "there",
+    "here", "now", "our", "my", "a", "an", "what", "when", "if", "after", "next", "first", "also", "plus",
+}
 
 
 def _ends_sentence(words: list[_Word], i: int) -> bool:
@@ -281,8 +288,12 @@ def _ends_sentence(words: list[_Word], i: int) -> bool:
         return False
     if not text.endswith(".") or text.endswith("..") or i + 1 >= len(words) or not _ABBREVIATION.search(text):
         return True
-    after = re.sub(r"^\W+", "", words[i + 1].text)[:1]
-    return not (after.islower() or (after.isupper() and _TITLE.search(text)))
+    nxt = re.sub(r"^\W+", "", words[i + 1].text)
+    after = nxt[:1]
+    if after.islower():
+        return False
+    named = _TITLE.search(text) or (_PLACE_TITLE.search(text) and re.sub(r"[^\w']", "", nxt.lower()) not in _OPENERS)
+    return not (after.isupper() and named)
 
 
 def _rest_of_sentence(words: list[_Word], k: int, fps: float) -> list[_Word]:

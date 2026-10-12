@@ -382,6 +382,9 @@ def test_an_abbreviation_inside_a_sentence_does_not_end_its_caption():
     # A period that ends the sentence still ends the caption, and a title before a name never does.
     assert _captioned([(1.0, 3.0, "Meet Roy Choy junior."), (3.2, 5.0, "He cooks.")], fix) == ["Meet Roy Choi Jr.", "He cooks."]
     assert _captioned([(1.0, 3.0, "We met Dr. Lee today.")]) == ["We met Dr. Lee today."]
+    # A street or a mountain can end a sentence: the next one starting with a sentence's first word ends it there.
+    assert _captioned([(1.0, 2.0, "We live on Ocean Dr."), (2.1, 3.5, "Then we drove home.")]) == ["We live on Ocean Dr.", "Then we drove home."]
+    assert _captioned([(1.0, 3.0, "We hiked up Mt. Baldy today.")]) == ["We hiked up Mt. Baldy today."]
 
 
 def test_a_cut_word_with_a_few_milliseconds_of_sound_kept_is_not_captioned():

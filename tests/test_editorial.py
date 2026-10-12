@@ -360,6 +360,10 @@ def test_a_saved_plan_s_alternates_name_the_take_its_version_played():
     assert as_played(raw, played, a)["alternates"] == [{"chosen": "V01.S008", "others": ["V01.S010"], "note": "Used the retake."}]
     assert raw["alternates"][0]["chosen"] == "V01.S010"  # not changed in place
     assert [i.ref for i in normalize(as_played(raw, played, a), a, source="m:x").sections[0].items] == ["V01.S007", "V01.S008"]
+    # A flub the planner listed among the takes isn't one: it never becomes the take that "played".
+    flubbed = {"alternates": [{"chosen": "V01.S010", "others": ["V01.S009", "V01.S008"]}]}
+    flub_played = [{"name": "Rundown", "items": ["V01.S007", "V01.S009", "V01.S011"]}]
+    assert as_played(flubbed, flub_played, a) == flubbed
     # Saved as it played (the chosen take played, or neither did): as it is.
     for sections in ([{"name": "Rundown", "items": ["V01.S010"]}], [{"name": "Rundown", "items": ["V01.S007"]}]):
         assert as_played(raw, sections, a) == raw
