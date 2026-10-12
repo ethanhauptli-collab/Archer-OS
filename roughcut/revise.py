@@ -20,9 +20,10 @@ from .timecode import seconds_to_clock
 REVISE_INSTRUCTION = """\
 This cut has already been made, and the editor watched it in Final Cut Pro. Revise the previous plan \
 according to the editor's notes. Change only what the notes ask for. Keep everything else exactly as \
-it was: the same sections, segments and order, B-roll, music, alternates, flags and graphics, unless a \
-note says otherwise or a change forces it. Earlier notes still apply. Return the complete revised plan \
-in the same format, and in cut_notes say briefly what you changed for these notes."""
+it was: the same sections, segments and order, B-roll, music, alternates, flags, graphics and spellings, \
+unless a note says otherwise or a change forces it. Spellings you leave out still apply; to undo one the \
+notes say is wrong, return it with "correct" the same as "heard". Earlier notes still apply. Return the \
+complete revised plan in the same format, and in cut_notes say briefly what you changed for these notes."""
 
 
 def _snippet(text: str, n: int = 90) -> str:
@@ -58,6 +59,8 @@ def render_previous_plan(plan: Plan, analysis: Analysis) -> str:
         L.append(f"Alternate: {alt['chosen']} chosen over {', '.join(alt['others']) or 'n/a'}")
     for flag in plan.flags:
         L.append(f"Flag: {flag['ref']}: {flag['note']}")
+    for fix in plan.spellings:
+        L.append(f'Spelling: "{fix["heard"]}" -> "{fix["correct"]}"')
     if plan.cut_notes:
         L.append(f"Cut notes: {plan.cut_notes}")
     return "\n".join(L)

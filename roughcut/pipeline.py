@@ -13,10 +13,11 @@ from pathlib import Path
 
 from . import progress, versions
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
+from .captions import clean_spelling
 from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
-from .plan import Plan, heuristic_plan, normalize, plan_schema
+from .plan import Plan, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
 from .prompts import PLANNER_SYSTEM, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
@@ -788,7 +789,8 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         from .revise import enforce
 
         enforce(plan, analysis, keep=[], avoid=[str(a) for a in revision["avoid"]])
-    plan.spellings = list(saved["plan"].get("spellings") or plan.spellings)  # a revision's, with the ones it carried over
+    plan.spellings = _saved_spellings(saved, plan.spellings)  # a revision's, with the ones it carried over
+    respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     have_manifest = (out_dir / "graphics.json").is_file()
@@ -961,6 +963,12 @@ def undesigned(out_dir: Path) -> int:
     except (OSError, ValueError, AttributeError):
         return 0
     return sum(1 for g in entries if isinstance(g, dict) and g.get("text") and not g.get("html"))
+
+
+def _saved_spellings(saved: dict, fallback: list[dict]) -> list[dict]:
+    """The name spellings a saved version used: its plan's, which hold the ones a revision carried over."""
+    found = saved.get("plan", {}).get("spellings")
+    return [dict(f) for f in found if isinstance(f, dict)] if isinstance(found, list) else list(fallback)
 
 
 def _saved_graphics(saved: dict) -> list:
@@ -1201,6 +1209,8 @@ def revise(
     measure_missing_levels(analysis, opts)
 
     previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    previous.spellings = _saved_spellings(saved, previous.spellings)  # with the ones it carried over: the reviser sees them all
+    respell_graphics(previous.graphics, previous.spellings)
     history = [h for h in saved.get("notes_history") or [] if isinstance(h, dict) and h.get("notes")]
     keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
     request = revision_request(
@@ -1229,12 +1239,19 @@ def revise(
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=avoid_ids, previous=previous)
     plan.warnings += enforced.warnings
-    # Name spellings found before still hold: the revision's own first, then the earlier ones it didn't repeat.
-    heard = {str(f["heard"]).lower() for f in plan.spellings}
-    for fix in saved["plan"].get("spellings") or previous.spellings:
-        if isinstance(fix, dict) and str(fix.get("heard") or "").lower() not in heard and fix.get("correct"):
-            plan.spellings.append({"heard": str(fix["heard"]), "correct": str(fix["correct"])})
-            heard.add(str(fix["heard"]).lower())
+    # Name spellings found before still hold: the revision's own first, then the earlier ones it didn't
+    # repeat, except one it undid by returning it as heard ("correct" the same as "heard").
+    heard = {spelling_key(f["heard"]) for f in plan.spellings}
+    for fix in raw.get("spellings") or []:
+        h, c = clean_spelling(str(fix.get("heard") or ""), str(fix.get("correct") or "")) if isinstance(fix, dict) else ("", "")
+        if h and h == c:
+            heard.add(spelling_key(h))
+    for fix in previous.spellings:
+        h, c = clean_spelling(str(fix.get("heard") or ""), str(fix.get("correct") or ""))
+        if h and c and h != c and spelling_key(h) not in heard:
+            plan.spellings.append({"heard": h, "correct": c})
+            heard.add(spelling_key(h))
+    respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
         raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")
 

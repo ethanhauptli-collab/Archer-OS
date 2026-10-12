@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .analyze import Analysis
+from .captions import clean_spelling, respell
 from .duplicates import LINE_CONTAINED, contains_line, found_in, line_words, same_line, take_group
 
 PLAN_SCHEMA: dict = {
@@ -117,11 +118,11 @@ PLAN_SCHEMA: dict = {
         "cut_notes": {"type": "string", "description": "What was left out and why, briefly."},
         "spellings": {
             "type": "array",
-            "description": "Names the transcript misspells, as the brief, script or file names spell them. Fix the captions.",
+            "description": "Names the transcript misspells, as the brief, script or file names spell them. They fix the captions and the names in graphics' text and subtext.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "heard": {"type": "string", "description": "The words exactly as the transcript has them, e.g. 'Roy Choy'."},
+                    "heard": {"type": "string", "description": "The name exactly as the transcript has it, without a possessive 's or punctuation after it, e.g. 'Roy Choy'."},
                     "correct": {"type": "string", "description": "The right spelling, e.g. 'Roy Choi'."},
                 },
                 "required": ["heard", "correct"],
@@ -268,7 +269,20 @@ class Plan:
 
 
 def _spelling_tokens(text: str) -> list[str]:
-    return [t for t in (re.sub(r"[^\w]", "", w.lower()) for w in text.split()) if t]
+    from .transcribe import FILLERS
+
+    return [t for t in (re.sub(r"[^\w]", "", w.lower()) for w in text.split()) if t and t not in FILLERS]  # "Marco, um, Belini"
+
+
+def spelling_key(heard: str) -> str:
+    """The words a name fix applies to, for telling two fixes of one name apart from fixes of two."""
+    return " ".join(_spelling_tokens(clean_spelling(heard, heard)[0]))
+
+
+def respell_graphics(specs: list[GraphicSpec], spellings: list[dict]) -> None:
+    """Names on screen spelled as the brief spells them. A graphic's words stay as transcribed: they find it in the speech."""
+    for g in specs:
+        g.text, g.subtext = respell(g.text, spellings), respell(g.subtext, spellings)
 
 
 def _spellings(raw, analysis: Analysis) -> list[dict]:
@@ -280,7 +294,7 @@ def _spellings(raw, analysis: Analysis) -> list[dict]:
     for fix in raw or []:
         if not isinstance(fix, dict):
             continue
-        heard, correct = str(fix.get("heard") or "").strip(), str(fix.get("correct") or "").strip()
+        heard, correct = clean_spelling(str(fix.get("heard") or ""), str(fix.get("correct") or ""))
         tokens = _spelling_tokens(heard)
         if not tokens or not correct or heard == correct or len(tokens) > 6:
             continue
@@ -428,6 +442,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         for g in raw.get("graphics") or []
     ]
     plan.graphics = parse_specs(graphics, analysis, used_segments, warnings)
+    respell_graphics(plan.graphics, plan.spellings)
     plan.warnings = warnings
     return plan
 

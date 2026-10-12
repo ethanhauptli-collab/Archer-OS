@@ -153,3 +153,116 @@ def test_a_planned_line_from_a_b_roll_clip_is_captioned():
     a, plan, tl = cut(items=("V01.S003", "V02.S001"), extra=(vox,))
     text = captions.srt(tl, a)
     assert "Best tacos in the county." in text and "Today we're heading up the mountain." in text
+
+
+def _fixed(text: str, spellings: list[dict]) -> str:
+    said = [captions._Word(w, n, n + 1) for n, w in enumerate(text.split())]
+    return " ".join(w.text for w in captions.fix_names(said, spellings))
+
+
+def test_a_spelling_copied_with_its_possessive_or_punctuation_is_written_once():
+    """The planner copies "heard" as the transcript has it ("Lin Nguyen's", "Marco Belini."): the caption
+    keeps the transcript's own possessive and punctuation, once, and adds no possessive nobody said."""
+    possessive = [{"heard": "Gina Rousseau's", "correct": "Gina Russo's"}]
+    assert _fixed("Nonna's Table is Gina Rousseau's pasta bar.", possessive) == "Nonna's Table is Gina Russo's pasta bar."
+    assert _fixed("Gina Rousseau runs it.", possessive) == "Gina Russo runs it."
+    assert _fixed("Gina Rousseau's pasta bar.", [{"heard": "Gina Rousseau's", "correct": "Gina Russo"}]) == "Gina Russo's pasta bar."
+    assert _fixed("Lunch at Wahoo's today.", [{"heard": "Wahoo's", "correct": "Wahoos"}]) == "Lunch at Wahoos today."
+    curly = [{"heard": "Gina Rousseau\u2019s", "correct": "Gina Russo\u2019s"}]
+    assert _fixed("It is Gina Rousseau\u2019s pasta bar.", curly) == "It is Gina Russo\u2019s pasta bar."
+    assert _fixed("It is Gina Rousseau's pasta bar.", curly) == "It is Gina Russo's pasta bar."
+    assert _fixed("It was Lin Nguyen's first restaurant.", [{"heard": "Lin Nguyen's", "correct": "Linh Nguyen's"}]) == "It was Linh Nguyen's first restaurant."
+    assert _fixed("It was Lin Nguyen's first restaurant.", [{"heard": "Lin Nguyen", "correct": "Linh Nguyen"}]) == "It was Linh Nguyen's first restaurant."
+    assert _fixed("Chef Marco Belini. He cooks.", [{"heard": "Marco Belini.", "correct": "Marco Bellini."}]) == "Chef Marco Bellini. He cooks."
+    assert _fixed("Roy Choy, chef.", [{"heard": "Roy Choy,", "correct": "Roy Choi,"}]) == "Roy Choi, chef."
+    assert _fixed("Meet Roy Choy junior.", [{"heard": "Roy Choy junior", "correct": "Roy Choi Jr."}]) == "Meet Roy Choi Jr."
+    # A possessive that is part of the name.
+    assert _fixed("Nona's Table is great.", [{"heard": "Nona's Table", "correct": "Nonna's Table"}]) == "Nonna's Table is great."
+    # plan.json keeps the pairs clean.
+    speech = [(1.0, 4.0, "Roy Choy, chef."), (5.0, 9.0, "Nonna's Table is Gina Rousseau's pasta bar.")]
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=speech)])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}],
+        "spellings": [{"heard": "Roy Choy,", "correct": "Roy Choi,"}, {"heard": "Gina Rousseau\u2019s", "correct": "Gina Russo\u2019s"}],
+    }
+    plan = normalize(raw, a)
+    assert plan.spellings == [{"heard": "Roy Choy", "correct": "Roy Choi"}, {"heard": "Gina Rousseau", "correct": "Gina Russo"}]
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    words = " ".join(" ".join(c[3]) for c in cues(captions.srt(tl, a, raw["spellings"])))  # an older plan.json's pairs, as they were
+    assert "Roy Choi, chef." in words and "Gina Russo's pasta bar." in words
+
+
+def test_a_name_with_a_filler_inside_it_is_still_fixed():
+    speech = [(1.0, 5.0, "Dough Boy Pizza comes from Marco, um, Belini.")]
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=speech)])
+    raw = {"sections": [{"name": "x", "items": ["V01.S001"], "broll": []}], "spellings": [{"heard": "Marco Belini", "correct": "Marco Bellini"}]}
+    plan = normalize(raw, a)
+    assert plan.spellings == raw["spellings"]
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    assert "Dough Boy Pizza comes from Marco Bellini." in " ".join(" ".join(c[3]) for c in cues(captions.srt(tl, a, plan.spellings)))
+    assert _fixed("from Marco, Belini.", [{"heard": "Marco, um, Belini", "correct": "Marco Bellini"}]) == "from Marco Bellini."
+
+
+def test_no_caption_line_is_longer_than_42_characters():
+    """An 80-84 character line that can't split into two lines of 42 starts a new caption instead."""
+    speech = [
+        (1.0, 5.6, "The neighborhood got a brand new Mediterranean-inspired rooftop restaurant this year."),
+        (6.0, 10.4, "We partnered with the Anaheim Convention Center to bring entrepreneurs together this spring."),
+    ]
+    a = Analysis(clips=[make_clip("V01", seconds=12, sentences=speech)])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    found = cues(captions.srt(tl, a))
+    lines = [line for *_, ls in found for line in ls]
+    assert " ".join(lines).split() == " ".join(t for *_, t in speech).split()
+    assert all(len(line) <= captions.LINE_CHARS for line in lines), lines
+    # A single word too long for a line still gets a caption, on its own.
+    long = "Supercalifragilisticexpialidocious-and-then-some"
+    a = Analysis(clips=[make_clip("V01", seconds=8, sentences=[(1.0, 4.0, f"It was {long} today.")])])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    assert [ls for *_, ls in cues(captions.srt(tl, a))] == [["It was"], [long], ["today."]]
+
+
+def test_a_cut_word_with_a_few_milliseconds_of_sound_kept_is_not_captioned():
+    """The retake after a kept line starts a few milliseconds before the piece's last frame ends: its first
+    word is cut, so it isn't prepended to the next caption."""
+    speech = [
+        (0.5, 3.03, "Dough Boy Pizza comes from Marco Belini."),
+        (3.235, 5.0, "Wait, let me redo that."),
+        (6.0, 9.0, "Chef Kenji Tanaka is doing omakase."),
+    ]
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=speech)])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", "V01.S003"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    edge = tl.spine[0].src_in + tl.spine[0].frames * tl.frame_duration
+    assert 3.235 < edge, "the first piece plays a few milliseconds of 'Wait,'"
+    assert [" ".join(ls) for *_, ls in cues(captions.srt(tl, a))] == [
+        "Dough Boy Pizza comes from Marco Belini.", "Chef Kenji Tanaka is doing omakase.",
+    ]
+    # The same at the start of a piece: the end of the line before it.
+    speech = [(0.5, 5.06, "Wait, hold on, let me redo that."), (5.17, 9.0, "Dough Boy Pizza comes from Marco Belini.")]
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=speech)])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S002"], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    assert tl.spine[0].src_in < a.clips[0].segments[0].words[-1].end, "the piece plays a few milliseconds of 'that.'"
+    assert [" ".join(ls) for *_, ls in cues(captions.srt(tl, a))] == ["Dough Boy Pizza comes from Marco Belini."]
+
+
+def test_graphics_spell_names_as_the_brief_does():
+    """A spelling fixes a graphic's on-screen text too; its words stay as transcribed, to find them in the speech."""
+    a = Analysis(clips=[make_clip("V01", seconds=10, sentences=[(1.0, 4.0, "First up, Kogi from Roy Choy, the truck."), (5.0, 8.0, "Then Golden Hour.")])])
+    raw = {
+        "sections": [{"name": "x", "items": ["V01.S001", "V01.S002"], "broll": []}],
+        "spellings": [{"heard": "Roy Choy", "correct": "Roy Choi"}, {"heard": "Golden Hour", "correct": "Golden Hour Bar"}],
+        "graphics": [
+            {"kind": "lower_third", "segment": "V01.S001", "words": "Kogi from Roy Choy", "text": "Kogi", "subtext": "Chef Roy Choy's truck", "seconds": 3, "direction": ""},
+            {"kind": "lower_third", "segment": "V01.S002", "words": "Golden Hour", "text": "Golden Hour Bar", "subtext": "Golden Hour", "seconds": 3, "direction": ""},
+        ],
+    }
+    plan = normalize(raw, a)
+    assert [(g.text, g.subtext, g.words) for g in plan.graphics] == [
+        ("Kogi", "Chef Roy Choi's truck", "Kogi from Roy Choy"),
+        ("Golden Hour Bar", "Golden Hour Bar", "Golden Hour"),  # already spelled out: not "Golden Hour Bar Bar"
+    ]
+    assert captions.respell("Golden Hour Bar", plan.spellings) == "Golden Hour Bar" and captions.respell("Roy Choi", plan.spellings) == "Roy Choi"

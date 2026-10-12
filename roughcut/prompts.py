@@ -73,8 +73,10 @@ the same words from another read or another export of a promo play only once (a 
 dropped).
 10. Spellings: the transcript is speech recognition and often misspells names. When the brief, \
 script or file names spell a name the transcript gets wrong (a person, business, place or brand), \
-add {"heard": the words exactly as the transcript has them, "correct": the right spelling}. They \
-fix the captions. Only names you can confirm from what you were given; never guess.
+add {"heard": the name exactly as the transcript has it, without a possessive 's or punctuation \
+after it, "correct": the right spelling}. They fix the captions and the names in graphics' text \
+and subtext; a graphic's words stay as the transcript has them. Only names you can confirm from \
+what you were given; never guess.
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.
@@ -242,21 +244,24 @@ GRAPHICS_BRIEF = """\
 Also plan animated motion graphics for this cut in "graphics". They are designed and rendered \
 after you plan; you choose the moments and the words, the software times them to the speech.
 - kind: lower_third (a name and role taken from the transcript, file names or brief, never \
-invented: who is speaking, the first time each on-camera person talks, or a person, place or \
-business the speech names when the brief asks to show them), stat (a number that matters, e.g. \
-"$325M"), title_card (a section or chapter title on the section's first line), kinetic_caption \
-(the spoken words animated word by word, for the hook or a punchline), quote (a short key line \
-pulled out on screen), list (two to four short items the speaker names together, all within \
-the graphic's seconds).
+invented, the name spelled as the brief, script or file names spell it (your spellings), never \
+as the transcript mishears it: who is speaking, the first time each on-camera person talks, or \
+a person, place or business the speech names when the brief asks to show them), stat (a number \
+that matters, e.g. "$325M"), title_card (a section or chapter title on the section's first \
+line), kinetic_caption (the spoken words animated word by word, for the hook or a punchline), \
+quote (a short key line pulled out on screen), list (two to four short items the speaker names \
+together, all within the graphic's seconds).
 - Names that come up one at a time over several lines (a rundown of restaurants, chefs, \
 vendors, speakers; "list the names" in a brief means this) get one graphic each, on the words \
-that say that name (text: the name; subtext: the chef, role or detail), never one list \
-graphic: a list only holds what is spoken while it is on screen. Each name the brief asks for \
-gets its graphic when it is said, however close together; the next one replaces it.
+that say that name (text: the name, spelled as the brief spells it; subtext: the chef, role or \
+detail), never one list graphic: a list only holds what is spoken while it is on screen. Each \
+name the brief asks for gets its graphic when it is said, however close together; the next one \
+replaces it.
 - segment: a segment ID that is in your cut. words: copy the exact words from that segment where \
-the graphic should appear. text: what is on screen, short (six words or fewer for the main line). \
-subtext: an optional second line, or "". seconds: how long it holds, 2-8 (0 for kinetic \
-captions). direction: a line on look or motion when it matters, or "".
+the graphic should appear, as the transcript has them, misheard names included. text: what is \
+on screen, short (six words or fewer for the main line). subtext: an optional second line, or \
+"". seconds: how long it holds, 2-8 (0 for kinetic captions). direction: a line on look or \
+motion when it matters, or "".
 - Follow the brief's directions about graphics, including where on screen they go (put that \
 in direction). Otherwise space them out (usually one every 10-20 seconds at most, never two at \
 once), and add none where the footage gives no good moment.

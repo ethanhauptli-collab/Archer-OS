@@ -26,7 +26,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/fcpxml.py` | `Timeline` → FCPXML 1.10 (roles, notes, volume/fades/keyframes, alt-take keyword ranges) |
 | `roughcut/versions.py` | Numbered versions, `history/`, `versions.json`, atomic writes, graphics adoption and pruning |
 | `roughcut/revise.py` | `roughcut revise`: re-plan from notes; the diff the report opens with |
-| `roughcut/captions.py` | `<name> vN.srt` per version: kept dialogue/narration words mapped through the cut (frames, no fillers), name fixes from the plan's `spellings` |
+| `roughcut/captions.py` | `<name> vN.srt` per version: kept dialogue/narration words mapped through the cut (frames, no fillers), name fixes from the plan's `spellings` (`respell`, which also spells names in graphics' text) |
 | `roughcut/report.py`, `report_html.py` | Paper edit (Markdown, and the HTML page with copyable chapters) |
 | `roughcut/pipeline.py`, `cli.py` | `roughcut build` / `render` / `revise` / `preset` / `update` / `doctor` / `key` |
 | `roughcut/paths.py`, `update.py` | Rejoin unquoted paths with spaces; `roughcut update` |

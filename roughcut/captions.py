@@ -23,6 +23,7 @@ LINE_CHARS = 42  # per line, two lines a caption: the usual broadcast and YouTub
 MAX_SECONDS = 6.0  # longest a caption stays up
 MIN_SECONDS = 1.0  # shortest, if the next caption leaves room
 PAUSE = 0.8  # a pause this long starts a new caption
+MIN_KEPT = 0.12  # seconds of a word's sound the cut must play for it to be captioned (or 40% of a short word)
 SENTENCE_END = (".", "?", "!", "…")
 
 
@@ -53,11 +54,13 @@ def kept_words(tl: "Timeline", analysis: "Analysis") -> list[_Word]:
     """Every transcribed word the cut plays on the spine, in timeline order, fillers left out.
 
     On camera and narration clips every word in a kept piece counts; on any other clip, the words
-    of the lines the plan picked. A word goes with the piece that plays most of its sound.
+    of the lines the plan picked. A word goes with the piece that plays most of its sound, and only
+    when the cut plays a real part of it: the end of a cut retake can sit a few milliseconds inside a piece.
     """
     fd = tl.frame_duration
     clips = {c.id: c for c in analysis.clips}
     best: dict[tuple[str, int, int], tuple[float, _Word]] = {}  # (clip, segment, word) -> (sound kept, caption word)
+    played: dict[tuple[str, int, int], tuple[float, float]] = {}  # (clip, segment, word) -> (sound kept in all, its sound)
     for piece in tl.spine:
         clip = clips.get(piece.clip_id)
         if clip is None or not clip.segments or (clip.role not in SPOKEN_ROLES and not piece.seg_ids):
@@ -76,12 +79,14 @@ def kept_words(tl: "Timeline", analysis: "Analysis") -> list[_Word]:
                 if kept <= 0:
                     continue
                 key = (clip.id, n, i)
+                played[key] = (played.get(key, (0.0, 0.0))[0] + kept, sb - sa)
                 if key in best and best[key][0] >= kept:
                     continue
                 fa = piece.offset + round(Fraction(max(sa, a) - a) / fd)
                 fb = piece.offset + round(Fraction(min(sb, b) - a) / fd)
                 best[key] = (kept, _Word(text, fa, max(fb, fa + 1)))
-    return sorted((w for _, w in best.values()), key=lambda w: (w.a, w.b))
+    heard = (w for key, (_, w) in best.items() if played[key][0] >= min(MIN_KEPT, 0.4 * played[key][1]))
+    return sorted(heard, key=lambda w: (w.a, w.b))
 
 
 def _bare(word: str) -> tuple[str, str]:
@@ -92,31 +97,90 @@ def _bare(word: str) -> tuple[str, str]:
     return core.replace("'", ""), ""
 
 
+_PUNCT = ".,;:!?…"
+_POSSESSIVE = re.compile(r"['\u2019][sS]$")
+
+
+def clean_spelling(heard: str, correct: str) -> tuple[str, str]:
+    """A name fix without what the planner copied from the transcript around the name: the punctuation
+    after it ("Marco Belini." -> "Marco Bellini.") and a possessive ("Gina Rousseau's" -> "Gina Russo's").
+    Those are the transcript's, and each caption keeps its own."""
+    heard, correct = heard.strip(), correct.strip()
+    if heard.rstrip(_PUNCT) != heard:  # copied with the punctuation after it: so was correct
+        heard, correct = heard.rstrip(_PUNCT).rstrip(), correct.rstrip(_PUNCT).rstrip()
+    correct = correct.rstrip(",;:").rstrip()  # never part of a name
+    if _POSSESSIVE.search(heard) and correct:
+        if _POSSESSIVE.search(correct):
+            heard, correct = heard[:-2], correct[:-2]
+        elif _bare(correct.split()[-1])[0] != _bare(heard.split()[-1])[0] + "s":  # unless it's the name: "Wahoo's" -> "Wahoos"
+            heard = heard[:-2]
+    return heard, correct
+
+
+def _same(run: list[tuple[str, str]], name: list[tuple[str, str]]) -> bool:
+    """`run` (bare words) says `name`: a possessive inside it as the name has it ("Nona's Table"), any at the end."""
+    return (
+        len(run) == len(name)
+        and all(c + p.replace("'", "") == nc + np.replace("'", "") for (c, p), (nc, np) in zip(run[:-1], name[:-1]))
+        and run[-1][0] == name[-1][0]
+    )
+
+
+def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, str]]:
+    """Each misheard name in `texts` (one word each): (its first word, past its last, the name as the brief
+    spells it, with the punctuation after it and a possessive the transcript gives it)."""
+    from .transcribe import FILLERS
+
+    fixes = []
+    for f in spellings or []:
+        heard, correct = clean_spelling(str(f.get("heard") or ""), str(f.get("correct") or ""))
+        name = [b for b in map(_bare, heard.split()) if b[0] and b[0] not in FILLERS]  # captions leave out "um"
+        if name and correct:
+            # A possessive the pair itself has ("Wahoo's" -> "Wahoos") replaces the transcript's.
+            fixes.append((name, [_bare(w) for w in correct.split()], correct, not name[-1][1] and not _POSSESSIVE.search(correct)))
+    fixes.sort(key=lambda f: -len(f[0]))  # longest first: "Chef Remy Lovan" before "Remy"
+    bare = [_bare(t) for t in texts]
+    out: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(texts):
+        for name, right, correct, possessive in fixes:
+            if len(right) > len(name) and _same(bare[i : i + len(right)], right):
+                i += len(right)  # already spelled out: "Golden Hour Bar" for "Golden Hour"
+                break
+            if _same(bare[i : i + len(name)], name):
+                last = texts[i + len(name) - 1]
+                text = correct + (("\u2019s" if "\u2019" in last else "'s") if possessive and bare[i + len(name) - 1][1] else "")
+                punct = last[len(last.rstrip(_PUNCT)):]
+                out.append((i, i + len(name), text if text.endswith(punct) else text + punct))
+                i += len(name)
+                break
+        else:
+            i += 1
+    return out
+
+
+def respell(text: str, spellings: list[dict]) -> str:
+    """`text` with each misheard name ("Roy Choy") spelled as the brief spells it ("Roy Choi")."""
+    words = text.split()
+    found = _respelled(words, spellings)
+    if not found:
+        return text
+    out, at = [], 0
+    for i, j, name in found:
+        out += words[at:i] + [name]
+        at = j
+    return " ".join(out + words[at:])
+
+
 def fix_names(words: list[_Word], spellings: list[dict]) -> list[_Word]:
     """Words with each misheard name ("Roy Choy") replaced by its spelling ("Roy Choi"): one caption word,
     so a line never breaks inside it, keeping the run's timing and its punctuation or possessive."""
-    fixes = sorted(
-        ((tokens, str(f["correct"]).strip()) for f in spellings or [] if (tokens := [t for t in (_bare(w)[0] for w in str(f.get("heard") or "").split()) if t]) and str(f.get("correct") or "").strip()),
-        key=lambda f: -len(f[0]),  # longest first: "Chef Remy Lovan" before "Remy"
-    )
-    if not fixes:
-        return words
     out: list[_Word] = []
-    i = 0
-    while i < len(words):
-        for tokens, correct in fixes:
-            run = words[i : i + len(tokens)]
-            bare = [_bare(w.text) for w in run]
-            if len(run) == len(tokens) and [b for b, _ in bare] == tokens and not any(p for _, p in bare[:-1]):
-                last = run[-1].text
-                tail = bare[-1][1] + (last[len(last.rstrip(".,;:!?…")):] if last.rstrip(".,;:!?…") != last else "")
-                out.append(_Word(correct + tail, run[0].a, run[-1].b))
-                i += len(tokens)
-                break
-        else:
-            out.append(words[i])
-            i += 1
-    return out
+    at = 0
+    for i, j, name in _respelled([w.text for w in words], spellings):
+        out += words[at:i] + [_Word(name, words[i].a, words[j - 1].b)]
+        at = j
+    return out + words[at:]
 
 
 def _lines(words: list[str]) -> list[str]:
@@ -150,6 +214,7 @@ def captions(tl: "Timeline", analysis: "Analysis", spellings: list[dict] | None 
                 (w.a - prev.b) / fps >= PAUSE
                 or prev.text.endswith(SENTENCE_END)
                 or len(text) > 2 * LINE_CHARS
+                or any(len(line) > LINE_CHARS for line in _lines([x.text for x in cur + [w]]))  # no two lines of 42 hold it
                 or (w.b - cur[0].a) / fps > MAX_SECONDS
                 or (prev.text.endswith((",", ";", ":")) and len(text) > LINE_CHARS)
             ):

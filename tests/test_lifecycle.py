@@ -497,6 +497,43 @@ def test_name_spellings_last_through_revisions_and_re_cuts(footage, tmp_path, fa
     assert "Mount Baldy" in next(out.glob("*.srt")).read_text() and "the mountain" not in next(out.glob("*.srt")).read_text()
 
 
+def test_a_revision_can_undo_a_name_spelling(footage, tmp_path, fake, shared_cache):
+    """The reviser sees the spellings in force. One it returns with correct the same as heard is gone from
+    this version and every re-cut after it; one it leaves out still holds."""
+    import copy
+
+    out = tmp_path / "out"
+    spellings = [{"heard": "the mountain", "correct": "Mount Baldy"}, {"heard": "long day", "correct": "Long Day"}]
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": spellings}
+    pipeline.build(_opts(footage, out, shared_cache))
+    fake.plan = {**fake.plan, "spellings": [{"heard": "The mountain.", "correct": "The mountain."}]}
+    pipeline.revise(out, "The mountain isn't Mount Baldy: leave it as he says it.", Options(inputs=[]))
+    previous = fake.calls[-1]["parts"][1].text.split("<previous_plan>")[1].split("</previous_plan>")[0]
+    assert 'Spelling: "the mountain" -> "Mount Baldy"' in previous and 'Spelling: "long day" -> "Long Day"' in previous
+    assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == spellings[1:]
+    srt = next(out.glob("*.srt")).read_text()
+    assert "Mount Baldy" not in srt and "the mountain" in srt and "Long Day" in srt
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    srt = next(out.glob("*.srt")).read_text()
+    assert "Mount Baldy" not in srt and "Long Day" in srt
+    fake.plan = {k: v for k, v in fake.plan.items() if k != "spellings"}  # the next revision doesn't bring it back
+    pipeline.revise(out, "Tighter.", Options(inputs=[]))
+    assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == spellings[1:]
+
+
+def test_a_name_spelling_from_an_earlier_version_fixes_a_revision_s_graphics(footage, tmp_path, fake, shared_cache):
+    import copy
+
+    out = tmp_path / "out"
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": [{"heard": "the mountain", "correct": "Mount Baldy"}]}
+    pipeline.build(_opts(footage, out, shared_cache))
+    title = {**GRAPHIC, "text": "Up the mountain", "subtext": "heading up the mountain"}
+    fake.plan = {**{k: v for k, v in fake.plan.items() if k != "spellings"}, "graphics": [title]}
+    pipeline.revise(out, "Add a title card.", Options(inputs=[]))
+    graphics = json.loads((out / "plan.json").read_text())["plan"]["graphics"]
+    assert [(g["text"], g["subtext"], g["words"]) for g in graphics] == [("Up Mount Baldy", "heading up Mount Baldy", "heading up the mountain")]
+
+
 def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache, context="Family trip to the lake", target_seconds=90))
