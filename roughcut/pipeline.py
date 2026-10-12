@@ -633,22 +633,23 @@ def make_timelines(plan: Plan, analysis: Analysis, opts: Options, name: str) -> 
         target_seconds=plan.target_seconds, punch_in=bool(opts.punch_in),
     )
     stringout = None
-    if opts.stringout:
-        s_plan = heuristic_plan(analysis)
-        if s_plan.sections:
-            stringout = build_timeline(
-                s_plan,
-                analysis,
-                style=style,
-                name=f"{name} - Stringout",
-                format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}",
-                broll_db=opts.broll_db,
-                fill=opts.fill,
-                dialogue_level=opts.dialogue_level,
-                fades=opts.fades,
-                music_beds=False,  # the stringout is for reading the speech
-            )
-    return rough, stringout
+    s_plan = heuristic_plan(analysis)
+    if s_plan.sections:
+        # Cut even when its project isn't written (--no-stringout, revise): the dead air removed is measured on it.
+        stringout = build_timeline(
+            s_plan,
+            analysis,
+            style=style,
+            name=f"{name} - Stringout",
+            format_override=opts.format or f"{rough.width}x{rough.height}@{float(1 / rough.frame_duration):.3f}",
+            broll_db=opts.broll_db,
+            fill=opts.fill,
+            dialogue_level=opts.dialogue_level,
+            fades=opts.fades,
+            music_beds=False,  # the stringout is for reading the speech
+        )
+        rough.dead_air = dead_air(analysis.clips, stringout)
+    return rough, stringout if opts.stringout else None
 
 
 def write_outputs(
@@ -898,7 +899,7 @@ def _finish_build(
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
             save_result(Result(
                 out_dir, *interim, plan, rough, stringout, fell_back, analysis.warnings + plan.warnings + rough.warnings + extra_warnings + pending,
-                dead_air(analysis.clips, stringout), version=version, project=rough.name, event=event_name(name), settings=record.get("settings") or {},
+                rough.dead_air, version=version, project=rough.name, event=event_name(name), settings=record.get("settings") or {},
                 summary=run_summary(
                     plan, graphics_on=True, placed=[], with_graphics=analysis, usage=usage, graphics_note="still being made when this cut was written",
                     skipped_files=(summary_base or {}).get("skipped_files"), visual_log=(summary_base or {}).get("visual_log"),
@@ -954,7 +955,7 @@ def _finish_build(
         skipped_files=base.get("skipped_files"), visual_log=base.get("visual_log"), graphics_note=graphics_note,
     )
     result = save_result(Result(
-        out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, dead_air(analysis.clips, stringout),
+        out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, rough.dead_air,
         version=version, project=rough.name, event=event_name(name), summary=summary, settings=record.get("settings") or {},
     ))
     if limit_hit is not None:
@@ -1105,7 +1106,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None, usage=usage, undesigned=undone,
     )
     result = save_result(Result(
-        out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=dead_air(analysis.clips, stringout),
+        out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=rough.dead_air,
         version=version, project=rough.name, event=event_name(name), summary=summary, settings=record["settings"],
     ))
     if limit_hit is not None:

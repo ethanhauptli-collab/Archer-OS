@@ -192,7 +192,7 @@ Rendering took about 9 seconds per 4-second 1080p graphic on the 4-core test mac
 | `--transcriber` | `auto` | `mlx` (Mac), `faster-whisper`, or `none` (silence only) |
 | `--language` | detect | e.g. `en` |
 | `--transcripts DIR` | | Folder of `.srt`/`.vtt`/`.json` transcripts named like the clips |
-| `--no-stringout`, `--no-fill` | | Leave out the Stringout project; leave narration uncovered where the plan has no B-roll |
+| `--no-stringout`, `--no-fill` | | Leave out the Stringout project (the run still says how much dead air the cut removed); leave narration uncovered where the plan has no B-roll |
 | `--open` | | Open the new cut in Final Cut Pro when it's done |
 
 ### Use your Claude subscription instead of an API key

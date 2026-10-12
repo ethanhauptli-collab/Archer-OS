@@ -110,6 +110,7 @@ class Timeline:
     levels: list[dict] = field(default_factory=list)  # one row per clip whose volume was set (see _mix)
     target_seconds: float | None = None  # the length the brief asked for
     review: "Review | None" = None  # length vs target, uncovered jump cuts, fill, repeated stills
+    dead_air: tuple[float, float] | None = None  # the rough cut's: (talking footage, its stringout) seconds, from make_timelines
 
     @property
     def total_frames(self) -> int:

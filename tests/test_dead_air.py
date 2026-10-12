@@ -113,6 +113,25 @@ def test_noisy_clip_with_whisper_timing_gets_its_pauses_cut(noisy_talk, tmp_path
     assert "Dead air removed:" in (out / "edit_report.md").read_text()
 
 
+def test_dead_air_removed_is_said_without_a_stringout_too(noisy_talk, tmp_path, capsys):
+    """The live runs used --no-stringout and said nothing about the dead air the cut removed: the figure is the
+    stringout's, so the stringout is cut in memory for it, the same numbers, without its project."""
+    said = []
+    for flags in ([], ["--no-stringout"]):
+        out = tmp_path / f"out{len(flags)}"
+        assert main(["build", str(noisy_talk), "--provider", "none", "--transcriber", "none", "--no-menu",
+                     "-o", str(out), "--cache-dir", str(tmp_path / "cache"), *flags]) == 0
+        printed = capsys.readouterr().out
+        said.append(next((line for line in printed.splitlines() if line.startswith("Dead air removed:")), None))
+        assert said[-1] and said[-1].split(": ", 1)[1] in (out / "edit_report.md").read_text()
+    assert said[0] == said[1]
+    fcpxml = next(out.glob("*.fcpxml")).read_text()
+    assert "Stringout" not in fcpxml and "**Stringout**" not in (out / "edit_report.md").read_text()
+    # A re-cut without the stringout says it too.
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert "Dead air removed:" in capsys.readouterr().out and "Dead air removed:" in (out / "edit_report.md").read_text()
+
+
 def test_a_raised_level_never_deletes_or_cuts_real_words(noisy_talk, tmp_path, monkeypatch):
     """Promos with a music bed got levels near -14 dB: quiet words under the music must survive."""
     from roughcut.plan import heuristic_plan
