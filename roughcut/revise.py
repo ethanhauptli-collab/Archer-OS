@@ -11,6 +11,7 @@ and the paper edit lists exactly what changed.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .analyze import Analysis
@@ -240,6 +241,20 @@ def _rules(avoid: list[str], warnings: list[str]) -> list[_Rule]:
         else:
             warnings.append(f"--avoid {token}: not a segment, clip or CLIP@start-end range; ignored")
     return rules
+
+
+def avoided_lines(avoid: list[str], analysis: Analysis) -> Callable[[str], bool] | None:
+    """Is a segment left out by these --avoids? For `plan.normalize`: a take the editor left out never plays in
+    place of another take of its line, and another take the plan has in the cut plays instead. None when nothing is avoided."""
+    rules = _rules(avoid, [])
+    if not rules:
+        return None
+
+    def hit(seg_id: str) -> bool:
+        seg = analysis.segment(seg_id)
+        return seg is not None and any(r.hits(seg.clip_id, seg_id, seg.start, seg.end) for r in rules)
+
+    return hit
 
 
 def _anchor(missing: str, previous: Plan | None, plan: Plan) -> str | None:

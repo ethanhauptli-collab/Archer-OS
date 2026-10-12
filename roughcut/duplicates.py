@@ -60,6 +60,22 @@ def same_line(a: list[str], b: list[str], same_takes: bool) -> bool:
     return sm.quick_ratio() >= need and sm.ratio() >= need
 
 
+def another_read(a: str, b: str) -> bool:
+    """Is the line `a` says another read of the line `b` says (a retake), not a flub or another line?
+
+    Most of the same words (TAKE_SIMILARITY, as alternate takes are matched in the browser),
+    the same line once um/uh are left out, or one inside the other (a false start, or a read
+    Whisper ended a sentence later).
+    """
+    wa, wb = re.findall(r"[a-z0-9']+", a.lower()), re.findall(r"[a-z0-9']+", b.lower())
+    if wa and wb:
+        sm = difflib.SequenceMatcher(None, wa, wb, autojunk=False)
+        if sm.quick_ratio() >= TAKE_SIMILARITY and sm.ratio() >= TAKE_SIMILARITY:
+            return True
+    la, lb = line_words(a), line_words(b)
+    return same_line(la, lb, same_takes=True) or contains_line(la, lb, True) or contains_line(lb, la, True)
+
+
 LINE_CONTAINED = 0.85  # of the shorter line's words found in order inside the longer one...
 LINE_SPREAD = 1.3  # ...within this many times its length (not common words scattered through a long line)
 LINE_CONTAINED_MIN_WORDS = 4  # the shorter line, in two reads/exports of one script (LINE_REPEAT_MIN_WORDS elsewhere)

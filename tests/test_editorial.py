@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from fractions import Fraction
 
 import pytest
@@ -278,13 +279,14 @@ def test_a_shared_line_across_unrelated_clips_is_dropped_only_when_long():
     assert len(normalize({"sections": [{"name": "x", "items": ["V01.S002", "V01.S003"]}]}, one).sections[0].items) == 2
 
 
-def _rundown():
-    """A restaurant rundown read to camera, with a retake: S008 and S010 are the same line, "let me redo that" between."""
+def _rundown(*more: str):
+    """A restaurant rundown read to camera, with a retake: S008 and S010 are the same line, "let me redo that" between.
+    `more`: lines read after it, from S012."""
     lines = [
         "First up, Kogi is Roy Choi's truck.", "It started the whole movement.", "Then Golden Hour for the sunset.",
         "The bar sits right on the sand.", "Next is Sushi Kaze.", "Chef Kenji Tanaka does omakase.", "Now for pizza.",
         "Dough Boy Pizza comes from Marco Belini.", "Wait, let me redo that.", "Dough Boy Pizza comes from Marco Belini.",
-        "That's the list for this year.",
+        "That's the list for this year.", *more,
     ]
     speech = [(1.0 + 3 * n, 3.4 + 3 * n, text) for n, text in enumerate(lines)]
     return Analysis(clips=[make_clip("V01", seconds=40, sentences=speech), make_clip("V02", seconds=20)])
@@ -322,9 +324,12 @@ def test_the_planners_alternates_decide_which_take_of_a_line_plays():
     assert any(w.startswith("V01.S008 is another take of V01.S010") and "in its place" in w for w in plan.warnings)
     assert [g.segment for g in plan.graphics] == ["V01.S010"]
     # More than one other take in the sections: the chosen one in the first one's place, the rest dropped.
-    raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S007", "V01.S009"]}],
-           "alternates": [{"chosen": "V01.S010", "others": ["V01.S008", "V01.S009", "V01.S010", "V01.S404"], "note": ""}]}
-    assert [i.ref for i in normalize(raw, a, source="m:x").sections[0].items] == ["V01.S010", "V01.S007"]
+    third = _rundown("Dough Boy Pizza, that's from Marco Belini.")
+    raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S007", "V01.S012"]}],
+           "alternates": [{"chosen": "V01.S010", "others": ["V01.S008", "V01.S012", "V01.S010", "V01.S404"], "note": ""}]}
+    plan = normalize(raw, third, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S010", "V01.S007"]
+    assert plan.alternates == [{"chosen": "V01.S010", "others": ["V01.S008", "V01.S012"], "note": ""}]
     # Alternates that contradict each other don't swap a take back and forth.
     raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S007"]}],
            "alternates": [{"chosen": "V01.S010", "others": ["V01.S008"], "note": ""}, {"chosen": "V01.S008", "others": ["V01.S010"], "note": ""}]}
@@ -341,6 +346,44 @@ def test_the_planners_alternates_decide_which_take_of_a_line_plays():
 
     assert '"chosen" is the take in your sections' in " ".join(PLANNER_SYSTEM.split())
     assert "the take you use becomes that alternate's chosen one" in " ".join(REVISE_INSTRUCTION.split())
+
+
+def test_a_line_the_planner_lists_as_another_take_is_one_only_when_it_reads_that_line():
+    """The live plan listed the "let me redo that" flub among the Dough Boy line's other takes. It isn't one: no Alt take
+    keyword, marker or report line names it, and a plan that keeps it in the cut keeps it."""
+    from roughcut.fcpxml import ALT_TAKE, build_fcpxml
+    from roughcut.report import build_report
+
+    a = _rundown()
+    alternates = [{"chosen": "V01.S010", "others": ["V01.S008", "V01.S009"], "note": "S009 is the 'let me redo that' flub; S010 is the clean redo."}]
+    raw = {"sections": [{"name": "Rundown", "items": ["V01.S001", "V01.S007", "V01.S010", "V01.S011"], "broll": []}], "alternates": alternates}
+    plan = normalize(raw, a, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S001", "V01.S007", "V01.S010", "V01.S011"]
+    assert [(alt["chosen"], alt["others"]) for alt in plan.alternates] == [("V01.S010", ["V01.S008"])]
+    assert any(w.startswith("V01.S009 doesn't say the line V01.S010 says") for w in plan.warnings)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", fill=False)
+    xml = build_fcpxml([tl], a, event_name="e", alternates=plan.alternates)
+    alt_notes = re.findall(rf'value="{ALT_TAKE}" note="([^"]*)"', xml)
+    assert len(alt_notes) == 1 and alt_notes[0].startswith("V01.S008: another read of V01.S010")
+    assert [m.value for m in tl.markers if m.value.startswith("ALT takes")] == ["ALT takes: V01.S008"]
+    report = build_report(plan, tl, a)
+    assert "**V01.S010** chosen over V01.S008." in report and "V01.S009" not in report.split("## Alternate takes", 1)[1].split("##", 1)[0]
+
+    # Kept in the cut (a false start the plan wants), it stays: only real retakes are replaced or dropped.
+    raw = {"sections": [{"name": "Rundown", "items": ["V01.S007", "V01.S009", "V01.S010"], "broll": []}], "alternates": alternates}
+    plan = normalize(raw, a, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S007", "V01.S009", "V01.S010"]
+    assert not any(w.startswith("V01.S009 is another take") for w in plan.warnings)
+    # The flub alone listed: no alternate at all.
+    raw = {"sections": [{"name": "Rundown", "items": ["V01.S007", "V01.S010"]}], "alternates": [{"chosen": "V01.S010", "others": ["V01.S009"], "note": ""}]}
+    assert normalize(raw, a, source="m:x").alternates == []
+    # A take is most of the same words, the line with um/uh, or one inside the other (a false start, a longer read).
+    from roughcut.duplicates import another_read
+
+    line = a.segment("V01.S010").text
+    assert another_read("Um, Dough Boy Pizza comes from, uh, Marco Belini.", line) and another_read("Dough Boy Pizza comes", line)
+    assert another_read("Dough Boy Pizza comes from Marco Belini, who trained in Naples for ten years.", line)
+    assert not another_read("Wait, hold on, let me redo that.", line) and not another_read("Now for pizza.", line)
 
 
 # ------------------------------------------------------------ T10: fillers and pacing

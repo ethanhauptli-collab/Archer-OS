@@ -17,7 +17,7 @@ from .captions import clean_spelling
 from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
-from .plan import Plan, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
+from .plan import Plan, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
 from .prompts import PLANNER_SYSTEM, own_words, pacing_choice, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
@@ -980,14 +980,15 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     measure_missing_levels(analysis, opts)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
     source = saved["plan"].get("source", "saved plan")
-    plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
+    from .revise import avoided_lines, enforce, missing_keep_note, standing_avoids
+
+    revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
+    avoid = standing_avoids(revisions, analysis=analysis) if saved.get("raw") else []
+    # A take the editor left out never plays in place of another take of its line.
+    plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source, avoided=avoided_lines(avoid, analysis))
     plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
     if saved.get("raw"):
-        from .revise import enforce, missing_keep_note, standing_avoids
-
         # The model's plan, as the revisions that made it left it: what the editor said to leave out stays out...
-        revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
-        avoid = standing_avoids(revisions, analysis=analysis)
         if avoid:
             enforce(plan, analysis, keep=[], avoid=avoid)
         # ...and a line the last one was asked to keep and left out keeps its to-do marker, where that revision put it.
@@ -1421,7 +1422,7 @@ def revise(
     The planner sees the build's system prompt and media block (prompt-cached),
     the previous plan and the notes. Arguments left as None come from the saved run.
     """
-    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids, standing_avoids, wide_lifts
+    from .revise import avoided_lines, describe_changes, enforce, recover_brief, report_block, revision_request, split_ids, standing_avoids, wide_lifts
 
     t_start = time.monotonic()
     out_dir = out_dir.expanduser().resolve()
@@ -1473,8 +1474,8 @@ def revise(
     revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
     history = [h for h in revisions if h.get("notes")]  # a revision may be only --keep/--avoid
     keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
-    previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
     made_without = standing_avoids(revisions, analysis=analysis)
+    previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source, avoided=avoided_lines(made_without, analysis))
     if made_without:
         # The cut as it was made: what earlier notes left out isn't in it (the model's own plan may still have it).
         enforce(previous, analysis, keep=[], avoid=made_without)
@@ -1512,7 +1513,10 @@ def revise(
             raise ProviderLimitError(f"{e} Nothing changed: {still} Run the same revise again after the reset.") from e
         raise ProviderError(f"{e} Nothing changed: {still}") from e
     timings = {"revision": time.monotonic() - t}
-    plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
+    # Which take of a line plays: the editor's --keep and --avoid first, then a swap the notes made.
+    takes = {"keep": keep_ids, "avoided": avoided_lines(leave_out, analysis), "played": {i.seg_id for s in previous.sections for i in s.items if i.seg_id}}
+    plan = normalize(raw, analysis, source=f"{p.name}:{p.model}", **takes)
+    raw = chosen_takes(raw, analysis, **takes)  # saved: re-cuts and the next revision play the same takes
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=leave_out, previous=previous)
     plan.warnings += enforced.warnings
     # Name spellings found before still hold: the revision's own first, then the earlier ones it didn't

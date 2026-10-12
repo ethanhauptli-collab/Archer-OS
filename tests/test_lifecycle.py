@@ -594,6 +594,75 @@ def test_an_avoid_lasts_through_later_revisions_until_a_keep_lifts_it(footage, t
     assert "V01.S006" in paper and "V02" not in paper
 
 
+def _first_take_plan() -> dict:
+    """The canned plan as a reviser returns it for "use the first take of the mountain line": V01.S001 where V01.S003
+    was (items and B-roll), and the alternates left as they were (V01.S003 chosen over V01.S001)."""
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["sections"][1]["items"][0] = "V01.S001"
+    plan["sections"][1]["broll"][0]["over"] = ["V01.S001", "V01.S004"]
+    return plan
+
+
+def _lines_played(out: Path) -> list[str]:
+    return [i for s in json.loads((out / "plan.json").read_text())["plan"]["sections"] for i in s["items"] if ".S" in i]
+
+
+def test_the_editors_avoid_and_keep_decide_which_take_of_a_line_plays(footage, tmp_path, fake, shared_cache):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+    assert "V01.S003" in _lines_played(out) and "V01.S001" not in _lines_played(out)
+    fake.plan = _first_take_plan()
+    # (a) The take the plan chose is left out: the other take the revision put in plays, as the chosen one now.
+    assert main(["revise", str(out), "Use the first take of the mountain line.", "--avoid", "V01.S003"]) == 0
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    alternates = json.loads((out / "plan.json").read_text())["plan"]["alternates"]
+    assert [(alt["chosen"], alt["others"]) for alt in alternates] == [("V01.S001", ["V01.S003"])]
+    report = (out / "edit_report.md").read_text()
+    assert "Removed **V01.S003**" in report and "Added **V01.S001**" in report
+    assert "in its place" not in report and "**V01.S001** chosen over V01.S003" in report
+    assert main(["render", str(out), "--style", "tight"]) == 0  # a re-cut plays the same take
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    # (b) Keeping that take while the avoid still stands: it plays, and nothing says the revision left it out.
+    assert main(["revise", str(out), "Keep the first take.", "--keep", "V01.S001"]) == 0
+    assert "<leave_out>\nV01.S003\n</leave_out>" in fake.calls[-1]["parts"][1].text
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    assert "You asked to keep" not in (out / "edit_report.md").read_text()
+    # (c) A --keep alone of the other take: it plays, once, in the chosen one's place.
+    out = tmp_path / "keep"
+    pipeline.build(_opts(footage, out, shared_cache))
+    assert main(["revise", str(out), "Use the first take of the mountain line.", "--keep", "V01.S001"]) == 0
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    assert "You asked to keep" not in (out / "edit_report.md").read_text()
+    # Both takes in the revision: the kept one plays, the line once.
+    plan = _first_take_plan()
+    plan["sections"][1]["items"].insert(0, "V01.S003")
+    fake.plan = plan
+    assert main(["revise", str(out), "Keep the first take.", "--keep", "V01.S001"]) == 0
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+
+
+def test_notes_that_swap_one_take_for_another_are_kept_in_re_cuts_and_later_revisions(footage, tmp_path, fake, shared_cache):
+    # (d) The notes alone: the revision plays V01.S001 where the cut played V01.S003, and copies the alternates as they were.
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+    fake.plan = _first_take_plan()
+    result = pipeline.revise(out, "Use the first take of the mountain line.", Options(inputs=[]))
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    assert any(w.startswith("V01.S001 plays in place of V01.S003") for w in result.warnings)
+    assert [(alt["chosen"], alt["others"]) for alt in result.plan.alternates] == [("V01.S001", ["V01.S003"])]
+    assert "V01.S003 plays in its place" not in (out / "edit_report.md").read_text()
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    # A later revision that keeps the line as it played (and still copies the old alternates) keeps the swap.
+    assert main(["revise", str(out), "Shorter wrap."]) == 0
+    assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    assert 'V01.S001 "So today we\'re heading up the mountain."' in fake.calls[-1]["parts"][1].text.split("<previous_plan>", 1)[1]
+    # One that puts the chosen take back plays it.
+    fake.plan = CANNED_PLAN
+    assert main(["revise", str(out), "Back to the second take."]) == 0
+    assert "V01.S003" in _lines_played(out) and "V01.S001" not in _lines_played(out)
+
+
 class _Lines:
     """Just enough of an Analysis for standing_avoids: where each line is."""
 

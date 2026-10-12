@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, field
 
 from .analyze import Analysis
 from .captions import clean_spelling, respell
-from .duplicates import LINE_CONTAINED, contains_line, found_in, line_words, same_line, take_group
+from .duplicates import LINE_CONTAINED, another_read, contains_line, found_in, line_words, same_line, take_group
 
 PLAN_SCHEMA: dict = {
     "type": "object",
@@ -353,8 +354,22 @@ def _secs(text: str) -> float:
     return total
 
 
-def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds: float = 4.0) -> Plan:
-    """Validate model output against the analysis. Never raises on bad content."""
+def normalize(
+    raw: dict,
+    analysis: Analysis,
+    *,
+    source: str = "",
+    still_seconds: float = 4.0,
+    keep: Collection[str] = (),
+    avoided: Callable[[str], bool] | None = None,
+    played: Collection[str] | None = None,
+) -> Plan:
+    """Validate model output against the analysis. Never raises on bad content.
+
+    Which take of a line plays follows the editor: `keep` (the segment IDs a revision's --keep names), `avoided`
+    (is a segment left out by a standing --avoid?) and, for a revision, `played` (the lines the version it
+    revises played). See `_one_take`.
+    """
     warnings: list[str] = []
     plan = Plan(title=str(raw.get("title") or "Rough Cut"), logline=str(raw.get("logline") or ""), source=source)
     used_segments: set[str] = set()
@@ -362,8 +377,9 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     # The same line from another read or export plays once. Not in the stringout (`render` of a
     # --provider none run): it plays everything by design, and re-rendering must give the same cut.
     lines = _UsedLines(analysis, enabled=source != "heuristic")
-    if lines.enabled:
-        raw = _one_take(raw, analysis, lines.replaced, warnings)  # and a retake as the planner's own alternates say
+    raw = {**raw, "alternates": _retakes(raw.get("alternates"), analysis, warnings)}
+    if lines.enabled:  # and a retake as the planner's own alternates say
+        raw = _one_take(raw, analysis, lines.replaced, warnings, keep=keep, avoided=avoided, played=played)
     # Every line the plan uses, in order: a sentence that holds a used line and more is a repeat
     # only when the rest is in the cut too, maybe further on.
     planned = [
@@ -432,10 +448,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         else:
             warnings.append(f"section '{section.name}' had no usable items; dropped")
 
-    for alt in raw.get("alternates") or []:
-        if isinstance(alt, dict) and analysis.segment(str(alt.get("chosen", ""))):
-            others = [o for o in alt.get("others") if analysis.segment(str(o))] if isinstance(alt.get("others"), list) else []
-            plan.alternates.append({"chosen": alt["chosen"], "others": others, "note": str(alt.get("note") or "")})
+    plan.alternates = [dict(alt, others=list(alt["others"])) for alt in raw["alternates"]]
     for dropped, kept in lines.replaced.items():
         alt = next((a for a in plan.alternates if a["chosen"] == kept), None)
         if alt is None:
@@ -493,36 +506,118 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     return plan
 
 
+def chosen_takes(
+    raw: dict, analysis: Analysis, *, keep: Collection[str] = (), avoided: Callable[[str], bool] | None = None, played: Collection[str] | None = None
+) -> dict:
+    """`raw` with its alternates as `normalize` reads them with the same arguments: real retakes only, each with
+    "chosen" the take that plays. Saved in place of the model's own, a re-cut plays the takes this revision did
+    (a swap the notes made, a take kept or left out) without being told why."""
+    alternates = _retakes(raw.get("alternates"), analysis, [])
+    return {**raw, "alternates": _one_take({**raw, "alternates": alternates}, analysis, {}, [], keep=keep, avoided=avoided, played=played)["alternates"]}
+
+
+def _retakes(alternates, analysis: Analysis, warnings: list[str]) -> list[dict]:
+    """The planner's alternates, each {"chosen", "others", "note"} with known segment IDs, and as "others" only the
+    takes that read the chosen line: a flub or another line listed there is left out (and left where it is in the cut)."""
+    out = []
+    for alt in alternates if isinstance(alternates, list) else []:
+        chosen = _seg_ref(alt.get("chosen"), analysis) if isinstance(alt, dict) else None
+        if chosen is None:
+            continue
+        listed = alt.get("others") if isinstance(alt.get("others"), list) else []
+        others, not_takes = [], []
+        for other in dict.fromkeys(o for o in (_seg_ref(o, analysis) for o in listed) if o and o != chosen):
+            (others if another_read(analysis.segment(other).text, analysis.segment(chosen).text) else not_takes).append(other)
+        for other in not_takes:
+            warnings.append(f"{other} doesn't say the line {chosen} says, so it isn't another take of it (alternates); left as it is")
+        if others or not not_takes:
+            out.append({"chosen": chosen, "others": others, "note": str(alt.get("note") or "")})
+    return out
+
+
 def _seg_ref(ref, analysis: Analysis) -> str | None:
     m = _SEG.match(str(ref))
     seg_id = f"{m.group(1).upper()}.{m.group(2).upper()}" if m else ""
     return seg_id if seg_id and analysis.segment(seg_id) else None
 
 
-def _one_take(raw: dict, analysis: Analysis, replaced: dict[str, str], warnings: list[str]) -> dict:
+def _take_to_play(
+    alt: dict, in_cut: list[str], keep: Collection[str], avoided: Callable[[str], bool], played: Collection[str] | None, warnings: list[str]
+) -> str:
+    """Which take of `alt`'s line plays: the chosen one, unless the editor or the revision says another.
+
+    An other take in the cut plays instead when the chosen one is left out (--avoid), when it is kept (--keep),
+    or, in a revision of a cut that played the line, when the revision put it there: in place of the chosen take
+    (notes that swap takes; the reviser may leave the alternates as they were), or as the take that played.
+    """
+    chosen = alt["chosen"]
+    present = [seg for seg in in_cut if seg in alt["others"] and not avoided(seg)]
+    if avoided(chosen):
+        if present:
+            warnings.append(f"{chosen}, the take the plan chose (alternates), is left out as asked (--avoid); {present[0]}, another take of it, plays instead")
+        return present[0] if present else chosen
+    if chosen in keep:
+        return chosen
+    kept = next((seg for seg in present if seg in keep), None)
+    if kept:
+        warnings.append(f"{kept} plays as asked (--keep): it's another take of {chosen}, so it's the chosen take now (alternates) and {chosen} doesn't play")
+        return kept
+    if played is not None and present and chosen not in in_cut and (chosen in played or any(o in played for o in alt["others"])):
+        take = next((seg for seg in present if seg in played), present[0])
+        if chosen in played:
+            warnings.append(f"{take} plays in place of {chosen}, the take of this line the last version played: the revision swapped them, so it's the chosen take now (alternates)")
+        return take
+    return chosen
+
+
+def _one_take(
+    raw: dict,
+    analysis: Analysis,
+    replaced: dict[str, str],
+    warnings: list[str],
+    *,
+    keep: Collection[str] = (),
+    avoided: Callable[[str], bool] | None = None,
+    played: Collection[str] | None = None,
+) -> dict:
     """`raw` with its sections as its own alternates say: a take the planner lists among a line's "others" plays
     as the take it chose, once. Dropped when the chosen take is in the cut too, else the chosen one goes in its place.
 
-    Each other take -> the chosen one goes into `replaced`, so B-roll, flags and graphics on it follow. An
-    alternate that contradicts an earlier one (choosing a take that one ruled out) is left alone. `raw` isn't changed.
+    The editor's constraints come first (`_take_to_play`): an other take that plays instead becomes the chosen one,
+    and the returned alternates say so. A take in `keep` is never dropped or replaced, and a chosen take `avoided`
+    leaves out never goes in place of another. Each other take -> the chosen one goes into `replaced`, so B-roll,
+    flags and graphics on it follow. An alternate that contradicts an earlier one (choosing a take that one ruled
+    out) is left alone. `raw["alternates"]` is `_retakes`'s; `raw` isn't changed.
     """
     sections = [dict(s, items=list(s["items"]) if isinstance(s.get("items"), list) else []) if isinstance(s, dict) else s
                 for s in raw.get("sections") or []]
     items = [s["items"] for s in sections if isinstance(s, dict)]
+    avoided = avoided or (lambda seg_id: False)
     chosen_before: set[str] = set()
     ruled_out: set[str] = set()
+    alternates = []
     for alt in raw.get("alternates") or []:
-        chosen = _seg_ref(alt.get("chosen"), analysis) if isinstance(alt, dict) else None
-        if chosen is None or chosen in ruled_out:
+        if alt["chosen"] in ruled_out:
+            alternates.append(alt)
             continue
-        listed = alt.get("others") if isinstance(alt.get("others"), list) else []
-        others = {o for o in (_seg_ref(o, analysis) for o in listed) if o and o != chosen and o not in chosen_before}
+        in_cut = [seg for refs in items for seg in (_seg_ref(ref, analysis) for ref in refs if ref is not None) if seg]
+        take = _take_to_play(alt, in_cut, keep, avoided, played, warnings)
+        if take != alt["chosen"]:
+            was = alt["chosen"]
+            why = f"{was} left out as asked (--avoid)" if avoided(was) else "Kept as asked (--keep)" if take in keep else f"Played in place of {was} by a revision"
+            alt = {"chosen": take, "others": [was] + [o for o in alt["others"] if o != take], "note": why}
+        alternates.append(alt)
+        chosen = alt["chosen"]
+        others = {o for o in alt["others"] if o not in chosen_before}
         chosen_before.add(chosen)
         ruled_out |= others
-        playing = any(_seg_ref(ref, analysis) == chosen for refs in items for ref in refs)
+        if avoided(chosen):
+            continue  # left out as asked: it replaces nothing
+        others -= set(keep)  # one the editor asked to keep stays
+        playing = chosen in in_cut
         for refs in items:
             for k, ref in enumerate(refs):
-                other = _seg_ref(ref, analysis)
+                other = _seg_ref(ref, analysis) if ref is not None else None
                 if other not in others:
                     continue
                 replaced[other] = chosen
@@ -534,7 +629,7 @@ def _one_take(raw: dict, analysis: Analysis, replaced: dict[str, str], warnings:
                     warnings.append(f"{other} is another take of {chosen}, which the plan chose (alternates); {chosen} plays in its place")
     for refs in items:
         refs[:] = [ref for ref in refs if ref is not None]
-    return {**raw, "sections": sections}
+    return {**raw, "sections": sections, "alternates": alternates}
 
 
 class _UsedLines:
