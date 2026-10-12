@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("--script", help="script, outline or reference transcript to follow (text file)")
     brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
     brief.add_argument("--preset", help="start from a preset's brief, length, pacing and graphics look (`roughcut preset list`); flags you type win")
-    brief.add_argument("--preset-brief", default="", help=argparse.SUPPRESS)  # filled in by --preset
+    brief.add_argument("--preset-brief", default="", help=argparse.SUPPRESS)  # filled in by --preset, or by the app with its brief
     ai = b.add_argument_group("model")
     ai.add_argument("--provider", choices=PROVIDERS, default="anthropic", help="who plans the edit (default: anthropic = API key; claude-code = your Claude Pro/Max subscription through Claude Code; 'none' = silence cutting only)")
     ai.add_argument("--model", help="Claude: opus (default) or sonnet (faster, half the price); spellings like 'Sonnet 5.5' work. Leave it off in Terminal to pick from a menu. Other providers: the model's name")
@@ -668,10 +668,14 @@ def _run(args, json_mode: bool) -> int:
                 args.model = resolve_model(args.model) if args.model else None
                 args.vision_model = resolve_model(args.vision_model) if args.vision_model else None
             context = "\n\n".join(t for t in (args.preset_brief, args.context, _read(args.context_file)) if t.strip())
+            if args.preset_brief.strip() and args.context.strip().startswith(args.preset_brief.strip()):
+                # The app's brief starts with the preset's, sent apart only to say which part is the preset's.
+                context = "\n\n".join(t for t in (args.context, _read(args.context_file)) if t.strip())
             opts = Options(
                 inputs=[Path(p) for p in args.inputs],
                 out=Path(args.out) if args.out else None,
                 context=context,
+                preset_brief=args.preset_brief.strip(),
                 script=_read(args.script) or None,
                 target_seconds=parse_duration(args.target) if args.target else None,
                 provider=args.provider,

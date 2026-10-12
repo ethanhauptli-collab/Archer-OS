@@ -237,6 +237,33 @@ final class RevisionTests: XCTestCase {
         XCTAssertEqual(o.brief, "Promo brief\n\nPhoenix's first surf lesson")
     }
 
+    func testPresetBriefIsSentApartSoYourWordsDecidePacing() throws {
+        let json = #"[{"name": "walk", "brief": "Promo brief. Short and punchy.", "style": null, "graphics": false}]"#
+        let presets = try XCTUnwrap(JSONLines.presets(from: json))
+        var o = options()
+        o.brief = "Let the chefs' stories breathe."
+        presets[0].apply(to: &o)
+        XCTAssertEqual(o.brief, "Promo brief. Short and punchy.\n\nLet the chefs' stories breathe.")
+        // The whole brief for the planner, and the preset's part apart so pacing and punch-ins read yours first.
+        let args = o.arguments()
+        XCTAssertTrue(args.contains("--context=Promo brief. Short and punchy.\n\nLet the chefs' stories breathe."))
+        XCTAssertTrue(args.contains("--preset-brief=Promo brief. Short and punchy."))
+        // The preset's part edited: it's all yours now.
+        o.brief = "Promo brief, slow and warm.\n\nLet the chefs' stories breathe."
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--preset-brief") })
+        // No preset picked: never sent.
+        var plain = options()
+        plain.brief = "Promo brief. Short and punchy."
+        XCTAssertFalse(plain.arguments().contains { $0.hasPrefix("--preset-brief") })
+        // Not remembered with the preferences: the preset fills it in again after a relaunch.
+        let saved = try JSONEncoder().encode(o.preferencesOnly)
+        var relaunched = try JSONDecoder().decode(BuildOptions.self, from: saved)
+        XCTAssertEqual(relaunched.presetBrief, "")
+        relaunched.reapplyPreset(from: presets)
+        XCTAssertEqual(relaunched.presetBrief, "Promo brief. Short and punchy.")
+        XCTAssertTrue(relaunched.arguments().contains("--preset-brief=Promo brief. Short and punchy."))
+    }
+
     func testReviseArguments() {
         let revise = ReviseOptions(
             outputFolder: URL(fileURLWithPath: "/Users/you/Movies/OCVIBE_roughcut"),

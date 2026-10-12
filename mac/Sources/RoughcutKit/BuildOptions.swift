@@ -12,7 +12,7 @@ public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
 
     public var detail: String {
         switch self {
-        case .auto: return "From the brief: tight when it says tight, snappy or punchy; loose when it says let it breathe; otherwise medium."
+        case .auto: return "From the brief, your words before the preset's: tight for tight cuts, snappy, punchy or fast-paced; loose for loose, let it breathe or slow-paced; otherwise (or \"not too tight\") medium."
         case .tight: return "Pauses trimmed hard. Punchy YouTube pace."
         case .medium: return "Natural pauses up to about half a second."
         case .loose: return "Room to breathe. Good for reflective pieces."
@@ -224,6 +224,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var openInFinalCutWhenDone: Bool = false
     /// The preset the form was last filled from (shown in the picker; never sent: the form holds its values).
     public var presetName: String = ""
+    /// That preset's brief, which the form's brief starts with. Sent apart too (`--preset-brief`) so pacing and
+    /// punch-ins follow what you typed after it first. Not remembered: the preset fills it in again.
+    public var presetBrief: String = ""
     /// Songs laid under the cut (`--music`), not transcribed.
     public var music: [URL] = []
     public var dialogueLevel: DialogueLevel = .standard
@@ -347,6 +350,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         }
         if !brief.trimmed.isEmpty {
             args.append("--context=\(brief.trimmed)")
+            let fromPreset = presetBrief.trimmed
+            if !presetName.isEmpty && !fromPreset.isEmpty && brief.trimmed.hasPrefix(fromPreset) {
+                args.append("--preset-brief=\(fromPreset)")
+            }
         }
         if let seconds = TimeText.seconds(from: targetLength) {
             // Send plain seconds: the app's parser decided it's valid, so the

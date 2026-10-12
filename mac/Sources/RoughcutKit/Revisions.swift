@@ -29,6 +29,7 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
         options.presetName = name
         let typed = options.brief.trimmed
         let presetBrief = (brief ?? "").trimmed
+        options.presetBrief = presetBrief
         if typed.isEmpty || previousBriefs.map(\.trimmed).contains(typed) {
             options.brief = presetBrief
         } else if !presetBrief.isEmpty && !typed.hasPrefix(presetBrief) {

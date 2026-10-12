@@ -156,7 +156,7 @@ struct BuildForm: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    Text("A 112% zoom alternating at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Auto: when the brief says \"punch in\".")
+                    Text("A 112% zoom alternating at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Auto: when the brief asks for punch-ins on the jump cuts.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

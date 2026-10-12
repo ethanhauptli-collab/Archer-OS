@@ -33,6 +33,7 @@ class Options:
     out: Path | None = None
     name: str | None = None
     context: str = ""
+    preset_brief: str = ""  # the preset's part of `context` (it comes first): pacing and punch-ins read your own words before it
     script: str | None = None
     target_seconds: float | None = None
     style: str = "medium"
@@ -203,6 +204,7 @@ def run_settings(opts: Options, provider: Provider | None = None) -> dict:
     return {
         **{f: getattr(opts, f) for f in RENDER_FIELDS},
         "context": opts.context,
+        "preset_brief": opts.preset_brief,
         "target_seconds": opts.target_seconds,
         "script": opts.script,
         "graphics": opts.graphics,
@@ -232,48 +234,217 @@ def render_options(opts: Options, settings: dict, overrides: set[str] | None = N
         saved.pop("style", None)
     out = replace(opts, **saved)
     if out.style not in STYLES:  # "auto" with nothing saved: what the run's brief asked for
-        out = replace(out, style=style_from_brief(str(settings.get("context") or ""))[0])
+        out = replace(out, style=style_from_brief(str(settings.get("context") or ""), str(settings.get("preset_brief") or ""))[0])
     return out
 
 
-# What a brief says about pacing. A tight-knit community isn't a pacing note, nor are loose ends.
-_TIGHT = re.compile(
-    # Not framing: "tight shots", "tight close-ups", "tightly framed", "tight on the chef".
-    r"\b(?:tight(?:er|ly)?\b(?![- ]?knit)(?!\s+(?:shots?|close[- ]?ups?|framed|framing|frames?|crops?|on|wides?|angles?|lens)\b)"
-    r"|snappy|punchy|fast[- ]paced|quick[- ]paced|fast pac(?:e|ing))",
+# What a brief asks for that isn't in the plan: pacing (--style auto) and punch-ins on jump cuts.
+# A cue counts only inside its own clause: a "no", "don't" or "avoid" earlier in that clause
+# turns it down ("don't cut it too tight", "no punch-ins"), one in another clause doesn't
+# ("there's no B-roll, so punch in on the jump cuts").
+
+# Where a clause ends: punctuation, a spaced dash, or a word that starts a new thought.
+_CLAUSE_END = re.compile(r"[.;:!?,()\n]|\s[-–—]\s|[–—]|\b(?:and|but|so|then|instead|because|though|although|yet|plus|also)\b", re.I)
+# "no"/"without"/"skip" turn down only what they name ("no punch-ins", "without zoom cuts"), not
+# a request after it ("without B-roll we need punch-ins"); "don't"/"never"/"avoid" reach further
+# ("we really don't want you to punch in").
+_NOUN_NOT = r"\b(?:no|without|skip|none of|nothing|zero|less)\b"
+_VERB_NOT = r"\b(?:not|never|avoid(?:ing)?|cannot|(?:do|does|did|is|are|was|were|wo|ca|should|would|could|must)n['’]?t|no need (?:to|for))\b"
+_NOT = re.compile(rf"(?P<noun>{_NOUN_NOT})|(?P<verb>{_VERB_NOT})", re.I)
+# Negative words that ask for it anyway: "don't forget to punch in", "I don't mind punch-ins".
+_NOT_REALLY = re.compile(
+    r"(?:(?:do|does)n['’]?t|do not) (?:forget|be afraid|hesitate|mind)\b|not (?:afraid|only|just)\b|never (?:leave|forget)\b"
+    r"|(?:\w+n['’]?t|not|never) (?:\w+ )?mind\b",
     re.I,
+)
+_TOO = re.compile(r"\b(?:too|overly)\s*$", re.I)  # "the last one was too tight" isn't asking for tight
+_NO_AFTER = re.compile(r"\s*[:?=]\s*(?:no|none|nope|off|never)\b", re.I)  # "Punch-ins: none"
+
+
+def _clause_before(text: str, start: int) -> str:
+    before = text[max(0, start - 100) : start]
+    ends = list(_CLAUSE_END.finditer(before))
+    return before[ends[-1].end() :] if ends else before
+
+
+def _turned_down(text: str, m: re.Match) -> bool:
+    """A cue its own clause turns down: "not too tight", "no punch-ins", "Punch-ins: none"."""
+    clause = _clause_before(text, m.start())
+    if _TOO.search(clause) or _NO_AFTER.match(text, m.end()):
+        return True
+    for n in _NOT.finditer(clause):
+        if _NOT_REALLY.match(clause, n.start()):
+            continue
+        if len(clause[n.end() :].split()) <= (2 if n.group("noun") else 6):
+            return True
+    return False
+
+
+def _a_name(text: str, m: re.Match) -> bool:
+    """A capitalized cue in a name: "Tight Lines Fishing Co", "Snappy Salads", "The Loose Goose"."""
+    if not m.group(0)[:1].isupper():
+        return False
+    before = text[: m.start()].rstrip(" \t")
+    return bool(re.match(r"[ \t]+[A-Z]", text[m.end() :])) or (bool(before) and before[-1] not in ".!?:;\n-–—*>")
+
+
+def _cues(pattern: re.Pattern, text: str) -> list[tuple[re.Match, bool]]:
+    """Each match outside a name, and whether its clause turns it down. One joined to a turned-down
+    cue by "and"/"or" goes with it ("don't make it tight and snappy", "no zoom-ins or punch-ins")."""
+    out: list[tuple[re.Match, bool]] = []
+    for m in pattern.finditer(text):
+        if _a_name(text, m):
+            continue
+        down = _turned_down(text, m)
+        if not down and out and out[-1][1] and re.fullmatch(r"\s*,?\s*(?:and|or|nor)?\s*", text[out[-1][0].end() : m.start()], re.I):
+            down = True
+        out.append((m, down))
+    return out
+
+
+# Pacing named outright: "Pacing: loose", "pace should be tight", "medium pacing".
+_PACE_SAID = re.compile(
+    r"\b(?:pac(?:e|ing)|cut style|(?<!graphics )(?<!graphic )style)\s*(?:[:=–—-]|is|should be|of)?\s*(?:an? )?(tight|medium|loose|fast|quick|slow)\b"
+    r"|\b(tight|medium|loose)(?:[- ]paced|\s+pac(?:e|ing))\b",
+    re.I,
+)
+_PACE_WORDS = {"fast": "tight", "quick": "tight", "slow": "loose"}
+# Tight only when it's about the cut ("tight cuts", "keep it tight", "tighter"), never "a tight
+# deadline", "tight shots", "tight-knit" or "hold on tight".
+_TIGHT = re.compile(
+    r"\btight(?:er)?(?=[- ]?(?:cuts?|cutting|edit(?:s|ed|ing)?|pac(?:e|ed|ing)|pauses|of (?:the )?dead|cutdown|\d))"
+    r"|\b(?:keep|make|cut|edit|trim|get)\s+(?:it|this|things|them|everything|the (?:edit|cut|pacing|pace|video|piece|promo|episode))\s+"
+    r"(?:(?:super|nice and|extra|very|really|pretty|real|good and|too|overly)\s+)?tight\b(?![- ]?knit)"
+    r"|(?:^|(?<=[.;:!?,\n]))[ \t*-]*(?:(?:super|extra|very|nice and)\s+)?tight\b(?=\s*(?:[.,;:!?\n]|$|\s[-–—]\s))"
+    r"|\btightly (?:cut|edited|paced)\b"
+    r"|\btight(?:en(?:ed|ing)?|er)\b(?=\s*(?:[.,;:!?)\n]|$|\s[-–—]\s|than\b|up\b|overall\b|throughout\b|it\b|this\b|things\b|everything\b"
+    r"|(?:the |all the |every )?(?:cuts?|cutting|edit(?:s|ing)?|pac(?:e|ing)|pauses|dead|silences?)\b))"
+    r"|\bsnapp(?:y|ier)\b|\bpunch(?:y|ier)\b|\b(?:fast|quick|rapid)[- ]?(?:paced?|pacing|cuts?|cutting|fire|edit(?:s|ing)?)\b"
+    r"|\b(?:every|each) pause\b|\btrim\w* (?:[\w']+ ){0,3}(?:hard|tight)\b|\bcut (?:the )?(?:pauses|dead air|silences?) (?:hard|tight)\b",
+    re.I | re.M,
 )
 _LOOSE = re.compile(
-    r"\b(?:looser|loose(?:ly)? (?:cut|edit|pac(?:e|ing))|let (?:it|them|things|moments|the moments) breathe|room to breathe"
-    r"|breathing room|slow[- ]paced|slower pac(?:e|ing)|unhurried|relaxed pac(?:e|ing))",
+    r"\blooser\b(?![- ]?(?:shots?|framing|frames?|fit))|\bloosely (?:cut|edited|paced)\b|\bloose(?=[- ]?(?:cuts?|cutting|edit(?:s|ed|ing)?|pac(?:e|ed|ing)|feel)\b)"
+    r"|\b(?:keep|make|cut|edit|leave)\s+(?:it|this|things|them|everything|the (?:edit|cut|pacing|pace|video|piece|episode))\s+"
+    r"(?:(?:super|nice and|very|really|pretty|real|good and|too|overly)\s+)?loose\b"
+    r"|(?:^|(?<=[.;:!?\n]))[ \t*-]*(?:(?:nice and|very)\s+)?loose\b(?=\s*(?:[.,;:!?\n]|$|\s[-–—]\s))"
+    r"|\blet (?:[\w'’]+\s+){0,4}breathe\b|\broom to breathe\b|\bbreathing room\b"
+    r"|\bslow(?:er)?(?:[- ]paced?|[- ]pacing| and)\b|\bslow (?:it|things) down\b|\bslower than\b|\bunhurried\b|\brelaxed\b"
+    r"|\b(?:(?:do|does)n['’]?t|do not|never|no need to) rush\b|\blet (?:[\w'’]+\s+){0,3}play out\b"
+    r"|\bhold (?:the |on )?(?:shots?|moments?)(?: a (?:bit|beat))? longer\b|\b(?:gentle|calm|easy|leisurely) pac(?:e|ing)\b",
     re.I,
 )
 
 
-_PUNCH_IN = re.compile(r"\bpunch(?:[- ]?ins?\b|ing in\b)|\bzoom(?:s|ing)? (?:in )?on (?:the )?jump ?cuts|\bzoom cuts\b", re.I)
+def _pace(text: str, whose: str) -> tuple[str, str] | None:
+    """What this text says about pacing, or None when it says nothing."""
+    for m in _PACE_SAID.finditer(text):
+        if not _turned_down(text, m):
+            said = (m.group(1) or m.group(2)).lower()
+            return _PACE_WORDS.get(said, said), f'{whose} says "{m.group(0).strip()}"'
+    tight, loose = _cues(_TIGHT, text), _cues(_LOOSE, text)
+    asked_tight = [m for m, down in tight if not down]
+    asked_loose = [m for m, down in loose if not down]
+    if asked_tight and not asked_loose:
+        return "tight", f'{whose} says "{asked_tight[0].group(0).strip()}"'
+    if asked_loose and not asked_tight:
+        return "loose", f'{whose} says "{asked_loose[0].group(0).strip()}"'
+    if asked_tight and asked_loose:
+        return "medium", f"{whose} asks for both tight and loose pacing"
+    if tight or loose:
+        m = (tight + loose)[0][0]
+        said = " ".join((_clause_before(text, m.start()) + m.group(0)).split()[-6:])
+        return "medium", f'{whose} says "{said}"'
+    return None
 
 
-_NOT = re.compile(r"\b(?:no|not|don'?t|do not|without|avoid|never|skip|none of)\b[\w\s'-]{0,20}$", re.I)
+def _own_words(brief: str, preset_brief: str) -> str:
+    """The brief without the preset's part, which comes first."""
+    brief, preset_brief = (brief or "").strip(), (preset_brief or "").strip()
+    return brief[len(preset_brief) :] if preset_brief and brief.startswith(preset_brief) else brief
 
 
-def punch_in_from_brief(brief: str) -> str:
-    """The words in the brief that ask for punch-ins on jump cuts ("" if none; "no punch-ins" doesn't count)."""
-    for m in _PUNCH_IN.finditer(brief or ""):
-        if not _NOT.search(brief[max(0, m.start() - 30) : m.start()]):
-            return m.group(0)
-    return ""
+def style_from_brief(brief: str, preset_brief: str = "") -> tuple[str, str]:
+    """The cut style for --style auto: tight or loose when the brief asks for it, else medium. Returns (style, why).
 
-
-def style_from_brief(brief: str) -> tuple[str, str]:
-    """The cut style for --style auto: tight or loose when the brief asks for it, else medium. Returns (style, why)."""
-    tight, loose = _TIGHT.search(brief or ""), _LOOSE.search(brief or "")
-    if tight and not loose:
-        return "tight", f'the brief says "{tight.group(0)}"'
-    if loose and not tight:
-        return "loose", f'the brief says "{loose.group(0)}"'
-    if tight and loose:
-        return "medium", "the brief asks for both tight and loose pacing"
+    `preset_brief`: the preset's part of the brief. Your own words decide first; the preset's only when yours say nothing about pace.
+    """
+    for text, whose in ((_own_words(brief, preset_brief), "the brief"), (preset_brief, "the preset's brief")):
+        found = _pace(text or "", whose)
+        if found:
+            return found
     return "medium", "the default; the brief doesn't ask for tight or loose pacing"
+
+
+# Punch-ins: the plural ("punch-ins", "zoom cuts") on its own, or "punch in" / "zoom in" / "scale up"
+# on the cuts. "Punch in on Roy's face" is one reframe, not a punch-in at every jump cut.
+_PUNCH_IN = re.compile(
+    r"\b(?:punch(?:es|ing|ed)?[- ]?ins?|zoom(?:s|ing|ed)?[- ]?ins?|zoom[- ]?cuts|punch[- ]in zooms|digital zooms?"
+    r"|scal(?:e|es|ing|ed) (?:it |the shot |the frame )?up|zoom(?:s|ing)?(?=\s+on\s))\b",
+    re.I,
+)
+_ON_THE_CUTS = re.compile(
+    r"\s*(?:[\w%.'’-]+\s+){0,2}?(?:on|at|between|across|over|for|in)\s+"
+    r"(?:(?:the|every|each|all|alternating|alternate|other|those|these|any|some|my|our|his|her|their)\s+){0,3}"
+    r"(?:(?:jump[- ]?)?cuts?|edits?|talking[- ]heads?|talking parts|interviews?|a[- ]roll|takes|lines)\b",
+    re.I,
+)
+_ON_SOMETHING = re.compile(r"\s*(?:[\d%.]+\s+)?(?:on|at|onto|into)\s+\S", re.I)  # "on Roy's face", "at the shop"
+_JUMP_CUTS = re.compile(r"\bjump[- ]?cuts?\b", re.I)
+
+
+def _punch_asked(text: str, m: re.Match) -> bool:
+    """Whether this punch phrase asks for punch-ins at the jump cuts (and not one reframe)."""
+    if _ON_THE_CUTS.match(text, m.end()):
+        return True
+    if _ON_SOMETHING.match(text, m.end()):
+        return False
+    if re.search(r"(?:ins|cuts|zooms)$", m.group(0), re.I):
+        return True
+    start = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+    ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i >= 0]
+    return bool(_JUMP_CUTS.search(text[start : min(ends) if ends else len(text)]))  # "hide the jump cuts with a punch in"
+
+
+def _punch(text: str) -> tuple[bool, str] | None:
+    found = [(m, down) for m, down in _cues(_PUNCH_IN, text) if _punch_asked(text, m) or down]
+    for m, down in found:
+        if not down:
+            return True, m.group(0)
+    if found:
+        m = found[0][0]
+        return False, " ".join((_clause_before(text, m.start()) + m.group(0)).split()[-6:])
+    return None
+
+
+def read_punch_in(brief: str, preset_brief: str = "") -> tuple[bool | None, str]:
+    """(True, its words) when the brief asks for punch-ins on the jump cuts, (False, its words) when it
+    turns them down, (None, "") when it says nothing. Your own words decide before the preset's."""
+    for text in (_own_words(brief, preset_brief), preset_brief):
+        found = _punch(text or "")
+        if found:
+            return found
+    return None, ""
+
+
+def punch_in_from_brief(brief: str, preset_brief: str = "") -> str:
+    """The words in the brief that ask for punch-ins on jump cuts ("" if none; "no punch-ins" doesn't count)."""
+    asked, words = read_punch_in(brief, preset_brief)
+    return words if asked else ""
+
+
+# Graphics a brief asks for, to say so when motion graphics are off: "lower thirds", "names on screen", "list the chef names".
+_GRAPHICS = re.compile(
+    r"\b(?:motion graphics?|graphics|a graphic(?!\s+design)|lower[- ]thirds?|title cards?|callouts?|kinetic (?:captions?|type|text)"
+    r"|on[- ]screen (?:text|names?|titles?|labels?|graphics?)|name (?:titles?|supers?|plates?|cards?)"
+    r"|(?:list|show|put|display)\s+(?:[\w'’&]+\s+){0,4}?names?)\b",
+    re.I,
+)
+
+
+def graphics_from_brief(brief: str) -> str:
+    """The words in the brief that ask for graphics ("" if none; "no graphics" doesn't count)."""
+    return next((m.group(0) for m, down in _cues(_GRAPHICS, brief or "") if not down), "")
 
 
 def analysis_digest(analysis: Analysis) -> str:
@@ -568,14 +739,16 @@ def build(opts: Options) -> Result:
     _plan_saved_at(None)
     start_log(out_dir, "build")
     if opts.style not in STYLES:  # "auto": the pacing the brief asks for
-        style, why = style_from_brief(opts.context)
+        style, why = style_from_brief(opts.context, opts.preset_brief)
         opts = replace(opts, style=style)
         log(f"pacing: {style} ({why})")
     if opts.punch_in is None:
-        asked = punch_in_from_brief(opts.context)
+        asked, words = read_punch_in(opts.context, opts.preset_brief)
         opts = replace(opts, punch_in=bool(asked))
         if asked:
-            log(f'punching in on jump cuts (the brief says "{asked}")')
+            log(f'punching in on jump cuts (the brief says "{words}")')
+        elif asked is False:  # said either way, so a misreading shows
+            log(f'not punching in (the brief says "{words}")')
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
