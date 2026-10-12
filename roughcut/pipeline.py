@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -215,7 +216,31 @@ def render_options(opts: Options, settings: dict, overrides: set[str] | None = N
     saved = {f: settings[f] for f in RENDER_FIELDS if f in settings and f not in overrides}
     if saved.get("style") not in STYLES:
         saved.pop("style", None)
-    return replace(opts, **saved)
+    out = replace(opts, **saved)
+    if out.style not in STYLES:  # "auto" with nothing saved: what the run's brief asked for
+        out = replace(out, style=style_from_brief(str(settings.get("context") or ""))[0])
+    return out
+
+
+# What a brief says about pacing. A tight-knit community isn't a pacing note, nor are loose ends.
+_TIGHT = re.compile(r"\b(?:tight(?:er|ly)?\b(?![- ]knit)|snappy|punchy|fast[- ]paced|quick[- ]paced|fast pac(?:e|ing))", re.I)
+_LOOSE = re.compile(
+    r"\b(?:looser|loose(?:ly)? (?:cut|edit|pac(?:e|ing))|let (?:it|them|things|moments|the moments) breathe|room to breathe"
+    r"|breathing room|slow[- ]paced|slower pac(?:e|ing)|unhurried|relaxed pac(?:e|ing))",
+    re.I,
+)
+
+
+def style_from_brief(brief: str) -> tuple[str, str]:
+    """The cut style for --style auto: tight or loose when the brief asks for it, else medium. Returns (style, why)."""
+    tight, loose = _TIGHT.search(brief or ""), _LOOSE.search(brief or "")
+    if tight and not loose:
+        return "tight", f'the brief says "{tight.group(0)}"'
+    if loose and not tight:
+        return "loose", f'the brief says "{loose.group(0)}"'
+    if tight and loose:
+        return "medium", "the brief asks for both tight and loose pacing"
+    return "medium", "the default; the brief doesn't ask for tight or loose pacing"
 
 
 def analysis_digest(analysis: Analysis) -> str:
@@ -502,6 +527,10 @@ def build(opts: Options) -> Result:
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
     _plan_saved_at(None)
     start_log(out_dir, "build")
+    if opts.style not in STYLES:  # "auto": the pacing the brief asks for
+        style, why = style_from_brief(opts.context)
+        opts = replace(opts, style=style)
+        log(f"pacing: {style} ({why})")
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.

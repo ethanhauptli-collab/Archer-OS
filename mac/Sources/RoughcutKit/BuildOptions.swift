@@ -1,14 +1,18 @@
 import Foundation
 
-/// How hard pauses are trimmed (`--style`).
+/// How hard pauses are trimmed (`--style`). `.auto` lets the CLI take it from the brief.
 public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
-    case tight, medium, loose
+    case auto, tight, medium, loose
 
     public var id: String { rawValue }
     public var title: String { rawValue.capitalized }
 
+    /// What Re-cut offers: a cut's pacing is always one of these.
+    public static let recut: [CutStyle] = [.tight, .medium, .loose]
+
     public var detail: String {
         switch self {
+        case .auto: return "From the brief: tight when it says tight, snappy or punchy; loose when it says let it breathe; otherwise medium."
         case .tight: return "Pauses trimmed hard. Punchy YouTube pace."
         case .medium: return "Natural pauses up to about half a second."
         case .loose: return "Room to breathe. Good for reflective pieces."
@@ -192,7 +196,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var projectName: String = ""
     public var brief: String = ""
     public var targetLength: String = ""
-    public var style: CutStyle = .medium
+    public var style: CutStyle = .auto
     public var format: SequenceFormat = .auto
     public var provider: ModelProvider = .anthropic
     public var model: String = ""
@@ -225,9 +229,15 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case sources, outputFolder, projectName, brief, targetLength, style, format, provider, model, visionModel
+        case sources, outputFolder, projectName, brief, targetLength, format, provider, model, visionModel
+        case style = "pacing"
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
         case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook
+    }
+
+    /// How apps from before Auto pacing saved it.
+    enum LegacyKeys: String, CodingKey {
+        case style
     }
 
     /// Saved preferences from an older version of the app are missing newer
@@ -244,7 +254,14 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         projectName = value(.projectName, d.projectName)
         brief = value(.brief, d.brief)
         targetLength = value(.targetLength, d.targetLength)
-        style = value(.style, d.style)
+        if let pacing = (try? c.decodeIfPresent(CutStyle.self, forKey: .style)) ?? nil {
+            style = pacing
+        } else {
+            // Saved before Auto pacing existed, when Medium was the default: Medium there means "not chosen".
+            let legacy = try? decoder.container(keyedBy: LegacyKeys.self)
+            let old: CutStyle? = (try? legacy?.decodeIfPresent(CutStyle.self, forKey: .style)) ?? nil
+            style = old.flatMap { $0 == .medium ? nil : $0 } ?? d.style
+        }
         format = value(.format, d.format)
         provider = value(.provider, d.provider)
         model = value(.model, d.model)

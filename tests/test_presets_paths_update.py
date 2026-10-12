@@ -518,7 +518,41 @@ def test_flags_you_type_win_over_the_preset(footage, config, capture, tmp_path):
     assert opts.graphics is False and opts.format == "vertical"
     # Without a preset nothing changes.
     opts = _opts(capture, ["build", str(footage)])
-    assert (opts.target_seconds, opts.style, opts.graphics, opts.graphics_style, opts.context) == (None, "medium", False, "", "")
+    assert (opts.target_seconds, opts.style, opts.graphics, opts.graphics_style, opts.context) == (None, "auto", False, "", "")
+
+
+def test_auto_pacing_never_overrides_a_preset(footage, config, capture):
+    # The app sends --style auto by default, after the preset's flags: the preset's pacing stays.
+    assert _opts(capture, ["build", str(footage), "--preset", "venture-oc", "--style", "auto"]).style == "tight"
+    assert _opts(capture, ["build", str(footage), "--preset", "save-the-kid", "--no-graphics", "--style", "auto"]).style == "loose"
+    assert _opts(capture, ["build", str(footage), "--preset", "venture-oc", "--style", "medium"]).style == "medium"
+
+
+def test_auto_pacing_follows_the_brief():
+    from roughcut.pipeline import style_from_brief
+
+    assert style_from_brief("do tight cuts of dead space and list the restaurants")[0] == "tight"
+    for tight in ("keep it snappy", "Punchy promo", "a fast-paced recap", "tighter than last time"):
+        assert style_from_brief(tight)[0] == "tight", tight
+    for loose in ("let it breathe", "slow-paced and reflective", "give it breathing room", "a looser cut"):
+        assert style_from_brief(loose)[0] == "loose", loose
+    for medium in ("", "a tight-knit community of chefs", "tie up loose ends", "tighter, but let the moments breathe"):
+        assert style_from_brief(medium)[0] == "medium", medium
+
+
+def test_a_build_is_paced_by_its_brief_and_its_recuts_keep_that(footage, tmp_path, capsys):
+    from roughcut.cli import main
+
+    out = tmp_path / "out"
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
+    assert main(["build", str(footage), "-o", str(out), "-c", "Do tight cuts of dead space.", "--style", "auto", *common]) == 0
+    assert json.loads((out / "result.json").read_text())["cut"]["style"] == "tight"
+    assert 'pacing: tight (the brief says "tight")' in capsys.readouterr().err
+    # A re-cut sent "auto" (or nothing) keeps the run's pacing; a pacing you pick wins.
+    assert main(["render", str(out), "--style", "auto"]) == 0
+    assert json.loads((out / "result.json").read_text())["cut"]["style"] == "tight"
+    assert main(["render", str(out), "--style", "loose"]) == 0
+    assert json.loads((out / "result.json").read_text())["cut"]["style"] == "loose"
 
 
 def test_preset_graphics_are_skipped_without_a_model(footage, config, capture, capsys):

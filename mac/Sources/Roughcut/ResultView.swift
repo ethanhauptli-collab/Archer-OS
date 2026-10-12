@@ -120,7 +120,7 @@ struct ResultView: View {
                 GroupBox {
                     HStack(spacing: 12) {
                         Picker("Pacing", selection: $recutStyle) {
-                            ForEach(CutStyle.allCases) { style in
+                            ForEach(CutStyle.recut) { style in
                                 Text(style.title).tag(style)
                             }
                         }

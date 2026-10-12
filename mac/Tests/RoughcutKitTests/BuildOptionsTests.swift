@@ -31,7 +31,7 @@ final class BuildOptionsTests: XCTestCase {
         o.stringout = false
         XCTAssertEqual(o.arguments(), [
             "build", "/Users/you/Movies/Trip", "--progress-json",
-            "--style", "medium", "--provider", "none", "--keep-fillers", "--no-stringout",
+            "--style", "auto", "--provider", "none", "--keep-fillers", "--no-stringout",
         ])
     }
 
@@ -271,7 +271,7 @@ final class BuildOptionsTests: XCTestCase {
         // Written by an earlier app: no openInFinalCutWhenDone, and a style this version doesn't know.
         let json = #"{"sources":[],"projectName":"","brief":"","targetLength":"","style":"extra-tight","format":"vertical","provider":"claude-code","model":"claude-sonnet-5-5","visionModel":"","baseURL":"","effort":"max","vision":false,"keepFillers":true,"stringout":false,"language":"en","graphics":true,"graphicsStyle":"navy and orange"}"#
         let o = try JSONDecoder().decode(BuildOptions.self, from: Data(json.utf8))
-        XCTAssertEqual(o.style, .medium)  // unknown value falls back to the default
+        XCTAssertEqual(o.style, .auto)  // unknown value falls back to the default
         XCTAssertEqual(o.format, .vertical)
         XCTAssertEqual(o.provider, .claudeCode)
         XCTAssertEqual(o.model, "claude-sonnet-5-5")
@@ -290,5 +290,21 @@ final class BuildOptionsTests: XCTestCase {
         let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
         XCTAssertEqual(back, o)
         XCTAssertFalse(o.arguments().contains { $0.contains("open") })  // app-side setting, not a CLI flag
+    }
+
+    func testPacingSavedBeforeAutoExisted() throws {
+        func decoded(_ json: String) throws -> CutStyle {
+            try JSONDecoder().decode(BuildOptions.self, from: Data(json.utf8)).style
+        }
+        XCTAssertEqual(try decoded(#"{"style":"medium"}"#), .auto)  // the old default, not a choice
+        XCTAssertEqual(try decoded(#"{"style":"tight"}"#), .tight)
+        XCTAssertEqual(try decoded(#"{"style":"loose"}"#), .loose)
+        XCTAssertEqual(try decoded(#"{}"#), .auto)
+        var o = options()
+        o.style = .medium  // chosen in this version: kept
+        let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
+        XCTAssertEqual(back.style, .medium)
+        XCTAssertEqual(o.arguments()[3...4], ["--style", "medium"])
+        XCTAssertFalse(CutStyle.recut.contains(.auto))  // a cut's pacing is always a real one
     }
 }

@@ -45,7 +45,10 @@ def _level(text: str) -> float | str:
 def _add_render_args(p: argparse.ArgumentParser) -> None:
     # Defaults are None so `render` can tell "not given" (keep the saved run's setting) from a choice.
     g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
-    g.add_argument("--style", choices=["tight", "medium", "loose"], help="how aggressively pauses are trimmed (default: medium)")
+    g.add_argument(
+        "--style", choices=["auto", "tight", "medium", "loose"], action=_StyleAction,
+        help="how aggressively pauses are trimmed (default, auto: tight or loose when the brief asks for it, otherwise medium)",
+    )
     g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
     g.add_argument("--broll-db", type=float, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
@@ -63,6 +66,15 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--name", help="project/event name (default: folder name)")
     p.add_argument("--open", action="store_true", help="open the new cut in Final Cut Pro when it's done (Mac)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
+
+
+class _StyleAction(argparse.Action):
+    """--style; "auto" (what the app sends by default) never overrides a pacing given before it, e.g. a preset's."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values == "auto" and getattr(namespace, self.dest, None) not in (None, "auto"):
+            return
+        setattr(namespace, self.dest, values)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -595,7 +607,8 @@ def _run(args, json_mode: bool) -> int:
     given = {
         k: v
         for k, v in dict(
-            style=args.style,
+            # auto: a build picks the pacing from its brief; a re-cut or revision keeps the run's own.
+            style=args.style or "auto" if args.command == "build" else (None if args.style == "auto" else args.style),
             keep_fillers=args.keep_fillers,
             format=args.format,
             broll_db=args.broll_db,

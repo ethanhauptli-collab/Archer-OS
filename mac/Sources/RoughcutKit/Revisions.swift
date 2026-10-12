@@ -35,7 +35,7 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
             options.brief = presetBrief + "\n\n" + typed
         }
         options.targetLength = target ?? ""
-        options.style = style.flatMap(CutStyle.init(rawValue:)) ?? .medium
+        options.style = style.flatMap(CutStyle.init(rawValue:)) ?? .auto
         // As saved by `roughcut preset save --format`: 4K, uhd, 720p, 1080x1920@29.97...
         options.format = SequenceFormat(cliText: format)
         options.graphics = graphics ?? false

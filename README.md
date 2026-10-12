@@ -176,7 +176,7 @@ Rendering took about 6 seconds per 4-second 1080p graphic on the 4-core test mac
 | `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
 | `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
 | `--script FILE` | | A script, outline or transcript to follow |
-| `--style` | `medium` | `tight`, `medium`, `loose`: how much pause is kept |
+| `--style` | `auto` | `tight`, `medium`, `loose`: how much pause is kept. `auto` takes it from the brief: tight when it says tight, snappy, punchy or fast-paced; loose when it says let it breathe, slow-paced or a looser cut; otherwise medium. A preset's pacing wins over `auto` |
 | `--keep-fillers` | off | Don't cut um/uh (narration still loses the short ones) |
 | `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
 | `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
