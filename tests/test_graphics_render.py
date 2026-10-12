@@ -263,6 +263,12 @@ def _probe(path):
 
 @needs_renderer
 def test_fast_frame_capture_matches_playwrights_screenshot():
+    """The quick capture gives Playwright's screenshot pixel for pixel, and so does every capture after it.
+
+    Each capture waits for the page to draw what changed since the one before (a seek, or the scale that capture set
+    and put back): one taken straight after a change could catch the compositor between two states, with the plate's
+    edge a device pixel off now and then.
+    """
     import asyncio
 
     from playwright.async_api import async_playwright
@@ -270,26 +276,32 @@ def test_fast_frame_capture_matches_playwrights_screenshot():
     def rgba(png: bytes) -> bytes:
         return subprocess.run(["ffmpeg", "-v", "error", "-i", "-", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], input=png, capture_output=True, check=True).stdout
 
-    async def both(width, height):
+    async def frames(width, height):
         cw, ch, scale = graphics.canvas(width, height)
+        transparent = {"color": {"r": 0, "g": 0, "b": 0, "a": 0}}
         async with async_playwright() as p:
             browser = await graphics._launch_browser_async(p)
             page = await browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
             cdp = await page.context.new_cdp_session(page)
-            await cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
+            await cdp.send("Emulation.setDefaultBackgroundColorOverride", transparent)
             await page.set_content(GRAPHIC_HTML.replace("TEXT", "Match"), wait_until="load")
             await graphics.load_fonts(page)
-            await graphics._evaluate(cdp, f"({graphics._SEEK_JS})(1.0)", 5, "seek")
-            fast = await graphics._frame_png(page, cdp, (cw, ch, scale), True, "fast")
-            slow = await graphics._frame_png(page, cdp, (cw, ch, scale), False, "slow")
+            shots = []
+            for _ in range(8):
+                await graphics._evaluate(cdp, f"({graphics._SEEK_JS})(1.0)", 5, "seek")
+                shots.append(await graphics._frame_png(page, cdp, (cw, ch, scale), True, "fast"))
+                for _ in range(2):
+                    shots.append(await graphics._frame_png(page, cdp, (cw, ch, scale), False, "slow"))
+                    await cdp.send("Emulation.setDefaultBackgroundColorOverride", transparent)  # Playwright's screenshot puts the default back
             await browser.close()
-            return fast, slow
+            return shots
 
     for size in ((640, 360), (360, 640)):
-        fast, slow = asyncio.run(both(*size))
-        assert graphics._png_size(fast) == size == graphics._png_size(slow)
-        a, b = rgba(fast), rgba(slow)
-        assert a == b and min(a[3::4]) == 0 and max(a[3::4]) == 255  # same pixels, transparent background, opaque plate
+        shots = asyncio.run(frames(*size))
+        assert {graphics._png_size(png) for png in shots} == {size}
+        first = rgba(shots[0])
+        assert min(first[3::4]) == 0 and max(first[3::4]) == 255  # transparent background, opaque plate
+        assert [k for k, png in enumerate(shots) if rgba(png) != first] == []  # the same pixels, however soon after a change
 
 
 @needs_renderer
@@ -313,6 +325,9 @@ def test_how_a_graphic_is_encoded_is_part_of_its_digest(monkeypatch):
     assert graphics._digest("<html>", 90, "30000/1001", 1920, 1080) != before
     monkeypatch.undo()
     monkeypatch.setattr(graphics, "_SEEK_JS", graphics._SEEK_JS + " ")
+    assert graphics._digest("<html>", 90, "30000/1001", 1920, 1080) != before
+    monkeypatch.undo()
+    monkeypatch.setattr(graphics, "_DRAWN_JS", graphics._DRAWN_JS + " ")  # how each frame waits to be captured
     assert graphics._digest("<html>", 90, "30000/1001", 1920, 1080) != before
 
 

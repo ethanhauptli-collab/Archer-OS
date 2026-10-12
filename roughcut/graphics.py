@@ -971,12 +971,21 @@ async def load_fonts(page) -> None:
     await _bounded(page.evaluate(_LOAD_FONTS_JS), STEP_TIMEOUT, "never finished loading its fonts")
 
 
+# Resolves once the page has drawn a whole frame since it was called: two animation frames.
+_DRAWN_JS = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
+
+
 async def _frame_png(page, cdp, canvas_: tuple[int, int, float], fast: bool, what: str) -> bytes:
     """One frame as a transparent PNG at the sequence size.
 
     The fast path asks Chrome directly (about twice as quick as page.screenshot, same pixels);
     `scale` makes it capture device pixels rather than CSS pixels.
+
+    It first waits for the page to draw what changed since the last capture: the seek, and the
+    scale that capture set and put back. A capture straight after a change can catch the compositor
+    between two states, with an edge a device pixel off, so a still graphic would jitter now and then.
     """
+    await _bounded(cdp.send("Runtime.evaluate", {"expression": _DRAWN_JS, "awaitPromise": True}), STEP_TIMEOUT, what)
     cw, ch, scale = canvas_
     if fast:
         clip = {"x": 0, "y": 0, "width": cw, "height": ch, "scale": scale}
@@ -1109,7 +1118,7 @@ def _render_one(job: dict) -> dict:
 
 def _digest(html: str, frames: int, rate: str, width: int, height: int, retime: list | None = None) -> str:
     """Identifies a render: the design, its length and size, its re-timing (if any), and how it's rendered and encoded."""
-    how = " ".join(ENCODER) + "|" + _SEEK_JS
+    how = " ".join(ENCODER) + "|" + _SEEK_JS + "|" + _DRAWN_JS
     timed = f"|retime={json.dumps(retime)}" if retime else ""
     return hashlib.sha256(f"{frames}|{rate}|{width}x{height}|{how}{timed}|{html}".encode()).hexdigest()[:16]
 
