@@ -99,10 +99,12 @@ def _bare(word: str) -> tuple[str, str]:
 
 _PUNCT = ".,;:!?…"
 _POSSESSIVE = re.compile(r"['\u2019][sS]$")
-# The last word of a name whose period is its own: an initialism ("U.S.", "Ph.D.", "M.B.A.": parts of one or two letters)
-# or a short form ("Jr.", "Inc.", "Blvd."). Not a web address or any other dotted word: "cnn.com." ends a sentence.
+# The last word of a name whose period is its own: an initialism ("U.S.", "Ph.D.", "Psy.D.", "B.Com.", "a.m.": parts of up
+# to three letters, the last a capital or a single letter) or a short form ("Jr.", "Inc.", "Blvd."). Not a web address,
+# whose last part is a lowercase name ("cnn.com.", "t.co.", "x.ai."), or any other dotted word: those end a sentence.
 _ABBREVIATION = re.compile(
-    r"(?:^|\s)(?:(?:[A-Za-z]{1,2}\.)+[A-Za-z]{1,2}|Jr|Sr|Inc|Co|Corp|Ltd|Bros|St|Ave|Blvd|Rd|Mt|Ft|Dr|Mr|Mrs|Ms|Esq)\.$", re.IGNORECASE
+    r"(?:^|\s)(?:(?:[A-Za-z]{1,3}\.)+(?-i:[A-Z][A-Za-z]{0,2}|[a-z])|Jr|Sr|Inc|Co|Corp|Ltd|Bros|St|Ave|Blvd|Rd|Mt|Ft|Dr|Mr|Mrs|Ms|Esq)\.$",
+    re.IGNORECASE,
 )
 
 
@@ -185,12 +187,19 @@ def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None 
     return out
 
 
+# Title Case leaves these lowercase: "Head of Sales" and "Founder and Chef" aren't sentences.
+_SMALL_WORDS = frozenset(("of", "and", "at", "for", "the", "in", "on", "to", "a", "an", "&", "with", "by"))
+
+
 def _sentence_starts(texts: list[str], j: int) -> bool:
-    """Does a sentence start at word `j`? A capital letter, then a lowercase word ("Today we eat"), or a capital in
-    text that ends its sentences elsewhere too. Title Case alone ("Acme Inc. CEO", "Jr. Head Chef") isn't one."""
-    if j >= len(texts) or not re.sub(r"^\W+", "", texts[j])[:1].isupper():
+    """Does a sentence start at word `j`? A capital letter or a number, then a lowercase word ("Today we eat", "2024
+    was big"; not a small word Title Case keeps lowercase), or a capital in text that ends its sentences elsewhere
+    too. Title Case alone ("Acme Inc. CEO", "Jr. Head Chef", "Inc. Head of Sales") isn't one."""
+    first = re.sub(r"^\W+", "", texts[j])[:1] if j < len(texts) else ""
+    if not (first.isupper() or first.isdigit()):
         return False
-    if j + 1 < len(texts) and re.sub(r"^\W+", "", texts[j + 1])[:1].islower():
+    after = next((w for w in (re.sub(r"^\W+", "", t) for t in texts[j + 1 :]) if w.lower() not in _SMALL_WORDS), "")
+    if after[:1].islower():
         return True
     ends = (w.rstrip("\"')]\u201d\u2019") for k, w in enumerate(texts) if k != j - 1)
     return any(w.endswith(("?", "!", "\u2026")) or (w.endswith(".") and not _ABBREVIATION.search(w)) for w in ends)

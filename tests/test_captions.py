@@ -215,11 +215,14 @@ def test_a_spelling_copied_with_its_possessive_or_punctuation_is_written_once():
     assert _fixed("Take Beach avenue home.", [{"heard": "Beach avenue", "correct": "Beach Ave."}]) == "Take Beach Ave. home."
     assert _fixed("She got a PhD today.", [{"heard": "PhD", "correct": "Ph.D."}]) == "She got a Ph.D. today."
     assert _fixed("Then the US Grant.", [{"heard": "US Grant", "correct": "U.S. Grant"}]) == "Then the U.S. Grant."
-    # An initialism has parts of one or two letters: a short web address isn't one.
-    for site in ("cnn.com.", "bit.ly.", "x.com.", "abc.com.", "voc.org."):
+    # An initialism ends on a capital or a single letter; a web address ends on a lowercase name of two letters or more.
+    for site in ("cnn.com.", "bit.ly.", "x.com.", "abc.com.", "voc.org.", "t.co.", "fb.me.", "x.ai.", "ox.ac.uk.", "goo.gl.", "CNN.com.", "Bit.ly."):
         assert _fixed("Go to the site today.", [{"heard": "the site", "correct": site}]) == f"Go to {site[:-1]} today.", site
-    for short in ("U.S.", "Ph.D.", "D.C.", "M.B.A."):
+    for short in ("U.S.", "Ph.D.", "D.C.", "M.B.A.", "U.S.A.", "Psy.D.", "B.Com.", "Ed.D.", "LL.M.", "M.Sc.", "a.m.", "e.g."):
         assert _fixed("It was the thing today.", [{"heard": "the thing", "correct": short}]) == f"It was {short} today.", short
+        assert captions.clean_spelling("the thing", short) == ("the thing", short)
+    assert captions.respell("She got a PsyD today.", [{"heard": "PsyD", "correct": "Psy.D."}]) == "She got a Psy.D. today."
+    assert captions.respell("He has a BCom now.", [{"heard": "BCom", "correct": "B.Com."}]) == "He has a B.Com. now."
 
 
 def test_undoing_a_spelling_gives_the_name_back_as_heard_without_the_right_form_s_own_period():
@@ -244,12 +247,26 @@ def test_undoing_a_spelling_gives_the_name_back_as_heard_without_the_right_form_
         ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior Head Chef"),
         ("Acme Ink", "Acme Inc.", "Acme Ink. Today we eat."),
         ("Roy Choy junior", "Roy Choi Jr.", "Meet Roy Choy junior. Head Chef Roy cooks."),
+        # Title Case keeps its small words lowercase ("Head of Sales"), and a sentence can start with a number.
+        ("Acme Ink", "Acme Inc.", "Acme Ink Head of Sales"),
+        ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior Founder and Chef"),
+        ("kogi", "Kogi BBQ Co.", "kogi VP of Marketing"),
+        ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior Owner at Kogi"),
+        ("Acme Ink", "Acme Inc.", "Acme Ink. In the morning we eat."),
+        ("Acme Ink", "Acme Inc.", "Acme Ink. Then the kids came."),
+        ("Acme Ink", "Acme Inc.", "Acme Ink. Since 1990."),
+        ("Acme Ink", "Acme Inc.", "We love Acme Ink. 2024 was big."),
     ]:
         h, c = captions.clean_spelling(heard, correct)
         shown = captions.respell(said, [{"heard": h, "correct": c}])
         assert shown != said
         assert captions.respell(shown, [{"heard": c, "correct": h}]) == said, (heard, correct, said)
     assert captions.respell("Acme Inc. CEO", [{"heard": "Acme Inc.", "correct": "Acme Ink"}]) == "Acme Ink CEO"
+    assert captions.respell("Acme Inc. Head of Sales", [{"heard": "Acme Inc.", "correct": "Acme Ink"}]) == "Acme Ink Head of Sales"
+    assert captions.respell("Kogi BBQ Co. VP of Marketing", [{"heard": "Kogi BBQ Co.", "correct": "Kogi BBQ Company"}]) == "Kogi BBQ Company VP of Marketing"
+    assert captions.respell("We love Acme Inc. 2024 was big.", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == (
+        "We love Acme Incorporated. 2024 was big."
+    )
     assert captions.respell("We love Acme Inc... so good", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == "We love Acme Incorporated... so good"
     # In what's said too: a misheard short form that ends a sentence keeps the sentence's period.
     assert _fixed("Acme Inc. makes it. We love Acme Inc. So.", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == (
