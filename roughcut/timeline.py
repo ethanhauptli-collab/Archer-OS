@@ -634,11 +634,11 @@ def build_timeline(
     _place_markers(tl, plan, analysis)  # first, so a jump on a line the plan flagged keeps one to-do
     if plan.source != "heuristic":  # a stringout is all jump cuts by design
         _mark_bed_jumps(tl, analysis, warnings)
-        if punch_in:
-            tl.review.punched = _punch_in(tl, tl.review)
-        else:
+        if not punch_in:
             _mark_jump_cuts(tl, tl.review)
         tl.markers.sort(key=lambda mk: mk.frame)
+    if punch_in:  # also a cut made without AI (--provider none), which is all jump cuts
+        tl.review.punched = _punch_in(tl, tl.review)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
     _music_fades(tl, analysis)

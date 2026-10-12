@@ -1383,8 +1383,9 @@ def with_planned(specs: list[GraphicSpec], planned: list[GraphicSpec]) -> list[G
     """
     empty = GraphicSpec(kind="quote", segment="", words="", text="")
     out = list(specs) + [empty] * max(0, len(planned) - len(specs))
+    have = {(g.kind, g.segment, g.words, g.text) for g in specs if g.text}
     for i, spec in enumerate(planned):
-        if not out[i].text and spec.text:
+        if not out[i].text and spec.text and (spec.kind, spec.segment, spec.words, spec.text) not in have:
             out[i] = spec
     return out
 

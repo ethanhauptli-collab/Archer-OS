@@ -232,7 +232,12 @@ def render_options(opts: Options, settings: dict, overrides: set[str] | None = N
 
 
 # What a brief says about pacing. A tight-knit community isn't a pacing note, nor are loose ends.
-_TIGHT = re.compile(r"\b(?:tight(?:er|ly)?\b(?![- ]knit)|snappy|punchy|fast[- ]paced|quick[- ]paced|fast pac(?:e|ing))", re.I)
+_TIGHT = re.compile(
+    # Not framing: "tight shots", "tight close-ups", "tightly framed", "tight on the chef".
+    r"\b(?:tight(?:er|ly)?\b(?![- ]?knit)(?!\s+(?:shots?|close[- ]?ups?|framed|framing|frames?|crops?|on|wides?|angles?|lens)\b)"
+    r"|snappy|punchy|fast[- ]paced|quick[- ]paced|fast pac(?:e|ing))",
+    re.I,
+)
 _LOOSE = re.compile(
     r"\b(?:looser|loose(?:ly)? (?:cut|edit|pac(?:e|ing))|let (?:it|them|things|moments|the moments) breathe|room to breathe"
     r"|breathing room|slow[- ]paced|slower pac(?:e|ing)|unhurried|relaxed pac(?:e|ing))",
@@ -241,6 +246,17 @@ _LOOSE = re.compile(
 
 
 _PUNCH_IN = re.compile(r"\bpunch(?:[- ]?ins?\b|ing in\b)|\bzoom(?:s|ing)? (?:in )?on (?:the )?jump ?cuts|\bzoom cuts\b", re.I)
+
+
+_NOT = re.compile(r"\b(?:no|not|don'?t|do not|without|avoid|never|skip|none of)\b[\w\s'-]{0,20}$", re.I)
+
+
+def punch_in_from_brief(brief: str) -> str:
+    """The words in the brief that ask for punch-ins on jump cuts ("" if none; "no punch-ins" doesn't count)."""
+    for m in _PUNCH_IN.finditer(brief or ""):
+        if not _NOT.search(brief[max(0, m.start() - 30) : m.start()]):
+            return m.group(0)
+    return ""
 
 
 def style_from_brief(brief: str) -> tuple[str, str]:
@@ -551,10 +567,10 @@ def build(opts: Options) -> Result:
         opts = replace(opts, style=style)
         log(f"pacing: {style} ({why})")
     if opts.punch_in is None:
-        asked = _PUNCH_IN.search(opts.context or "")
+        asked = punch_in_from_brief(opts.context)
         opts = replace(opts, punch_in=bool(asked))
         if asked:
-            log(f'punching in on jump cuts (the brief says "{asked.group(0)}")')
+            log(f'punching in on jump cuts (the brief says "{asked}")')
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
@@ -766,6 +782,13 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     source = saved["plan"].get("source", "saved plan")
     plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
     plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
+    revision = next((h for h in reversed(saved.get("notes_history") or []) if isinstance(h, dict)), None)
+    if revision and revision.get("avoid") and saved.get("raw"):
+        # The model's plan, as the revision that made it left it: what it was told to avoid stays out.
+        from .revise import enforce
+
+        enforce(plan, analysis, keep=[], avoid=[str(a) for a in revision["avoid"]])
+    plan.spellings = list(saved["plan"].get("spellings") or plan.spellings)  # a revision's, with the ones it carried over
     if not plan.sections:
         plan = heuristic_plan(analysis, title=f"{name} (dead air removed)")
     have_manifest = (out_dir / "graphics.json").is_file()
@@ -799,7 +822,11 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         else:
             if have_manifest:
                 specs, html, style = graphics.saved_designs(out_dir)
-                specs = graphics.with_planned(specs, plan.graphics)
+                if design_missing:
+                    # Graphics the saved cut left out (one would have covered another, or its words were cut)
+                    # may fit this one: designing them is what --design-missing asks for. A plain re-cut keeps
+                    # to the designed ones, so one without a design never pushes a designed one out.
+                    specs = graphics.with_planned(specs, _saved_graphics(saved))
                 house = saved_house_style(out_dir)
             else:
                 specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""
@@ -934,6 +961,20 @@ def undesigned(out_dir: Path) -> int:
     except (OSError, ValueError, AttributeError):
         return 0
     return sum(1 for g in entries if isinstance(g, dict) and g.get("text") and not g.get("html"))
+
+
+def _saved_graphics(saved: dict) -> list:
+    """The graphics of the saved plan (after a revision's --avoid), at the positions graphics.json's indexes refer to."""
+    from .plan import GraphicSpec
+
+    out = []
+    for g in saved.get("plan", {}).get("graphics") or []:
+        try:
+            out.append(GraphicSpec(**{k: g[k] for k in ("kind", "segment", "words", "text")}, subtext=str(g.get("subtext") or ""),
+                                   seconds=float(g.get("seconds") or 0), direction=str(g.get("direction") or "")))
+        except (KeyError, TypeError, ValueError):
+            out.append(GraphicSpec(kind="quote", segment="", words="", text=""))
+    return out
 
 
 def design_missing_hint(out_dir: Path, n: int, *, after_reset: bool = False) -> str:
@@ -1188,6 +1229,12 @@ def revise(
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}")
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=avoid_ids, previous=previous)
     plan.warnings += enforced.warnings
+    # Name spellings found before still hold: the revision's own first, then the earlier ones it didn't repeat.
+    heard = {str(f["heard"]).lower() for f in plan.spellings}
+    for fix in saved["plan"].get("spellings") or previous.spellings:
+        if isinstance(fix, dict) and str(fix.get("heard") or "").lower() not in heard and fix.get("correct"):
+            plan.spellings.append({"heard": str(fix["heard"]), "correct": str(fix["correct"])})
+            heard.add(str(fix["heard"]).lower())
     if not plan.sections:
         raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")
 

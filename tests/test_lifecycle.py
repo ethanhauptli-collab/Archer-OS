@@ -476,6 +476,25 @@ def test_revise_enforces_avoid_and_flags_missing_keeps(footage, tmp_path, fake, 
     xml = next(out.glob("*.fcpxml")).read_text()
     assert "You asked to keep V01.S002" in xml  # a to-do marker in Final Cut
     validate_dtd(next(out.glob("*.fcpxml")))
+    # A re-cut (Finish without AI) keeps what the revision avoided out: it rebuilds the model's plan, so it applies --avoid again.
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1]
+    assert "V01.S003" not in paper.split("## Alternate", 1)[0] and "V03@" not in paper and "V02" not in paper.split("## Alternate", 1)[0]
+
+
+def test_name_spellings_last_through_revisions_and_re_cuts(footage, tmp_path, fake, shared_cache):
+    import copy
+
+    out = tmp_path / "out"
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": [{"heard": "the mountain", "correct": "Mount Baldy"}]}
+    pipeline.build(_opts(footage, out, shared_cache))
+    assert "Mount Baldy" in next(out.glob("*.srt")).read_text()
+    fake.plan = {k: v for k, v in fake.plan.items() if k != "spellings"}  # the revision doesn't repeat it
+    pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
+    assert json.loads((out / "plan.json").read_text())["plan"]["spellings"] == [{"heard": "the mountain", "correct": "Mount Baldy"}]
+    assert "Mount Baldy" in next(out.glob("*.srt")).read_text()
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert "Mount Baldy" in next(out.glob("*.srt")).read_text() and "the mountain" not in next(out.glob("*.srt")).read_text()
 
 
 def test_revise_works_on_a_folder_from_before_saved_settings(footage, tmp_path, fake, shared_cache):

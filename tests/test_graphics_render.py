@@ -970,6 +970,9 @@ def test_saved_designs_are_read_by_plan_position_in_any_order(tmp_path):
     # so it can place them and --design-missing can design them; saved ones (maybe hand-edited) win.
     planned = [GraphicSpec(kind="quote", segment="V01.S003", words="", text=t) for t in ("plan zero", "one", "plan two", "plan three", "four")]
     assert [s.text for s in graphics.with_planned(specs, planned)] == ["zero", "one", "two", "three", "four"]
+    # Never a second copy of a graphic the saved cut has (positions can shift when a revision avoided one).
+    shifted = [GraphicSpec(kind="quote", segment="V01.S003", words="", text=t) for t in ("avoided", "zero", "one", "two")]
+    assert [s.text for s in graphics.with_planned(specs, shifted)] == ["zero", "", "two", "three"]
 
 
 def test_a_graphic_without_a_saved_design_is_reported_not_dropped_silently(tmp_path, monkeypatch):

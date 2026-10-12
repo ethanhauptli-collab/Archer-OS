@@ -150,8 +150,13 @@ struct BuildForm: View {
                     Text(model.options.style.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Toggle("Punch in on jump cuts", isOn: $model.options.punchIn)
-                    Text("Alternates a 112% zoom at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Also on when the brief says \"punch in\".")
+                    Picker("Punch-ins", selection: $model.options.punchIn) {
+                        ForEach(PunchIn.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("A 112% zoom alternating at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Auto: when the brief says \"punch in\".")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

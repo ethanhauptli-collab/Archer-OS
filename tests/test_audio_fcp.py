@@ -1043,7 +1043,9 @@ def test_the_brief_turns_punch_ins_on_and_re_cuts_keep_them(footage, tmp_path, c
     assert main(["build", str(footage), "-o", str(out), "-c", "Punch in on the jump cuts.", *common]) == 0
     assert "punching in on jump cuts" in capsys.readouterr().err
     assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is True
+    assert 'scale="1.12 1.12"' in next(out.glob("*.fcpxml")).read_text(), "a cut made without AI is punched in too"
     assert main(["render", str(out), "--style", "loose"]) == 0
     assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is True
     assert main(["render", str(out), "--no-punch-in"]) == 0
     assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is False
+    assert "adjust-transform" not in next(out.glob("*.fcpxml")).read_text()

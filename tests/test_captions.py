@@ -113,3 +113,42 @@ def test_every_version_has_its_captions_and_earlier_ones_go_to_history(footage, 
     assert v2.name == v1.name.replace(" v1.srt", " v2.srt") and v2.is_file() and not v1.exists()
     assert list((out / "history").glob(f"v1 */{v1.name}")), "the earlier captions are kept with their cut"
     assert json.loads((out / "versions.json").read_text())["versions"][-1]["captions"] == v2.name
+
+
+def test_words_whisper_stretched_over_a_cut_pause_are_still_captioned(tmp_path):
+    """mlx-whisper runs each word up to the next one, so a sentence's last word covers the pause after it,
+    which the cut removes. Captioned by where it sounds, the word (often a name) stays."""
+    import shutil
+    import subprocess
+
+    import pytest
+    from test_dead_air import SECONDS, SENTENCES, whisper_words
+
+    from roughcut.cli import main
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    foot = tmp_path / "talk"
+    foot.mkdir()
+    gates = "+".join(f"between(t,{s},{e})" for s, e, _ in SENTENCES)
+    speech = f"0.5*sin(2*PI*220*t)*(0.55+0.45*sin(2*PI*4*t))*({gates})"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"color=c=gray:size=320x180:rate=30:duration={SECONDS}",
+         "-f", "lavfi", "-i", f"aevalsrc=exprs='{speech}':s=48000:d={SECONDS}", "-map", "0:v", "-map", "1:a",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(foot / "talk.mov")],
+        check=True,
+    )
+    (foot / "talk.json").write_text(json.dumps({"words": whisper_words(SENTENCES)}))
+    out = tmp_path / "out"
+    assert main(["build", str(foot), "-o", str(out), "--provider", "none", "--cache-dir", str(tmp_path / "c"), "--no-stringout"]) == 0
+    text = next(out.glob("*.srt")).read_text()
+    said = " ".join(t for _, _, t in SENTENCES).split()
+    assert [w for w in said if w not in text.split()] == []
+    assert "coming to Anaheim.\n" in text, "the sentence ends its caption"
+
+
+def test_a_planned_line_from_a_b_roll_clip_is_captioned():
+    vox = make_clip("V02", seconds=10, sentences=[(1.0, 3.0, "Best tacos in the county.")], role="broll")
+    a, plan, tl = cut(items=("V01.S003", "V02.S001"), extra=(vox,))
+    text = captions.srt(tl, a)
+    assert "Best tacos in the county." in text and "Today we're heading up the mountain." in text

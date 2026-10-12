@@ -40,29 +40,48 @@ class Caption:
     lines: list[str]
 
 
+def _sounding(clip, w) -> tuple[float, float]:
+    """Where a word is heard: Whisper stretches a word over the pause next to it, and a cut takes that pause out."""
+    from .timeline import _index
+
+    pauses = _index(clip).silences
+    a, b = pauses.clamp_start(w.start, w.end), pauses.clamp_end(w.end, w.start)
+    return (a, b) if b > a else (w.start, w.end)
+
+
 def kept_words(tl: "Timeline", analysis: "Analysis") -> list[_Word]:
-    """Every transcribed word the cut plays on the spine, in timeline order, fillers left out."""
+    """Every transcribed word the cut plays on the spine, in timeline order, fillers left out.
+
+    On camera and narration clips every word in a kept piece counts; on any other clip, the words
+    of the lines the plan picked. A word goes with the piece that plays most of its sound.
+    """
     fd = tl.frame_duration
     clips = {c.id: c for c in analysis.clips}
-    out: list[_Word] = []
-    for piece in sorted(tl.spine, key=lambda s: s.offset):
+    best: dict[tuple[str, int, int], tuple[float, _Word]] = {}  # (clip, segment, word) -> (sound kept, caption word)
+    for piece in tl.spine:
         clip = clips.get(piece.clip_id)
-        if clip is None or clip.role not in SPOKEN_ROLES:
+        if clip is None or not clip.segments or (clip.role not in SPOKEN_ROLES and not piece.seg_ids):
             continue
         a = float(piece.src_in)
         b = a + float(piece.frames * fd)
-        for seg in clip.segments:
-            if seg.end <= a or seg.start >= b:
+        for n, seg in enumerate(clip.segments):
+            if seg.end <= a or seg.start >= b or (clip.role not in SPOKEN_ROLES and seg.id not in piece.seg_ids):
                 continue
-            for w in seg.words:
-                mid = (w.start + w.end) / 2
+            for i, w in enumerate(seg.words):
                 text = w.text.strip()
-                if not text or w.is_filler or not a <= mid < b:
+                if not text or w.is_filler:
                     continue
-                fa = piece.offset + round(Fraction(max(w.start, a) - a) / fd)
-                fb = piece.offset + round(Fraction(min(w.end, b) - a) / fd)
-                out.append(_Word(text, fa, max(fb, fa + 1)))
-    return out
+                sa, sb = _sounding(clip, w)
+                kept = min(sb, b) - max(sa, a)
+                if kept <= 0:
+                    continue
+                key = (clip.id, n, i)
+                if key in best and best[key][0] >= kept:
+                    continue
+                fa = piece.offset + round(Fraction(max(sa, a) - a) / fd)
+                fb = piece.offset + round(Fraction(min(sb, b) - a) / fd)
+                best[key] = (kept, _Word(text, fa, max(fb, fa + 1)))
+    return sorted((w for _, w in best.values()), key=lambda w: (w.a, w.b))
 
 
 def _bare(word: str) -> tuple[str, str]:

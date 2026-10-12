@@ -536,8 +536,18 @@ def test_auto_pacing_follows_the_brief():
         assert style_from_brief(tight)[0] == "tight", tight
     for loose in ("let it breathe", "slow-paced and reflective", "give it breathing room", "a looser cut"):
         assert style_from_brief(loose)[0] == "loose", loose
-    for medium in ("", "a tight-knit community of chefs", "tie up loose ends", "tighter, but let the moments breathe"):
+    for medium in ("", "a tight-knit community of chefs", "tie up loose ends", "tighter, but let the moments breathe",
+                   "use the tight shots of the food", "Tight close-ups", "tightly framed interviews", "tight on the chef"):
         assert style_from_brief(medium)[0] == "medium", medium
+
+
+def test_punch_ins_from_the_brief():
+    from roughcut.pipeline import punch_in_from_brief
+
+    for yes in ("punch in on jump cuts", "Add punch-ins", "zoom in on jump cuts", "tight cuts, and punch in on the jump cuts"):
+        assert punch_in_from_brief(yes), yes
+    for no in ("No punch-ins please", "Don't punch in on jump cuts", "without zoom cuts", "a punchy promo", "the punch line", ""):
+        assert not punch_in_from_brief(no), no
 
 
 def test_a_build_is_paced_by_its_brief_and_its_recuts_keep_that(footage, tmp_path, capsys):

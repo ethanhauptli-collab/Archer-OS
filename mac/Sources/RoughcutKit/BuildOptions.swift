@@ -20,6 +20,14 @@ public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
+/// Punch-ins on jump cuts (`--punch-in` / `--no-punch-in`). `.auto` lets the brief decide ("punch in on jump cuts").
+public enum PunchIn: String, CaseIterable, Codable, Identifiable, Sendable {
+    case auto, on, off
+
+    public var id: String { rawValue }
+    public var title: String { rawValue.capitalized }
+}
+
 /// Sequence format (`--format`). `.auto` matches the footage. `.custom` is any other format the
 /// CLI reads (`timeline.parse_format`), e.g. a preset saved in Terminal with 720p or 1080x1920@29.97.
 public enum SequenceFormat: Hashable, Codable, Identifiable, Sendable {
@@ -221,9 +229,8 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var dialogueLevel: DialogueLevel = .standard
     /// De-click fades at audio edits and soft fades on B-roll nat sound (`--fades`).
     public var fades: Bool = true
-    /// Alternate a punch-in at each jump cut no B-roll covers (`--punch-in`). Off: the CLI still
-    /// punches in when the brief asks for it.
-    public var punchIn: Bool = false
+    /// Alternate a punch-in at each jump cut no B-roll covers. Auto: when the brief asks for it.
+    public var punchIn: PunchIn = .auto
     /// A logo file graphics may show (`--graphics-logo`).
     public var graphicsLogo: String = ""
     /// Approved graphics (.html) new designs match (`--graphics-look`).
@@ -350,8 +357,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if format != .auto {
             args += format.arguments
         }
-        if punchIn {
-            args.append("--punch-in")
+        switch punchIn {
+        case .on: args.append("--punch-in")
+        case .off: args.append("--no-punch-in")
+        case .auto: break
         }
         args += ["--provider", provider.rawValue]
         if provider != .none {
