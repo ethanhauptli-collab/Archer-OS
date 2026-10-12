@@ -16,7 +16,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/vision.py` | Frame sampling + vision descriptions/tags (batched, cached; hidden duplicates share the kept clip's); timed moments in long B-roll |
 | `roughcut/prompts.py` | Planner/vision/moments prompts; media block rendered deterministically for prompt caching, showing each line's kept length at the run's style |
 | `roughcut/providers/` | `anthropic_provider.py` (official SDK, streaming, structured outputs, `fallbacks: "default"`), `claude_code.py` (`--provider claude-code`: runs `claude -p` on the user's Pro/Max plan), `openai_compat.py`; `cost_breakdown`; `ProviderLimitError` |
-| `roughcut/plan.py` | `PLAN_SCHEMA` (B-roll `words`), lenient `normalize()` (drops unknown IDs and repeats of a line from another read), `heuristic_plan()` (stringout / no-AI mode) |
+| `roughcut/plan.py` | `PLAN_SCHEMA` (B-roll `words`, name `spellings` checked against the transcript), lenient `normalize()` (drops unknown IDs and repeats of a line from another read), `heuristic_plan()` (stringout / no-AI mode) |
 | `roughcut/phrases.py` | Find planner-named words in the transcript and the cut (shared by B-roll and graphics placement) |
 | `roughcut/timeline.py` | Plan → `Timeline` in integer sequence frames: padding, filler cuts, merges, `_cut_silences`, B-roll on its words, auto-fill, music bed (back-timed, ducked), level matching (`_mix`), fades, markers, `review` (cut check vs target) |
 | `roughcut/graphics.py` | `--graphics`: place planned graphics (one on screen at a time), design (batches; the first sets the look, the rest in parallel; a frame of the shot under each), render with Playwright (async API per thread, every call bounded) to ProRes 4444 alpha, check renders, connect above B-roll; `graphics.json` + editable `graphics/*.html` drive re-renders |
@@ -26,6 +26,7 @@ Footage folder → transcripts → LLM edit plan → frame-accurate timeline →
 | `roughcut/fcpxml.py` | `Timeline` → FCPXML 1.10 (roles, notes, volume/fades/keyframes, alt-take keyword ranges) |
 | `roughcut/versions.py` | Numbered versions, `history/`, `versions.json`, atomic writes, graphics adoption and pruning |
 | `roughcut/revise.py` | `roughcut revise`: re-plan from notes; the diff the report opens with |
+| `roughcut/captions.py` | `<name> vN.srt` per version: kept dialogue/narration words mapped through the cut (frames, no fillers), name fixes from the plan's `spellings` |
 | `roughcut/report.py`, `report_html.py` | Paper edit (Markdown, and the HTML page with copyable chapters) |
 | `roughcut/pipeline.py`, `cli.py` | `roughcut build` / `render` / `revise` / `preset` / `update` / `doctor` / `key` |
 | `roughcut/paths.py`, `update.py` | Rejoin unquoted paths with spaces; `roughcut update` |

@@ -418,6 +418,12 @@ final class AppModel {
         NSWorkspace.shared.activateFileViewerSelecting([result.fcpxmlURL])
     }
 
+    func revealCaptions(_ result: RunResult) {
+        if let captions = result.captionsURL {
+            NSWorkspace.shared.activateFileViewerSelecting([captions])
+        }
+    }
+
     func openReport(_ result: RunResult) {
         NSWorkspace.shared.open(result.paperEditURL)
     }

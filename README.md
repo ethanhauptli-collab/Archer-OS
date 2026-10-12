@@ -93,6 +93,7 @@ Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherev
 | File | What it is |
 |---|---|
 | `<name> vN.fcpxml` | The newest cut: an event with keyworded clips, the **Rough Cut vN** project and the **Stringout vN** project. Import it with File → Import → XML… |
+| `<name> vN.srt` | Captions for the cut: what's said on camera and in narration, timed to the cut on whole frames, without ums, at most two lines of 42 characters. Names the transcript misspells are written as your brief spells them. In Final Cut, with the project open: File > Import > Captions. Each version has its own |
 | `edit_report.html` | The paper edit as a page to read or print: sections, every line used, B-roll and why, alternate takes, YouTube chapters (with a Copy button), what was cut and why, levels, a cut check against your target length, and warnings. `edit_report.md` is the same in Markdown |
 | `history/` | The last five earlier versions, each with its own FCPXML, plan and paper edit. Earlier projects you imported keep working |
 | `graphics/` | Each graphic as an editable `.html` design and a rendered `.mov`, plus `preview.html` showing every graphic over the shot it sits on |

@@ -116,6 +116,16 @@ struct ResultView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                if let captions = result.captionsURL {
+                    HStack(spacing: 8) {
+                        Text("Captions: \(captions.lastPathComponent). With the project open in Final Cut: File > Import > Captions.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("Show Captions") { model.revealCaptions(result) }
+                            .controlSize(.small)
+                    }
+                }
 
                 GroupBox {
                     HStack(spacing: 12) {

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import progress, versions
 from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
+from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema
@@ -84,6 +85,12 @@ class Result:
     summary: dict = field(default_factory=dict)  # what made it in, what was left out, what it cost (run_summary)
     settings: dict = field(default_factory=dict)  # the run settings saved with this version (plan.json): what `render` starts from
 
+    @property
+    def captions(self) -> Path | None:
+        """The cut's captions, `<name> vN.srt` beside its FCPXML, when anything in it is spoken."""
+        path = self.fcpxml.with_suffix(".srt")
+        return path if path.is_file() else None
+
 
 CUT_SETTINGS = ("style", "format", "keep_fillers", "stringout")  # result_summary's "cut"
 
@@ -99,6 +106,7 @@ def result_summary(result: Result) -> dict:
         "out_dir": str(result.out_dir),
         "fcpxml": str(result.fcpxml),
         "report": str(result.report),
+        "captions": str(result.captions) if result.captions else None,
         "rough_seconds": round(tl.seconds, 3),
         "stringout_seconds": round(result.stringout.seconds, 3) if result.stringout is not None else None,
         "edits": len(tl.spine),
@@ -446,12 +454,18 @@ def write_outputs(
     timelines = [rough] + ([stringout] if stringout and stringout.spine else [])
     event = event_name(name)
     xml = build_fcpxml(timelines, analysis, event_name=event, alternates=plan.alternates)
+    subtitles = captions_srt(rough, analysis, plan.spellings)
     report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
     page = report_page(report, title=f"{plan.title} - paper edit", subtitle=f"{rough.name} · event {event}")
     out_dir.mkdir(parents=True, exist_ok=True)
     versions.snapshot(out_dir, before=version)
     fcpxml_path = out_dir / f"{slug(name)} v{version}.fcpxml"
     atomic_write(fcpxml_path, xml)
+    captions_path = fcpxml_path.with_suffix(".srt")
+    if subtitles:
+        atomic_write(captions_path, subtitles)
+    elif captions_path.is_file():  # an interim write of this version had some; this cut has none
+        captions_path.unlink()
     atomic_write(out_dir / "plan.json", json.dumps({**record, "version": version}, indent=1))
     report_path = out_dir / "edit_report.md"
     atomic_write(report_path, report)
@@ -462,6 +476,7 @@ def write_outputs(
             "n": version,
             "command": command,
             "fcpxml": fcpxml_path.name,
+            **({"captions": captions_path.name, "files": [fcpxml_path.name, captions_path.name]} if subtitles else {}),
             "project": rough.name,
             "stringout_project": stringout.name if stringout is not None and stringout.spine else None,
             "event": event,

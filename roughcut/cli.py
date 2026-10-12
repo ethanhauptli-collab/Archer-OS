@@ -748,6 +748,8 @@ def _run(args, json_mode: bool) -> int:
     for line in summary_lines(result.summary):
         print(line)
     print(f"FCPXML:    {result.fcpxml}")
+    if result.captions:
+        print(f"Captions:  {result.captions}  (in Final Cut, with the project open: File > Import > Captions)")
     print(f"Report:    {result.report.with_suffix('.html')}  (Markdown: {result.report.name})")
     preview = result.out_dir / "graphics" / "preview.html"
     if any(c.kind == "graphic" for c in tl.connected) and preview.is_file():

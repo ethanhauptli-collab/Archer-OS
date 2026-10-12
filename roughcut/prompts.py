@@ -71,6 +71,10 @@ would want), add a flag. Flags become to-do markers in Final Cut.
 9. Use only IDs that appear in the inventory. Each segment can be used once, and so can each line: \
 the same words from another read or another export of a promo play only once (a later repeat is \
 dropped).
+10. Spellings: the transcript is speech recognition and often misspells names. When the brief, \
+script or file names spell a name the transcript gets wrong (a person, business, place or brand), \
+add {"heard": the words exactly as the transcript has them, "correct": the right spelling}. They \
+fix the captions. Only names you can confirm from what you were given; never guess.
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.

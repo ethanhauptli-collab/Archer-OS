@@ -115,8 +115,21 @@ PLAN_SCHEMA: dict = {
             },
         },
         "cut_notes": {"type": "string", "description": "What was left out and why, briefly."},
+        "spellings": {
+            "type": "array",
+            "description": "Names the transcript misspells, as the brief, script or file names spell them. Fix the captions.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heard": {"type": "string", "description": "The words exactly as the transcript has them, e.g. 'Roy Choy'."},
+                    "correct": {"type": "string", "description": "The right spelling, e.g. 'Roy Choi'."},
+                },
+                "required": ["heard", "correct"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["title", "logline", "sections", "alternates", "flags", "music", "cut_notes"],
+    "required": ["title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings"],
     "additionalProperties": False,
 }
 
@@ -221,6 +234,7 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     graphics: list[GraphicSpec] = field(default_factory=list)
     target_seconds: float | None = None  # the length the brief asked for (not the model's)
+    spellings: list[dict] = field(default_factory=list)  # {"heard", "correct"}: names the transcript gets wrong
 
     def to_json(self) -> dict:
         return {
@@ -249,7 +263,30 @@ class Plan:
             "warnings": self.warnings,
             "graphics": [asdict(g) for g in self.graphics],
             "target_seconds": self.target_seconds,
+            "spellings": self.spellings,
         }
+
+
+def _spelling_tokens(text: str) -> list[str]:
+    return [t for t in (re.sub(r"[^\w]", "", w.lower()) for w in text.split()) if t]
+
+
+def _spellings(raw, analysis: Analysis) -> list[dict]:
+    """The planner's name fixes that name words the transcript really has (and change them)."""
+    spoken = " " + " ".join(
+        " ".join(_spelling_tokens(seg.text)) for c in analysis.clips for seg in c.segments
+    ) + " "
+    out: list[dict] = []
+    for fix in raw or []:
+        if not isinstance(fix, dict):
+            continue
+        heard, correct = str(fix.get("heard") or "").strip(), str(fix.get("correct") or "").strip()
+        tokens = _spelling_tokens(heard)
+        if not tokens or not correct or heard == correct or len(tokens) > 6:
+            continue
+        if f" {' '.join(tokens)} " in spoken or f" {' '.join(tokens)}s " in spoken:  # "Rousseau's" is "rousseaus"
+            out.append({"heard": heard, "correct": correct})
+    return out[:100]
 
 
 _RANGE = re.compile(r"^\s*([A-Za-z]\d+)\s*@\s*([\d:.]+)\s*[-–—]\s*([\d:.]+)\s*$")
@@ -352,6 +389,8 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
             plan.alternates.append({"chosen": kept, "others": [dropped], "note": "the same line from another read or export"})
         elif dropped not in alt["others"]:
             alt["others"].append(dropped)
+
+    plan.spellings = _spellings(raw.get("spellings"), analysis)
 
     for flag in raw.get("flags") or []:
         if isinstance(flag, dict) and flag.get("note"):

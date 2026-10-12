@@ -179,12 +179,17 @@ def finish(out_dir: Path, n: int, *, prune: bool = True) -> None:
     """After version n is written: take earlier cuts off the top level, then trim history."""
     found = entries(out_dir)
     keep_top = next((v.get("fcpxml") for v in found if v["n"] == n), None)
+    keep_subs = next((v.get("captions") for v in found if v["n"] == n), None)
     for v in found:
         if v["n"] >= n or not v.get("snapshot"):
             continue  # only files already safe in history/ leave the top level
         name = str(v.get("fcpxml") or "")  # the version's own cut, never another file that happened to be there
         path = out_dir / name
         if name and name != keep_top and path.suffix == ".fcpxml" and path.parent == out_dir and path.is_file():
+            path.unlink()
+        subs = str(v.get("captions") or "")  # and its captions
+        path = out_dir / subs
+        if subs and subs != keep_subs and path.suffix == ".srt" and path.parent == out_dir and path.is_file():
             path.unlink()
     if prune:
         prune_history(out_dir)

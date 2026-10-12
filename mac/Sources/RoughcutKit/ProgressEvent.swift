@@ -80,12 +80,15 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var reportHtml: String?
     /// The settings a re-cut of this version keeps unless it changes them (nil from older CLIs and older recent runs).
     public var cut: CutSettings?
+    /// `<name> vN.srt` beside the Final Cut file: the cut's captions (nil when nothing in it is spoken, or from older CLIs).
+    public var captions: String?
 
     /// No model planned this cut (`--provider none`, or the stringout fallback): `planned_by` names no "provider:model".
     public var madeWithoutAI: Bool { !plannedBy.contains(":") }
 
     public var outDirURL: URL { URL(fileURLWithPath: outDir, isDirectory: true) }
     public var fcpxmlURL: URL { URL(fileURLWithPath: fcpxml) }
+    public var captionsURL: URL? { captions.map { URL(fileURLWithPath: $0) } }
     public var reportURL: URL { URL(fileURLWithPath: report) }
 
     /// The paper edit to open: the web page when there is one.

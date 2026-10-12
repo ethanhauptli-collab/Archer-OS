@@ -45,6 +45,7 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertEqual(result.cut, CutSettings(style: "medium", format: nil, keepFillers: false, stringout: true))
         XCTAssertEqual(result.cut?.sequenceFormat, .auto)
         XCTAssertFalse(result.madeWithoutAI)
+        XCTAssertEqual(result.captionsURL?.lastPathComponent, "Trip v1.srt")  // beside "Trip v1.fcpxml"
     }
 
     func testUnknownStageStillDecodes() throws {
