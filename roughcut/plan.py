@@ -516,6 +516,37 @@ def chosen_takes(
     return {**raw, "alternates": _one_take({**raw, "alternates": alternates}, analysis, {}, [], keep=keep, avoided=avoided, played=played)["alternates"]}
 
 
+def as_played(raw: dict, sections, analysis: Analysis) -> dict:
+    """`raw`, a saved version's model plan, with each alternate's "chosen" the take that version played.
+
+    plan.json from before revisions saved the take that plays (`chosen_takes`) has the reviser's alternates as they
+    came, though notes that swapped takes, or a --keep, played another take; normalized again, re-cuts and the next
+    revision would undo that. An alternate whose chosen take isn't in `sections` (the version's saved plan) while
+    another of its takes is gets that one as chosen, with the old pick first among the others. Alternates saved as
+    they played, and odd shapes, are left as they are; `raw` isn't changed.
+    """
+    if not isinstance(raw.get("alternates"), list):
+        return raw
+    played = {
+        seg for s in sections if isinstance(s, dict) and isinstance(s.get("items"), list)
+        for seg in (_seg_ref(ref, analysis) for ref in s["items"]) if seg
+    } if isinstance(sections, list) else set()
+    alternates, chosen_before = [], set()
+    for alt in raw["alternates"]:
+        chosen = _seg_ref(alt.get("chosen"), analysis) if isinstance(alt, dict) else None
+        others = alt.get("others") if isinstance(alt, dict) and isinstance(alt.get("others"), list) else []
+        if chosen and chosen not in played:
+            # Not a take an earlier alternate chose: alternates that contradict each other stay as they are.
+            took = next((seg for seg in (_seg_ref(o, analysis) for o in others) if seg in played and seg not in chosen_before), None)
+            if took:
+                alt = {**alt, "chosen": took, "others": [chosen] + [o for o in others if _seg_ref(o, analysis) != took]}
+                chosen = took
+        if chosen:
+            chosen_before.add(chosen)
+        alternates.append(alt)
+    return {**raw, "alternates": alternates}
+
+
 def _retakes(alternates, analysis: Analysis, warnings: list[str]) -> list[dict]:
     """The planner's alternates, each {"chosen", "others", "note"} with known segment IDs, and as "others" only the
     takes that read the chosen line: a flub or another line listed there is left out (and left where it is in the cut)."""

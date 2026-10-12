@@ -673,6 +673,31 @@ def test_the_editors_avoid_and_keep_decide_which_take_of_a_line_plays(footage, t
     assert "V01.S00" not in _changes(out)
 
 
+def test_a_folder_saved_before_the_take_that_plays_was_recorded_re_cuts_and_revises_to_the_take_it_played(footage, tmp_path, fake, shared_cache):
+    """An older release saved the reviser's alternates as they came (V01.S003 chosen), though its revision played V01.S001:
+    notes that swapped the takes, or --keep V01.S001. Re-cuts and the next revision play the take that version played."""
+    for keep in ([], ["--keep", "V01.S001"]):
+        out = tmp_path / f"out{len(keep)}"
+        pipeline.build(_opts(footage, out, shared_cache))
+        fake.plan = _first_take_plan()
+        assert main(["revise", str(out), "Use the first take of the mountain line.", *keep]) == 0
+        assert _mountain_takes_in_cut(out) == ["V01.S001"]
+        # plan.json as that release wrote it: the model's alternates, and the take the revision played in the sections.
+        saved = json.loads((out / "plan.json").read_text())
+        saved["raw"]["alternates"] = saved["plan"]["alternates"] = [{"chosen": "V01.S003", "others": ["V01.S001"], "note": "second take is cleaner"}]
+        (out / "plan.json").write_text(json.dumps(saved, indent=1))
+        for style in ("tight", "medium"):
+            assert main(["render", str(out), "--style", style]) == 0
+            assert _mountain_takes_in_cut(out) == ["V01.S001"]
+        # The next revision is shown the cut as it played, so a reviser that keeps what it's shown keeps that take.
+        assert main(["revise", str(out), "Shorter wrap."]) == 0
+        previous = fake.calls[-1]["parts"][1].text.split("<previous_plan>", 1)[1].split("</previous_plan>", 1)[0]
+        assert '  V01.S001 "So today' in previous and '  V01.S003 "' not in previous
+        assert "Alternate: V01.S001 chosen over V01.S003" in previous
+        assert _mountain_takes_in_cut(out) == ["V01.S001"]
+        assert "V01.S00" not in _changes(out)
+
+
 def test_revising_a_cut_made_without_ai_plays_the_take_the_revision_chose(footage, tmp_path, monkeypatch, shared_cache):
     """The stringout played every take, so a revision with only the other take in its sections swapped nothing: the
     take its alternates chose plays, as a build would play it."""

@@ -348,6 +348,31 @@ def test_the_planners_alternates_decide_which_take_of_a_line_plays():
     assert "the take you use becomes that alternate's chosen one" in " ".join(REVISE_INSTRUCTION.split())
 
 
+def test_a_saved_plan_s_alternates_name_the_take_its_version_played():
+    """plan.json from before the take that plays was saved: the version played V01.S008 (a swap, a --keep), and the raw
+    plan's alternates still choose V01.S010. Rebuilt from it, the alternates choose what played."""
+    from roughcut.plan import as_played
+
+    a = _rundown()
+    played = [{"name": "Rundown", "items": ["V01.S007", "V01.S008", "V01.S011"]}]
+    raw = {"sections": [{"name": "Rundown", "items": ["V01.S007", "V01.S008"]}],
+           "alternates": [{"chosen": "V01.S010", "others": ["v01.s008"], "note": "Used the retake."}]}
+    assert as_played(raw, played, a)["alternates"] == [{"chosen": "V01.S008", "others": ["V01.S010"], "note": "Used the retake."}]
+    assert raw["alternates"][0]["chosen"] == "V01.S010"  # not changed in place
+    assert [i.ref for i in normalize(as_played(raw, played, a), a, source="m:x").sections[0].items] == ["V01.S007", "V01.S008"]
+    # Saved as it played (the chosen take played, or neither did): as it is.
+    for sections in ([{"name": "Rundown", "items": ["V01.S010"]}], [{"name": "Rundown", "items": ["V01.S007"]}]):
+        assert as_played(raw, sections, a) == raw
+    # Alternates that contradict each other: neither is turned around.
+    both = {"alternates": [{"chosen": "V01.S008", "others": ["V01.S010"]}, {"chosen": "V01.S010", "others": ["V01.S008"]}]}
+    assert as_played(both, played, a) == both
+    # Odd shapes are never fatal.
+    for odd in (None, "x", [None, "x", {"chosen": None}, {"chosen": "V01.S010", "others": "V01.S008"}, {"chosen": ["V01.S010"], "others": [None, 8]}]):
+        assert as_played({"alternates": odd}, played, a) == {"alternates": odd}
+    for sections in (None, "x", [None, {"items": "V01.S008"}]):
+        assert as_played(raw, sections, a) == raw
+
+
 def test_a_line_the_planner_lists_as_another_take_is_one_only_when_it_reads_that_line():
     """The live plan listed the "let me redo that" flub among the Dough Boy line's other takes. It isn't one: no Alt take
     keyword, marker or report line names it, and a plan that keeps it in the cut keeps it."""

@@ -17,7 +17,7 @@ from .captions import clean_spelling
 from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
-from .plan import Plan, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
+from .plan import Plan, as_played, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
 from .prompts import PLANNER_SYSTEM, own_words, pacing_choice, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
@@ -986,7 +986,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
     avoid = standing_avoids(revisions, analysis=analysis) if saved.get("raw") else []
     # A take the editor left out never plays in place of another take of its line.
-    plan = normalize(saved.get("raw") or saved["plan"], analysis, source=source, avoided=avoided_lines(avoid, analysis))
+    plan = normalize(_saved_model_plan(saved, analysis), analysis, source=source, avoided=avoided_lines(avoid, analysis))
     plan.target_seconds = saved["plan"].get("target_seconds") or settings.get("target_seconds")
     if saved.get("raw"):
         # The model's plan, as the revisions that made it left it: what the editor said to leave out stays out...
@@ -1150,6 +1150,14 @@ def _load_saved(out_dir: Path) -> tuple[Analysis, dict]:
             "so its segment IDs would point at the wrong clips. Run `roughcut build` again."
         )
     return analysis, saved
+
+
+def _saved_model_plan(saved: dict, analysis: Analysis) -> dict:
+    """What a saved version is rebuilt from: the model's plan, its alternates naming the takes that version played
+    (a folder saved before they were recorded), or, for a cut made without it, the saved plan."""
+    if not saved.get("raw"):
+        return saved["plan"]
+    return as_played(saved["raw"], saved["plan"].get("sections"), analysis)
 
 
 def _spec_key(spec) -> tuple:
@@ -1476,7 +1484,7 @@ def revise(
     history = [h for h in revisions if h.get("notes")]  # a revision may be only --keep/--avoid
     keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
     made_without = standing_avoids(revisions, analysis=analysis)
-    previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source, avoided=avoided_lines(made_without, analysis))
+    previous = normalize(_saved_model_plan(saved, analysis), analysis, source=source, avoided=avoided_lines(made_without, analysis))
     if made_without:
         # The cut as it was made: what earlier notes left out isn't in it (the model's own plan may still have it).
         enforce(previous, analysis, keep=[], avoid=made_without)
