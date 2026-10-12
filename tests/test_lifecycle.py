@@ -607,6 +607,11 @@ def _lines_played(out: Path) -> list[str]:
     return [i for s in json.loads((out / "plan.json").read_text())["plan"]["sections"] for i in s["items"] if ".S" in i]
 
 
+def _changes(out: Path) -> str:
+    """What the paper edit says the latest revision changed."""
+    return (out / "edit_report.md").read_text().split("Changes from v", 1)[1].split("\n## ", 1)[0]
+
+
 def _mountain_takes_in_cut(out: Path) -> list[str]:
     """The takes of the mountain line the latest version plays, from its paper edit (a re-cut keeps plan.json's plan)."""
     paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1].split("\n## ", 1)[0]
@@ -645,6 +650,27 @@ def test_the_editors_avoid_and_keep_decide_which_take_of_a_line_plays(footage, t
     fake.plan = plan
     assert main(["revise", str(out), "Keep the first take.", "--keep", "V01.S001"]) == 0
     assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+    # (e) A --keep naming both takes of the line, both in the revision: the chosen one plays, the other stays an
+    # alternate take, and the warnings say why. Re-cuts and the next revision play the same take.
+    out = tmp_path / "both"
+    pipeline.build(_opts(footage, out, shared_cache))
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan["sections"][1]["items"].insert(1, "V01.S001")
+    fake.plan = plan
+    assert main(["revise", str(out), "Keep both reads of the mountain line.", "--keep", "V01.S001,V01.S003"]) == 0
+    assert _mountain_takes_in_cut(out) == ["V01.S003"]
+    alternates = json.loads((out / "plan.json").read_text())["plan"]["alternates"]
+    assert [(alt["chosen"], alt["others"]) for alt in alternates] == [("V01.S003", ["V01.S001"])]
+    report = (out / "edit_report.md").read_text()
+    assert "You asked to keep" not in report
+    assert "--keep names V01.S003 and V01.S001, takes of one line: V01.S003 plays" in report
+    xml = (out / _top_fcpxml(out)[0]).read_text()
+    assert 'value="Alt take" note="V01.S001: another read of V01.S003' in xml and "You asked to keep" not in xml
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert _mountain_takes_in_cut(out) == ["V01.S003"]
+    assert main(["revise", str(out), "Shorter wrap."]) == 0
+    assert _mountain_takes_in_cut(out) == ["V01.S003"]
+    assert "V01.S00" not in _changes(out)
 
 
 def test_revising_a_cut_made_without_ai_plays_the_take_the_revision_chose(footage, tmp_path, monkeypatch, shared_cache):

@@ -320,8 +320,10 @@ def enforce(plan: Plan, analysis: Analysis, *, keep: list[str], avoid: list[str]
 
     in_cut = {i.seg_id for s in plan.sections for i in s.items if i.seg_id}
     clips_in_cut = {i.clip_id for s in plan.sections for i in s.items} | {b.clip_id for s in plan.sections for b in s.broll}
+    # A take kept with the chosen take of its line: the line plays, once, as that one (plan.normalize says so).
+    played_as = {o for alt in plan.alternates if alt["chosen"] in in_cut and alt["chosen"] in keep for o in alt["others"]}
     for token in keep:
-        present = token in in_cut if _SEG.match(token) else token in clips_in_cut
+        present = token in in_cut or token in played_as if _SEG.match(token) else token in clips_in_cut
         known = analysis.segment(token) is not None if _SEG.match(token) else analysis.clip(token) is not None
         if not known:
             result.warnings.append(f"--keep {token}: no such segment or clip in this footage")

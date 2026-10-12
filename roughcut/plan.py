@@ -585,7 +585,8 @@ def _one_take(
     as the take it chose, once. Dropped when the chosen take is in the cut too, else the chosen one goes in its place.
 
     The editor's constraints come first (`_take_to_play`): an other take that plays instead becomes the chosen one,
-    and the returned alternates say so. A take in `keep` is never dropped or replaced, and a chosen take `avoided`
+    and the returned alternates say so. A take in `keep` is never dropped or replaced (unless the chosen take of its
+    line is kept too: the line plays once, as that one, and the warnings say so), and a chosen take `avoided`
     leaves out never goes in place of another. Each other take -> the chosen one goes into `replaced`, so B-roll,
     flags and graphics on it follow. An alternate that contradicts an earlier one (choosing a take that one ruled
     out) is left alone. `raw["alternates"]` is `_retakes`'s; `raw` isn't changed.
@@ -614,7 +615,16 @@ def _one_take(
         ruled_out |= others
         if avoided(chosen):
             continue  # left out as asked: it replaces nothing
-        others -= set(keep)  # one the editor asked to keep stays
+        kept_too = [o for o in alt["others"] if o in others and o in keep]
+        if chosen in keep and kept_too:
+            # Kept twice over: the line still plays once, as the chosen take, and the other stays an alternate.
+            also = ", ".join(kept_too)
+            warnings.append(
+                f"--keep names {chosen} and {also}, takes of one line: {chosen} plays (the chosen take, alternates) so the "
+                f"line plays once, and {also} {'stays an alternate take' if len(kept_too) == 1 else 'stay alternate takes'}"
+            )
+        else:
+            others -= set(keep)  # one the editor asked to keep stays
         playing = chosen in in_cut
         for refs in items:
             for k, ref in enumerate(refs):
