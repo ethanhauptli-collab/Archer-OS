@@ -503,6 +503,24 @@ def test_revise_notes_set_pacing_and_punch_ins_as_the_reviser_reads_them(footage
     assert json.loads((out / "result.json").read_text())["cut"] == {"style": "loose", "format": None, "keep_fillers": False, "stringout": True, "punch_in": True}
 
 
+def test_the_reviser_reads_pacing_and_punch_ins_only_from_these_notes(footage, tmp_path, fake, shared_cache):
+    """The brief and earlier notes were applied already, and a re-cut since may have changed what they set: the cut's
+    settings are the editor's current choice, which only these notes can change."""
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, context="Tight cuts.", style="medium"))
+    pipeline.revise(out, "Make it looser.", Options(inputs=[]))
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    pipeline.revise(out, "Swap the hook.", Options(inputs=[]))
+    request = fake.calls[-1]["parts"][1].text
+    assert "<earlier_notes>\n- Make it looser.\n</earlier_notes>" in request
+    settings = request.split("<cut_settings>")[1].split("</cut_settings>")[0]
+    assert "tight pacing" in settings and "the editor's current choice" in settings
+    assert "unspecified unless these notes ask to change" in settings
+    instruction = request.split("</editor_notes>")[1]
+    assert "only from <editor_notes>, never from the brief or <earlier_notes>" in instruction
+    assert "applied already" not in request
+
+
 def test_revise_keeps_earlier_notes_in_play(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache))

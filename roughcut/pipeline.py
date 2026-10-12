@@ -18,7 +18,7 @@ from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
-from .prompts import PLANNER_SYSTEM, own_words, render_brief, render_media
+from .prompts import PLANNER_SYSTEM, own_words, pacing_choice, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
 from .report_html import report_page
@@ -405,14 +405,14 @@ def settings_from_plan(opts: Options, plan: Plan) -> Options:
     if opts.punch_in is None:
         if by_model:
             asked = {"on": True, "off": False}.get(plan.punch_ins)
-            why = "the brief asks for it" if asked else "the brief turns them down"
+            why = {True: "the brief asks for it", False: "the brief turns them down"}.get(asked, "the brief doesn't ask for them at the jump cuts")
         else:
             asked, words = read_punch_in(opts.context, opts.preset_brief)
             why = f'the brief says "{words}"'
         opts = replace(opts, punch_in=bool(asked))
         if asked:
             log(f"punching in on jump cuts ({why})")
-        elif asked is False:  # said either way, so a misreading shows
+        elif asked is False or by_model:  # said either way, so a misreading shows ("punch in on Roy's face" is a one-off)
             log(f"not punching in ({why})")
     return opts
 
@@ -602,13 +602,20 @@ def media_part(analysis: Analysis, style: Style) -> TextPart:
     return TextPart("<media>\n" + render_media(analysis, style) + "\n</media>", cache=True)
 
 
-def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
-    parts = [
-        media_part(analysis, style_for(opts)),
-        TextPart(render_brief(
-            opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style, preset_brief=opts.preset_brief,
-        )),
-    ]
+def planner_brief(analysis: Analysis, opts: Options) -> str:
+    """The brief part of the planning request. With Auto pacing the media block shows kept lengths at medium,
+    and the planner is told what tight and loose make of them, to plan its length at the pacing it picks."""
+    pacing = ""
+    if opts.style not in STYLES:
+        pacing = pacing_choice(analysis, {name: style_for(replace(opts, style=name)) for name in STYLES})
+    return render_brief(
+        opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style, preset_brief=opts.preset_brief,
+        pacing=pacing,
+    )
+
+
+def plan_with_model(provider: Provider, analysis: Analysis, opts: Options, brief: str | None = None) -> tuple[Plan, dict]:
+    parts = [media_part(analysis, style_for(opts)), TextPart(brief if brief is not None else planner_brief(analysis, opts))]
     # Thinking counts against max_tokens; a long narration plan needs the room.
     raw = provider.complete_json(
         PLANNER_SYSTEM, parts, plan_schema(opts.graphics), schema_name="edit_plan", purpose="edit plan", effort=opts.effort, max_tokens=128000
@@ -805,10 +812,8 @@ def build(opts: Options) -> Result:
             timings["visual log"] = time.monotonic() - t
             visual_log = visual_coverage(analysis)
 
-    prompt = (
-        "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n"
-        + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style, preset_brief=opts.preset_brief)
-    )
+    brief = planner_brief(analysis, opts)
+    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n" + brief
 
     fell_back = False
     raw_plan = None
@@ -820,7 +825,7 @@ def build(opts: Options) -> Result:
         log(f"planning the edit with {provider.name}:{provider.model}")
         try:
             with progress.doing(f"planning the edit with {provider.model}"):
-                plan, raw_plan = plan_with_model(provider, analysis, opts)
+                plan, raw_plan = plan_with_model(provider, analysis, opts, brief)
         except ProviderAuthError:
             raise
         except ProviderLimitError as e:  # not a stringout that looks like a finished cut

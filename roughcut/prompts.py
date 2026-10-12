@@ -278,6 +278,41 @@ seconds at most, never two at once), and add none where the footage gives no goo
 </motion_graphics>"""
 
 
+GRAPHICS_OFF = """\
+<motion_graphics_off>
+This cut has no motion graphics (they are off for it; the editor adds any in Final Cut), so plan \
+none and don't describe any (lower thirds, titles, names or text on screen) in the logline, flags \
+or cut_notes. graphics_asked still says whether they are asked for.
+</motion_graphics_off>"""
+
+
+def pacing_choice(analysis: Analysis, styles: dict[str, "Style"]) -> str:
+    """For Auto pacing (the planner picks it): the media block shows kept lengths at medium, so say what tight
+    and loose make of them for this footage. `styles`: the run's tight, medium and loose (pipeline.style_for).
+
+    Deterministic for a given analysis, like the media block; "" when nothing is transcribed."""
+    from .timeline import kept_length
+
+    total = {
+        name: sum(kept_length(seg, clip, analysis, style)[0] for clip in analysis.clips if not clip.hidden and clip.has_transcript for seg in clip.segments)
+        for name, style in styles.items()
+    }
+    medium = total.get("medium") or 0.0
+    if medium <= 0 or "tight" not in total or "loose" not in total:
+        return ""
+
+    def change(seconds: float) -> str:
+        pct = round(100 * (seconds / medium - 1))
+        return "about the same" if pct == 0 else f"about {abs(pct)}% {'longer' if pct > 0 else 'shorter'}"
+
+    return (
+        "<pacing>\nYou pick the pacing (rule 11). The kept lengths in the media are at medium pacing: every line "
+        f"together keeps {seconds_to_clock(medium)}. For this footage, tight plays them {change(total['tight'])} "
+        f"({seconds_to_clock(total['tight'])}) and loose {change(total['loose'])} ({seconds_to_clock(total['loose'])}). "
+        "Plan the length at the pacing you pick: each line's kept length changes about the same way.\n</pacing>"
+    )
+
+
 def own_words(context: str, preset_brief: str) -> str:
     """The brief without the preset's part, which comes first."""
     context, preset_brief = (context or "").strip(), (preset_brief or "").strip()
@@ -286,8 +321,10 @@ def own_words(context: str, preset_brief: str) -> str:
 
 def render_brief(
     context: str, target_seconds: float | None, script: str | None, *, graphics: bool = False, graphics_style: str = "", preset_brief: str = "",
+    pacing: str = "",
 ) -> str:
-    """`preset_brief`: the preset's part of `context` (it comes first), shown apart so the editor's own words can win."""
+    """`preset_brief`: the preset's part of `context` (it comes first), shown apart so the editor's own words can win.
+    `pacing`: for Auto pacing, what tight and loose make of the kept lengths (`pacing_choice`)."""
     parts = []
     preset_brief = (preset_brief or "").strip()
     if preset_brief and (context or "").strip().startswith(preset_brief):
@@ -301,6 +338,8 @@ def render_brief(
         parts.append(f"<target_length>about {seconds_to_clock(target_seconds)} ({target_seconds:.0f} seconds)</target_length>")
     else:
         parts.append("<target_length>none given: keep everything that earns its place</target_length>")
+    if pacing:
+        parts.append(pacing)
     if script and script.strip():
         parts.append(
             "<script>\nThe editor's script, outline or reference transcript. Follow its structure and match "
@@ -310,5 +349,7 @@ def render_brief(
         parts.append(GRAPHICS_BRIEF)
         if graphics_style.strip():
             parts.append("<graphics_style>\n" + graphics_style.strip() + "\n</graphics_style>")
+    else:
+        parts.append(GRAPHICS_OFF)
     parts.append("Build the rough cut plan.")
     return "\n\n".join(parts)

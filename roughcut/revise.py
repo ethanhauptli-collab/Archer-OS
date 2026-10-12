@@ -26,12 +26,13 @@ unless a note says otherwise or a change forces it. Spellings you leave out stil
 notes say is wrong, return it with "correct" the same as "heard", and write that name in graphics' text as \
 heard. Earlier notes still apply. Return the complete revised plan in the same format, and in cut_notes say \
 briefly what you changed for these notes.
-For this revision, pacing, punch_ins and graphics_asked say what these notes ask for (the brief's were \
-applied already), read against <cut_settings>. pacing: the pacing the notes ask for, so from medium "make it \
+For this revision, read pacing, punch_ins and graphics_asked only from <editor_notes>, never from the brief \
+or <earlier_notes>: <cut_settings> is the editor's current choice, including any re-cut since the brief or the \
+earlier notes. pacing: the pacing these notes ask for, read against <cut_settings>, so from medium "make it \
 looser", "too tight" or "let him finish his thoughts" is loose, and "it drags", "speed it up" or "tighter \
 overall" is tight; a note about one moment ("a tighter hook") isn't about pacing. punch_ins: on when they ask \
-for punch-ins at the jump cuts, off when they ask to remove them. unspecified for either when the notes don't \
-ask to change it. graphics_asked: whether these notes ask for on-screen graphics, titles, names or text."""
+for punch-ins at the jump cuts, off when they ask to remove them. Return unspecified for either unless these \
+notes ask to change it. graphics_asked: whether these notes ask for on-screen graphics, titles, names or text."""
 
 
 def _snippet(text: str, n: int = 90) -> str:
@@ -98,7 +99,8 @@ def revision_request(
     brief = brief.removesuffix("Build the rough cut plan.").rstrip()
     settings = (
         f"This cut is at {style} pacing (tight, medium or loose: how hard pauses are trimmed), with punch-ins "
-        f"{'on' if punch_in else 'off'} and motion graphics {'on' if graphics else 'off'}."
+        f"{'on' if punch_in else 'off'} and motion graphics {'on' if graphics else 'off'}. This is the editor's current "
+        "choice: return pacing and punch_ins as unspecified unless these notes ask to change it."
     )
     parts = [brief, "<cut_settings>\n" + settings + "\n</cut_settings>", "<previous_plan>\n" + render_previous_plan(previous, analysis) + "\n</previous_plan>"]
     if earlier_notes:

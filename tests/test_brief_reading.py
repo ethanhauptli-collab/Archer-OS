@@ -63,13 +63,16 @@ def test_normalize_keeps_the_reading_and_tolerates_a_plan_without_it(footage, tm
     assert (odd.pacing, odd.punch_ins, odd.graphics_asked) == ("unspecified", "on", False)
 
 
+NO_PUNCH_INS_SAID = "not punching in (the brief doesn't ask for them at the jump cuts)"
+
+
 @pytest.mark.parametrize(
     "pacing, punch_ins, style, punch_in, said",
     [
         ("tight", "on", "tight", True, ["pacing: tight (the brief asks for it)", "punching in on jump cuts (the brief asks for it)"]),
         ("loose", "off", "loose", False, ["pacing: loose (the brief asks for it)", "not punching in (the brief turns them down)"]),
-        ("medium", "unspecified", "medium", False, ["pacing: medium (the brief asks for it)"]),
-        ("unspecified", "unspecified", "medium", False, ["pacing: medium (the brief doesn't say)"]),
+        ("medium", "unspecified", "medium", False, ["pacing: medium (the brief asks for it)", NO_PUNCH_INS_SAID]),
+        ("unspecified", "unspecified", "medium", False, ["pacing: medium (the brief doesn't say)", NO_PUNCH_INS_SAID]),
     ],
 )
 def test_auto_pacing_and_punch_ins_follow_the_planners_reading(footage, tmp_path, fake, capsys, pacing, punch_ins, style, punch_in, said):
@@ -83,8 +86,8 @@ def test_auto_pacing_and_punch_ins_follow_the_planners_reading(footage, tmp_path
     log = capsys.readouterr().err
     for line in said:
         assert line in log
-    if punch_ins == "unspecified":
-        assert "punching in" not in log
+    if punch_ins == "unspecified":  # said all the same, so a one-off reframe read as punch-ins (or not) shows
+        assert "punching in on" not in log
 
 
 def test_an_auto_build_shows_the_planner_kept_lengths_at_medium(footage, tmp_path, fake):
@@ -97,6 +100,32 @@ def test_an_auto_build_shows_the_planner_kept_lengths_at_medium(footage, tmp_pat
     analysis = Analysis.load(out / "analysis.json")
     assert sent == pipeline.media_part(analysis, STYLES["medium"]).text, "before the planner has read the brief, at medium"
     assert pipeline.style_for(pipeline.Options(inputs=[], style="auto")) == STYLES["medium"]
+
+
+def test_an_auto_build_tells_the_planner_what_tight_and_loose_make_of_the_kept_lengths(footage, tmp_path, fake):
+    """The kept lengths are shown at medium before the planner picks the pacing: it's told how much shorter tight and
+    how much longer loose play them for this footage, so it plans the target at the pacing it picks."""
+    from roughcut.analyze import Analysis
+    from roughcut.timeline import kept_length
+
+    fake.plan = _plan(pacing="loose", punch_ins="unspecified", graphics_asked=False)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", style="auto", target_seconds=12, context="Let it breathe."))
+    call = next(c for c in fake.calls if c["purpose"] == "edit plan")
+    analysis = Analysis.load(out / "analysis.json")
+    total = {n: sum(kept_length(seg, c, analysis, STYLES[n])[0] for c in analysis.clips if not c.hidden and c.has_transcript for seg in c.segments)
+             for n in STYLES}
+    brief = call["parts"][1].text
+    note = brief.split("<pacing>")[1].split("</pacing>")[0]
+    assert "kept lengths in the media are at medium pacing" in note and "at the pacing you pick" in note
+    assert f"about {round(100 * (1 - total['tight'] / total['medium']))}% shorter" in note
+    assert f"about {round(100 * (total['loose'] / total['medium'] - 1))}% longer" in note
+    assert brief.index("<target_length>") < brief.index("<pacing>") < brief.index("Build the rough cut plan.")
+    assert call["parts"][0].text == pipeline.media_part(analysis, STYLES["medium"]).text, "the cached media block is unchanged"
+    assert note in (out / "prompt.md").read_text()
+    # A pacing you pick: the kept lengths are already at it.
+    pipeline.build(_opts(footage, tmp_path / "o2", tmp_path / "c", style="loose", target_seconds=12))
+    assert "<pacing>" not in [c for c in fake.calls if c["purpose"] == "edit plan"][-1]["parts"][1].text
 
 
 def test_a_plan_without_the_reading_cuts_at_medium_without_punch_ins(footage, tmp_path, fake, capsys):
@@ -159,6 +188,30 @@ def test_the_planner_says_the_brief_asks_for_graphics_while_theyre_off(footage, 
     assert note in top, "at the top of the report, not only in its Warnings"
     assert note in printed.out, "at the end of the CLI's output"
     assert note in (out / "roughcut.log").read_text()
+
+
+def test_with_graphics_off_the_planner_is_told_this_cut_has_none(footage, tmp_path, fake):
+    """A brief that asks for lower thirds while graphics are off: the planner plans none and describes none in the
+    logline, flags or cut notes, and still says the brief asks for them (for the graphics-off note)."""
+    from roughcut.prompts import render_brief
+    from roughcut.revise import recover_brief
+
+    fake.plan = _plan(pacing="unspecified", punch_ins="unspecified", graphics_asked=True)
+    out = tmp_path / "out"
+    result = pipeline.build(_opts(footage, out, tmp_path / "c", context="List the restaurants and chefs with lower thirds."))
+    brief = next(c for c in fake.calls if c["purpose"] == "edit plan")["parts"][1].text
+    note = brief.split("<motion_graphics_off>")[1].split("</motion_graphics_off>")[0]
+    assert "no motion graphics" in note and "plan none" in note
+    assert "logline" in note and "flags" in note and "cut_notes" in note and "graphics_asked" in note
+    assert "<motion_graphics>" not in brief
+    assert any(w.startswith("The brief asks for graphics") for w in result.warnings), "graphics_asked still read from the brief"
+    # The reviser is told the same while they're off.
+    pipeline.revise(out, "Swap the hook.", pipeline.Options(inputs=[]))
+    assert "<motion_graphics_off>" in fake.calls[-1]["parts"][1].text
+    # On: the graphics brief, and no such note. An older folder's prompt reads as graphics off either way.
+    assert "<motion_graphics_off>" not in render_brief("b", None, None, graphics=True)
+    assert recover_brief("# Brief\n" + render_brief("b", None, None))["graphics"] is False
+    assert recover_brief("# Brief\n" + render_brief("b", None, None, graphics=True))["graphics"] is True
 
 
 def test_no_graphics_note_unless_the_planner_says_so_or_when_theyre_on(footage, tmp_path, fake, monkeypatch):
