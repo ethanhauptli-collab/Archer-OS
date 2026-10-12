@@ -270,12 +270,46 @@ def _fits(words: list[_Word], fps: float) -> bool:
     )
 
 
+_TITLE = re.compile(r"(?:^|\s)(?:Dr|Mr|Mrs|Ms|Mt|Ft)\.$", re.IGNORECASE)  # before a name: "Dr. Lee", "Mt. Baldy"
+
+
+def _ends_sentence(words: list[_Word], i: int) -> bool:
+    """Does `words[i]` end its sentence? Its punctuation says so, but an abbreviation's own period doesn't when the
+    sentence goes on: a lowercase word after it ("Roy Choi Jr. and his wife"), or a name after a title ("Dr. Lee")."""
+    text = words[i].text
+    if not text.endswith(SENTENCE_END):
+        return False
+    if not text.endswith(".") or text.endswith("..") or i + 1 >= len(words) or not _ABBREVIATION.search(text):
+        return True
+    after = re.sub(r"^\W+", "", words[i + 1].text)[:1]
+    return not (after.islower() or (after.isupper() and _TITLE.search(text)))
+
+
 def _rest_of_sentence(words: list[_Word], k: int, fps: float) -> list[_Word]:
     """`words[k]` and the rest of its sentence, up to a pause long enough to start a caption anyway."""
     end = k
-    while end + 1 < len(words) and not words[end].text.endswith(SENTENCE_END) and (words[end + 1].a - words[end].b) / fps < PAUSE:
+    while end + 1 < len(words) and not _ends_sentence(words, end) and (words[end + 1].a - words[end].b) / fps < PAUSE:
         end += 1
     return words[k : end + 1]
+
+
+def _few(words: list[_Word]) -> bool:
+    """Too little to stand as a caption of its own: three words at most, or under 20 characters."""
+    return len(words) <= 3 or len(" ".join(w.text for w in words)) < 20
+
+
+def _break_back(cur: list[_Word], rest: list[_Word], fps: float) -> int | None:
+    """Where the full caption `cur` ends instead when the rest of its sentence (`rest`) is only a word or two: after
+    `cur`'s last comma when what follows it and `rest` fit one caption, else where `cur` and `rest` split most evenly
+    into two that fit. Neither side is left with a few words alone. None when `rest` is longer, or nothing fits."""
+    if not _few(rest):
+        return None
+    splits = [m for m in range(1, len(cur)) if not _few(cur[:m]) and not _few(cur[m:] + rest) and _fits(cur[:m], fps) and _fits(cur[m:] + rest, fps)]
+    commas = [m for m in splits if cur[m - 1].text.endswith((",", ";", ":"))]
+    if commas:
+        return commas[-1]
+    size = lambda ws: len(" ".join(w.text for w in ws))  # noqa: E731
+    return min(splits, key=lambda m: abs(size(cur[:m]) - size(cur[m:] + rest)), default=None)
 
 
 def captions(tl: "Timeline", analysis: "Analysis", spellings: list[dict] | None = None) -> list[Caption]:
@@ -286,16 +320,22 @@ def captions(tl: "Timeline", analysis: "Analysis", spellings: list[dict] | None 
         cur = groups[-1] if groups else None
         if cur is not None:
             prev = cur[-1]
-            if (
-                (w.a - prev.b) / fps >= PAUSE
-                or prev.text.endswith(SENTENCE_END)
-                or not _fits(cur + [w], fps)
+            if (w.a - prev.b) / fps >= PAUSE or _ends_sentence(words, k - 1):
+                cur = None
+            elif not _fits(cur + [w], fps) or (
                 # Past one line, a comma starts the next caption, unless this one holds the rest of the sentence
                 # (no "closes it out." left on its own).
-                or (prev.text.endswith((",", ";", ":")) and len(" ".join(x.text for x in cur + [w])) > LINE_CHARS
-                    and not _fits(cur + _rest_of_sentence(words, k, fps), fps))
+                prev.text.endswith((",", ";", ":")) and len(" ".join(x.text for x in cur + [w])) > LINE_CHARS
+                and not _fits(cur + _rest_of_sentence(words, k, fps), fps)
             ):
-                cur = None
+                # Full. When the rest of the sentence is a word or two ("different." up on its own for a
+                # second), this caption ends earlier, so the next one holds them with the words before them.
+                m = _break_back(cur, _rest_of_sentence(words, k, fps), fps)
+                if m is None:
+                    cur = None
+                else:
+                    groups[-1], cur = cur[:m], cur[m:]
+                    groups.append(cur)
         if cur is None:
             groups.append([w])
         else:

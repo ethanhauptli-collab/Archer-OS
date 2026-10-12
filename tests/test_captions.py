@@ -344,6 +344,46 @@ def test_a_comma_never_leaves_the_end_of_a_sentence_alone_in_a_caption():
     assert all(len(line) <= captions.LINE_CHARS for *_, ls in cues(captions.srt(tl, a)) for line in ls)
 
 
+def _captioned(speech, spellings=()) -> list[str]:
+    a = Analysis(clips=[make_clip("V01", seconds=max(e for _, e, _ in speech) + 2, sentences=speech)])
+    plan = normalize({"sections": [{"name": "x", "items": [seg.id for seg in a.clips[0].segments], "broll": []}]}, a)
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t")
+    found = cues(captions.srt(tl, a, list(spellings)))
+    assert all(len(line) <= captions.LINE_CHARS for *_, ls in found for line in ls)
+    assert all(b - a <= captions.MAX_SECONDS for _, a, b, _ in found)
+    return [" ".join(ls) for *_, ls in found]
+
+
+def test_the_last_words_of_a_sentence_never_stand_alone_in_a_caption():
+    """A sentence just over two lines left its last word or two on their own ("different." for a second): the
+    break moves back, to a comma when the rest fits after it, else to where the sentence splits evenly."""
+    sentences = [
+        "Every corner you're gonna turn and there's gonna be a new chef doing something different.",
+        "Orange County has more than 3 million residents and no single universally recognized downtown.",
+        "Will this become a real destination for families, or will it stay somewhere people visit and leave?",
+        "The neighborhood got a brand new rooftop restaurant with a view of the whole harbor last summer.",
+    ]
+    for text in sentences:
+        found = _captioned([(1.0, 7.0, text)])
+        assert " ".join(found) == text and len(found) == 2, found
+        assert all(len(c.split()) > 3 for c in found), found
+    found = _captioned([(1.0, 7.0, sentences[2])])
+    assert found[0].endswith("families,")  # at the comma
+    found = _captioned([(1.0, 7.0, sentences[0])])
+    assert abs(len(found[0]) - len(found[1])) < 20  # evenly
+
+
+def test_an_abbreviation_inside_a_sentence_does_not_end_its_caption():
+    """"Roy Choi Jr." respelled from "Roy Choy junior" ends with a period, but the sentence goes on."""
+    fix = [{"heard": "Roy Choy junior", "correct": "Roy Choi Jr."}]
+    assert _captioned([(1.0, 4.0, "Meet Roy Choy junior and his wife today.")], fix) == ["Meet Roy Choi Jr. and his wife today."]
+    found = _captioned([(1.0, 7.0, "We stopped at the dessert bar on Main Street, run by Roy Choy junior and Mia, which closes it out.")], fix)
+    assert found == ["We stopped at the dessert bar on Main Street,", "run by Roy Choi Jr. and Mia, which closes it out."]
+    # A period that ends the sentence still ends the caption, and a title before a name never does.
+    assert _captioned([(1.0, 3.0, "Meet Roy Choy junior."), (3.2, 5.0, "He cooks.")], fix) == ["Meet Roy Choi Jr.", "He cooks."]
+    assert _captioned([(1.0, 3.0, "We met Dr. Lee today.")]) == ["We met Dr. Lee today."]
+
+
 def test_a_cut_word_with_a_few_milliseconds_of_sound_kept_is_not_captioned():
     """The retake after a kept line starts a few milliseconds before the piece's last frame ends: its first
     word is cut, so it isn't prepended to the next caption."""
