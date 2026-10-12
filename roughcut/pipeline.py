@@ -1144,7 +1144,8 @@ def _load_saved(out_dir: Path) -> tuple[Analysis, dict]:
 
 
 def _spec_key(spec) -> tuple:
-    return (spec.kind, spec.segment, " ".join(spec.words.lower().split()), spec.text.strip())
+    """What a design shows: a graphic whose text or subtext changed (a name spelled another way) is designed again."""
+    return (spec.kind, spec.segment, " ".join(spec.words.lower().split()), spec.text.strip(), spec.subtext.strip())
 
 
 def saved_house_style(out_dir: Path) -> str:
@@ -1518,14 +1519,15 @@ def revise(
             plan.spellings.append({"heard": h, "correct": c})
             heard.add(spelling_key(h))
     # One it undid or spelled another way comes off the graphics an earlier version respelled with it
-    # ("Up Mount Baldy" is "Up the mountain" again), before the ones in force go on.
+    # ("Up Mount Baldy" is "Up the mountain" again), before the ones in force go on; a name a pair in force
+    # spells keeps its spelling ("Chef Rémy Lovain" while "Rémy" alone is undone).
     in_force = {(spelling_key(f["heard"]), f["correct"]) for f in plan.spellings}
     dropped = []
     for fix in previous.spellings:
         h, c = clean_spelling(str(fix.get("heard") or ""), str(fix.get("correct") or ""))
         if h and c and h != c and (spelling_key(h), c) not in in_force:
             dropped.append({"heard": c, "correct": h})
-    respell_graphics(plan.graphics, dropped)
+    respell_graphics(plan.graphics, dropped, keep=plan.spellings)
     respell_graphics(plan.graphics, plan.spellings)
     if not plan.sections:
         raise RoughcutError("The revised plan had no usable sections, so nothing changed. Try the notes again, worded differently.")

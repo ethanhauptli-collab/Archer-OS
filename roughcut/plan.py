@@ -315,10 +315,11 @@ def spelling_key(heard: str) -> str:
     return " ".join(_spelling_tokens(clean_spelling(heard, heard)[0]))
 
 
-def respell_graphics(specs: list[GraphicSpec], spellings: list[dict]) -> None:
-    """Names on screen spelled as the brief spells them. A graphic's words stay as transcribed: they find it in the speech."""
+def respell_graphics(specs: list[GraphicSpec], spellings: list[dict], keep: list[dict] | None = None) -> None:
+    """Names on screen spelled as the brief spells them. A graphic's words stay as transcribed: they find it in the speech.
+    `keep`: pairs in force, whose right forms stay as they are (when `spellings` are undone pairs, reversed)."""
     for g in specs:
-        g.text, g.subtext = respell(g.text, spellings), respell(g.subtext, spellings)
+        g.text, g.subtext = respell(g.text, spellings, keep), respell(g.subtext, spellings, keep)
 
 
 def _spellings(raw, analysis: Analysis) -> list[dict]:

@@ -205,6 +205,60 @@ def test_a_spelling_copied_with_its_possessive_or_punctuation_is_written_once():
     assert _fixed("We met on Mane St today.", [{"heard": "Mane St", "correct": "Main St."}]) == "We met on Main St. today."
     assert _fixed("Then the US Grant.", [{"heard": "US Grant", "correct": "U.S. Grant."}]) == "Then the U.S. Grant."
     assert captions.clean_spelling("Acme Inc.", "Acme Inc.") == ("Acme Inc.", "Acme Inc.")  # the same: no fix
+    # Only an initialism's or a known short form's period is the name's own: a web address copied with the
+    # sentence's period loses it, and short forms beyond the first few keep theirs.
+    assert _fixed("Go to venture OC dot com today and see.", [{"heard": "venture OC dot com.", "correct": "ventureoc.com."}]) == "Go to ventureoc.com today and see."
+    assert _fixed("Order at Kogi BBQ dot com tonight.", [{"heard": "Kogi BBQ dot com", "correct": "KogiBBQ.com."}]) == "Order at KogiBBQ.com tonight."
+    assert _fixed("Acme corporation makes it.", [{"heard": "Acme corporation", "correct": "Acme Corp."}]) == "Acme Corp. makes it."
+    assert _fixed("Drive down Harbor boulevard tonight.", [{"heard": "Harbor boulevard", "correct": "Harbor Blvd."}]) == "Drive down Harbor Blvd. tonight."
+    assert _fixed("Warner brothers made it.", [{"heard": "Warner brothers", "correct": "Warner Bros."}]) == "Warner Bros. made it."
+    assert _fixed("Take Beach avenue home.", [{"heard": "Beach avenue", "correct": "Beach Ave."}]) == "Take Beach Ave. home."
+    assert _fixed("She got a PhD today.", [{"heard": "PhD", "correct": "Ph.D."}]) == "She got a Ph.D. today."
+    assert _fixed("Then the US Grant.", [{"heard": "US Grant", "correct": "U.S. Grant"}]) == "Then the U.S. Grant."
+
+
+def test_undoing_a_spelling_gives_the_name_back_as_heard_without_the_right_form_s_own_period():
+    """A revision that undoes a pair respells graphics with it reversed: the period of "Jr." or "Inc." is the
+    right form's own and goes with it, while a sentence's period after the name stays."""
+    for heard, correct, said in [
+        ("Roy Choy junior", "Roy Choi Jr.", "Meet Roy Choy junior tonight"),
+        ("Roy Choy junior", "Roy Choi Jr.", "Meet Roy Choy junior. He cooks."),
+        ("Roy Choy junior", "Roy Choi Jr.", "Roy Choy junior"),
+        ("Acme Ink", "Acme Inc.", "Acme Ink"),
+        ("Acme Ink", "Acme Inc.", "Acme Ink, owner"),
+        ("Mane St", "Main St.", "Owner (Mane St)"),
+        ("kogi", "Kogi BBQ Co.", "kogi"),
+        ("US Grant", "U.S. Grant", "Then the US Grant."),
+        ("Roy Choy", "Roy Choi", "Roy Choy's truck."),
+        ("the mountain", "Mount Baldy", "Up the mountain"),
+        ("Mount Baldy", "Mt. Baldy", "Mount Baldy"),
+    ]:
+        h, c = captions.clean_spelling(heard, correct)
+        shown = captions.respell(said, [{"heard": h, "correct": c}])
+        assert shown != said
+        assert captions.respell(shown, [{"heard": c, "correct": h}]) == said, (heard, correct, said)
+    # In what's said too: a misheard short form that ends a sentence keeps the sentence's period.
+    assert _fixed("Acme Inc. makes it. We love Acme Inc. So.", [{"heard": "Acme Inc.", "correct": "Acme Incorporated"}]) == (
+        "Acme Incorporated makes it. We love Acme Incorporated. So."
+    )
+
+
+def test_undoing_a_spelling_leaves_a_longer_name_that_is_still_spelled_alone():
+    """A pair undone inside the right form of a pair still in force: that name stays as the pair in force spells it."""
+    keep = [{"heard": "Chef Remy Lovan", "correct": "Chef Rémy Lovain"}]
+    assert captions.respell("Chef Rémy Lovain cooks", [{"heard": "Rémy", "correct": "Remy"}], keep=keep) == "Chef Rémy Lovain cooks"
+    assert captions.respell("Rémy cooks", [{"heard": "Rémy", "correct": "Remy"}], keep=keep) == "Remy cooks"
+    keep = [{"heard": "Kogi", "correct": "Kogi by Roy Choi"}]
+    shown = "Kogi by Roy Choi rules, says Roy Choi."
+    undone = captions.respell(shown, [{"heard": "Choi", "correct": "Choy"}], keep=keep)
+    assert undone == "Kogi by Roy Choi rules, says Roy Choy."
+    assert captions.respell(undone, keep) == undone  # not "Kogi by Roy Choi by Roy Choy"
+    # Through the plan's graphics, as a revision applies them.
+    from roughcut.plan import GraphicSpec, respell_graphics
+
+    specs = [GraphicSpec(kind="lower_third", segment="V01.S001", words="Remy", text="Chef Rémy Lovain", subtext="Rémy's kitchen")]
+    respell_graphics(specs, [{"heard": "Rémy", "correct": "Remy"}], keep=[{"heard": "Chef Remy Lovan", "correct": "Chef Rémy Lovain"}])
+    assert (specs[0].text, specs[0].subtext) == ("Chef Rémy Lovain", "Remy's kitchen")
 
 
 def test_a_name_with_a_filler_inside_it_is_still_fixed():

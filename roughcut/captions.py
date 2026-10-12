@@ -99,8 +99,11 @@ def _bare(word: str) -> tuple[str, str]:
 
 _PUNCT = ".,;:!?…"
 _POSSESSIVE = re.compile(r"['\u2019][sS]$")
-# The last word of a name whose period is its own: "Jr.", "Inc.", "St.", "U.S.".
-_ABBREVIATION = re.compile(r"(?:^|\s)(?:\S*\.\S+|Jr|Sr|Inc|Co|Ltd|St|Mt|Dr|Mr|Mrs|Ms)\.$", re.IGNORECASE)
+# The last word of a name whose period is its own: an initialism ("U.S.", "Ph.D.") or a short form ("Jr.", "Inc.",
+# "Blvd."). Not a web address or any other dotted word: "ventureoc.com." ends a sentence.
+_ABBREVIATION = re.compile(
+    r"(?:^|\s)(?:(?:[A-Za-z]{1,3}\.)+[A-Za-z]{1,3}|Jr|Sr|Inc|Co|Corp|Ltd|Bros|St|Ave|Blvd|Rd|Mt|Ft|Dr|Mr|Mrs|Ms|Esq)\.$", re.IGNORECASE
+)
 
 
 def _unpunctuated(text: str) -> str:
@@ -134,9 +137,11 @@ def _same(run: list[tuple[str, str]], name: list[tuple[str, str]]) -> bool:
     )
 
 
-def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, str]]:
+def _respelled(texts: list[str], spellings: list[dict], keep: list[dict] | None = None) -> list[tuple[int, int, str]]:
     """Each misheard name in `texts` (one word each): (its first word, past its last, the name as the brief
-    spells it, with a possessive the transcript gives it and what's around it: quote marks, brackets, punctuation)."""
+    spells it, with a possessive the transcript gives it and what's around it: quote marks, brackets, punctuation).
+
+    `keep`: pairs whose right forms stay as they are ("Chef Rémy Lovain" while an undone "Rémy" is reversed)."""
     from .transcribe import FILLERS
 
     fixes = []
@@ -144,37 +149,50 @@ def _respelled(texts: list[str], spellings: list[dict]) -> list[tuple[int, int, 
         heard, correct = clean_spelling(str(f.get("heard") or ""), str(f.get("correct") or ""))
         name = [b for b in map(_bare, heard.split()) if b[0] and b[0] not in FILLERS]  # captions leave out "um"
         if name and correct:
-            # A possessive the pair itself has ("Wahoo's" -> "Wahoos") replaces the transcript's.
-            fixes.append((name, [_bare(w) for w in correct.split()], correct, not name[-1][1] and not _POSSESSIVE.search(correct)))
+            # A possessive the pair itself has ("Wahoo's" -> "Wahoos") replaces the transcript's. A period
+            # `heard` ends with is its own ("Roy Choi Jr."), not the sentence's.
+            fixes.append((
+                name, [_bare(w) for w in correct.split()], correct, not name[-1][1] and not _POSSESSIVE.search(correct), heard.endswith("."),
+            ))
     fixes.sort(key=lambda f: -len(f[0]))  # longest first: "Chef Remy Lovan" before "Remy"
+    kept = [[_bare(w) for w in clean_spelling(str(f.get("heard") or ""), str(f.get("correct") or ""))[1].split()] for f in keep or []]
+    kept = sorted((run for run in kept if run), key=len, reverse=True)
     bare = [_bare(t) for t in texts]
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(texts):
-        for name, right, correct, possessive in fixes:
+        run = next((r for r in kept if _same(bare[i : i + len(r)], r)), None)
+        if run is not None:
+            i += len(run)  # spelled by a pair still in force: left as it is
+            continue
+        for name, right, correct, possessive, own_period in fixes:
             if len(right) > len(name) and _same(bare[i : i + len(right)], right):
                 i += len(right)  # already spelled out: "Golden Hour Bar" for "Golden Hour"
                 break
             if _same(bare[i : i + len(name)], name):
+                j = i + len(name)
                 lead = re.match(r"\W*", texts[i]).group()  # an opening quote mark or bracket
-                last = texts[i + len(name) - 1]
+                last = texts[j - 1]
                 tail = re.search(r"\W*$", last).group()  # punctuation, a closing quote mark or bracket
                 said = last[: len(last) - len(tail)]
                 text = correct + (said[-2] + "s" if possessive and _POSSESSIVE.search(said) else "")  # its own apostrophe
+                if own_period and tail.startswith(".") and not (j < len(texts) and re.sub(r"^\W+", "", texts[j])[:1].isupper()):
+                    tail = tail[1:]  # "Jr." mid-sentence or on its own: the period goes with the abbreviation
                 tail = tail[next((k for k in range(len(tail), 0, -1) if text.endswith(tail[:k])), 0) :]  # "Jr." then ".": once
-                out.append((i, i + len(name), lead + text + tail))
-                i += len(name)
+                out.append((i, j, lead + text + tail))
+                i = j
                 break
         else:
             i += 1
     return out
 
 
-def respell(text: str, spellings: list[dict]) -> str:
-    """`text` with each misheard name ("Roy Choy") spelled as the brief spells it ("Roy Choi"), its line breaks kept."""
+def respell(text: str, spellings: list[dict], keep: list[dict] | None = None) -> str:
+    """`text` with each misheard name ("Roy Choy") spelled as the brief spells it ("Roy Choi"), its line breaks kept.
+    `keep`: pairs in force whose right forms `spellings` mustn't change (undoing a pair inside a longer name)."""
     parts = re.split(r"(\s+)", text)
     words, gaps = parts[0::2], parts[1::2] + [""]  # each word and the space after it
-    found = _respelled(words, spellings)
+    found = _respelled(words, spellings, keep)
     if not found:
         return text
     out, at = [], 0

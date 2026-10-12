@@ -686,6 +686,74 @@ def test_a_revision_can_undo_a_name_spelling(footage, tmp_path, fake, shared_cac
     assert '"Up the mountain" / "A Long Day"' in previous and "Mount Baldy" not in previous
 
 
+def test_undoing_a_spelling_leaves_a_longer_name_a_pair_in_force_spells(footage, tmp_path, fake, shared_cache):
+    """The undone pair's right form inside a pair still in force ("Long Day" in "A Long Day Out") stays on the graphic."""
+    import copy
+
+    out = tmp_path / "out"
+    spellings = [{"heard": "long day", "correct": "Long Day"}, {"heard": "a long day", "correct": "A Long Day Out"}]
+    title = {**GRAPHIC, "segment": "V01.S004", "words": "a long day", "text": "a long day", "subtext": "long day ahead"}
+    fake.plan = {**copy.deepcopy(fake.plan), "spellings": spellings, "graphics": [title]}
+    pipeline.build(_opts(footage, out, shared_cache))
+    assert [(g["text"], g["subtext"]) for g in json.loads((out / "plan.json").read_text())["plan"]["graphics"]] == [("A Long Day Out", "Long Day ahead")]
+    shown = {**title, "text": "A Long Day Out", "subtext": "Long Day ahead"}
+    fake.plan = {**fake.plan, "spellings": [{"heard": "long day", "correct": "long day"}, spellings[1]], "graphics": [shown]}
+    pipeline.revise(out, "Long day isn't a name on its own.", Options(inputs=[]))
+    plan = json.loads((out / "plan.json").read_text())["plan"]
+    assert plan["spellings"] == spellings[1:]
+    assert [(g["text"], g["subtext"]) for g in plan["graphics"]] == [("A Long Day Out", "long day ahead")]
+
+
+class DesignsItsText(FakeProvider):
+    """Designs that show the text and subtext they were asked for, as a real designer's do."""
+
+    def complete_json(self, system, parts, schema, *, schema_name, **kw):
+        reply = super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+        if schema_name == "graphics":
+            asked = {g["id"]: g for g in json.loads(parts[-1].text.split("<graphics>")[1].split("</graphics>")[0])}
+            shows = {g: f'class="plate">{asked[g]["text"]} / {asked[g]["subtext"]} ' for g in asked}
+            reply = {**reply, "graphics": [{**g, "html": g["html"].replace('class="plate">', shows[g["id"]], 1)} for g in reply["graphics"]]}
+        return reply
+
+
+def test_a_name_in_a_graphic_s_subtext_is_designed_again_when_a_revision_undoes_or_adds_its_spelling(
+    footage, tmp_path, monkeypatch, shared_cache, clear_mov,
+):
+    """A rundown's lower third has the chef's name in its subtext. A revision that undoes its spelling, or adds one,
+    changes the subtext: the graphic is designed and rendered again, never shown with the earlier design's name."""
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    quote = {"kind": "quote", "segment": "V01.S005", "words": "asking about this trip for weeks", "text": "Weeks of asking",
+             "subtext": "— the kids", "seconds": 3, "direction": ""}
+    plan["graphics"], plan["spellings"] = [quote], [{"heard": "the kids", "correct": "the Kidd twins"}]
+    provider = DesignsItsText(plan)
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+
+    def designed() -> list[str]:
+        return [g["subtext"] for c in provider.calls if c["schema_name"] == "graphics"
+                for g in json.loads(c["parts"][-1].text.split("<graphics>")[1].split("</graphics>")[0])]
+
+    def manifest() -> dict:
+        return json.loads((out / "graphics.json").read_text())["graphics"][0]
+
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True))
+    assert designed() == ["— the Kidd twins"]
+    v1 = manifest()["file"]
+    # Undone: the reviser keeps the graphic as shown and returns the pair as heard.
+    provider.plan = {**plan, "spellings": [{"heard": "the kids", "correct": "the kids"}], "graphics": [{**quote, "subtext": "— the Kidd twins"}]}
+    pipeline.revise(out, "They're the kids, not the Kidd twins.", Options(inputs=[]))
+    assert designed() == ["— the Kidd twins", "— the kids"]
+    assert manifest()["subtext"] == "— the kids" and manifest()["file"] != v1
+    assert "the Kidd twins" not in (out / manifest()["html"]).read_text()
+    v2 = manifest()["file"]
+    # Added by a later revision: the graphic it keeps as it was gets the name as spelled, in a new design.
+    provider.plan = {**plan, "graphics": [quote]}
+    pipeline.revise(out, "It is the Kidd twins after all.", Options(inputs=[]))
+    assert designed() == ["— the Kidd twins", "— the kids", "— the Kidd twins"]
+    assert manifest()["subtext"] == "— the Kidd twins" and manifest()["file"] != v2
+
+
 def test_a_name_spelling_from_an_earlier_version_fixes_a_revision_s_graphics(footage, tmp_path, fake, shared_cache):
     import copy
 
