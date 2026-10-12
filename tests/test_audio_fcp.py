@@ -1035,10 +1035,33 @@ def test_a_clip_that_doesnt_fill_the_frame_is_not_punched_in():
     assert [sc.scale for sc in tl.spine] == [1.0, 1.0, 1.0] and tl.review.punched == 0
     assert len([m for m in tl.markers if m.kind == "todo" and m.value.startswith("Jump cut")]) == 2, "left as to-dos instead"
     lines = tl.review.lines(tl.frame_duration)
-    assert any(line.startswith("Not punched in: 2 of those cuts") and "letterboxed" in line for line in lines), lines
+    assert any(line.startswith("Not punched in: 2 of those cuts") and "letterboxed" in line and line.endswith("they're to-do markers") for line in lines), lines
     # The same shape at another size fills the frame: punched as usual.
     a, tl = _jumpy(format_override="4k")
     assert [sc.scale for sc in tl.spine][1] != 1.0 and tl.review.punched == 2
+
+
+def test_the_letterbox_note_says_only_what_was_marked(footage, tmp_path):
+    from roughcut.cli import main
+    from roughcut.timeline import MAX_JUMP_MARKERS
+
+    # A cut made without AI is all jump cuts, so none are marked: the note mustn't promise to-do markers.
+    out = tmp_path / "out"
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
+    assert main(["build", str(footage), "-o", str(out), "--format", "vertical", "--punch-in", *common]) == 0
+    report = (out / "edit_report.md").read_text()
+    line = next(ln for ln in report.splitlines() if "Not punched in:" in ln)
+    assert "to-do markers" not in line and "made without AI" in line, line
+    xml = next(out.glob("*.fcpxml")).read_text()
+    assert "Jump cut" not in xml and "adjust-transform" not in xml
+    # More letterboxed cuts than to-do markers: only the ones marked are called markers.
+    sentences = [(1.0 + 2 * i, 2.5 + 2 * i, f"Line number {i} is here.") for i in range(26)]
+    a = Analysis(clips=[make_clip("V01", seconds=60, sentences=sentences)])
+    plan = normalize({"sections": [{"name": "x", "items": [s.id for s in a.clips[0].segments[::2]], "broll": []}]}, a, source="fake:fake")
+    tl = build_timeline(plan, a, style=STYLES["tight"], name="t", punch_in=True, format_override="vertical")
+    assert tl.review.not_punched > MAX_JUMP_MARKERS
+    note = next(ln for ln in tl.review.lines(tl.frame_duration) if ln.startswith("Not punched in"))
+    assert f"{MAX_JUMP_MARKERS} of them are to-do markers" in note, note
 
 
 def test_a_cut_b_roll_covers_is_not_punched(tmp_path):

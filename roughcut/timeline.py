@@ -641,6 +641,9 @@ def build_timeline(
         _mark_bed_jumps(tl, analysis, warnings)
         _mark_jump_cuts(tl, tl.review, skip=punched)
         tl.markers.sort(key=lambda mk: mk.frame)
+        if punch_in:  # which of the cuts left as shot got a to-do (the most important ones do, up to MAX_JUMP_MARKERS)
+            todo = {m.frame for m in tl.markers if m.kind == "todo"}
+            tl.review.not_punched_marked = sum(1 for j in tl.review.jump_cuts if j.frame not in punched and j.frame in todo)
     _mix(tl, analysis, dialogue_level=dialogue_level, broll_db=broll_db, music_db=music_db)
     _duck_music(tl, analysis)
     _music_fades(tl, analysis)
@@ -1750,6 +1753,7 @@ class Review:
     repeated_stills: dict[str, int]  # clip ID -> times shown
     punched: int = 0  # jump cuts smoothed with a punch-in
     not_punched: int = 0  # with punch-ins on: jump cuts on a clip that doesn't fill the frame
+    not_punched_marked: int | None = None  # how many of those have a to-do marker; None: a cut made without AI marks none
 
     def length_line(self) -> str:
         line = tc.seconds_to_clock(self.seconds)
@@ -1777,9 +1781,18 @@ class Review:
                     "(Transform > Scale in the inspector; select the clips and reset Transform to undo)"
                 )
             if self.not_punched:
+                marked = self.not_punched_marked
+                if marked is None:
+                    said = "; a cut made without AI is all jump cuts, so none are marked"
+                elif marked == self.not_punched:
+                    said = "; they're to-do markers"
+                elif marked:
+                    said = f"; {marked} of them are to-do markers (the jump cuts that matter most get one, {MAX_JUMP_MARKERS} at most)"
+                else:
+                    said = ""
                 out.append(
                     f"Not punched in: {self.not_punched} of those cuts, on a clip letterboxed or pillarboxed in this format "
-                    "(the black bars would jump in size); they're to-do markers"
+                    f"(the black bars would jump in size){said}"
                 )
         else:
             out.append("Jump cuts on camera with no B-roll over them: none")
