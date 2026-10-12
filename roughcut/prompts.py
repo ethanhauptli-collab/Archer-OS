@@ -38,7 +38,8 @@ What a good first cut does
 or throat-clearing. Then build sections with a clear arc. Recording order is a sensible default, \
 not a rule; follow the brief.
 2. Retakes: when a line is delivered more than once, keep the best complete take (often the last) \
-and record the others in "alternates".
+and record the others in "alternates": "chosen" is the take in your sections, and the others stay \
+out of them (an other take in the sections is replaced by the chosen one).
 3. Cut false starts, fragments that trail off, repeated phrases, "is it recording?", camera and \
 setup talk, and off-topic chatter. If the brief asks for a candid or raw feel, keep genuine \
 unscripted moments.

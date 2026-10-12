@@ -362,6 +362,8 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     # The same line from another read or export plays once. Not in the stringout (`render` of a
     # --provider none run): it plays everything by design, and re-rendering must give the same cut.
     lines = _UsedLines(analysis, enabled=source != "heuristic")
+    if lines.enabled:
+        raw = _one_take(raw, analysis, lines.replaced, warnings)  # and a retake as the planner's own alternates say
     # Every line the plan uses, in order: a sentence that holds a used line and more is a repeat
     # only when the rest is in the cut too, maybe further on.
     planned = [
@@ -432,7 +434,7 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
 
     for alt in raw.get("alternates") or []:
         if isinstance(alt, dict) and analysis.segment(str(alt.get("chosen", ""))):
-            others = [o for o in alt.get("others") or [] if analysis.segment(str(o))]
+            others = [o for o in alt.get("others") if analysis.segment(str(o))] if isinstance(alt.get("others"), list) else []
             plan.alternates.append({"chosen": alt["chosen"], "others": others, "note": str(alt.get("note") or "")})
     for dropped, kept in lines.replaced.items():
         alt = next((a for a in plan.alternates if a["chosen"] == kept), None)
@@ -489,6 +491,50 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
     respell_graphics(plan.graphics, plan.spellings)
     plan.warnings = warnings
     return plan
+
+
+def _seg_ref(ref, analysis: Analysis) -> str | None:
+    m = _SEG.match(str(ref))
+    seg_id = f"{m.group(1).upper()}.{m.group(2).upper()}" if m else ""
+    return seg_id if seg_id and analysis.segment(seg_id) else None
+
+
+def _one_take(raw: dict, analysis: Analysis, replaced: dict[str, str], warnings: list[str]) -> dict:
+    """`raw` with its sections as its own alternates say: a take the planner lists among a line's "others" plays
+    as the take it chose, once. Dropped when the chosen take is in the cut too, else the chosen one goes in its place.
+
+    Each other take -> the chosen one goes into `replaced`, so B-roll, flags and graphics on it follow. An
+    alternate that contradicts an earlier one (choosing a take that one ruled out) is left alone. `raw` isn't changed.
+    """
+    sections = [dict(s, items=list(s["items"]) if isinstance(s.get("items"), list) else []) if isinstance(s, dict) else s
+                for s in raw.get("sections") or []]
+    items = [s["items"] for s in sections if isinstance(s, dict)]
+    chosen_before: set[str] = set()
+    ruled_out: set[str] = set()
+    for alt in raw.get("alternates") or []:
+        chosen = _seg_ref(alt.get("chosen"), analysis) if isinstance(alt, dict) else None
+        if chosen is None or chosen in ruled_out:
+            continue
+        listed = alt.get("others") if isinstance(alt.get("others"), list) else []
+        others = {o for o in (_seg_ref(o, analysis) for o in listed) if o and o != chosen and o not in chosen_before}
+        chosen_before.add(chosen)
+        ruled_out |= others
+        playing = any(_seg_ref(ref, analysis) == chosen for refs in items for ref in refs)
+        for refs in items:
+            for k, ref in enumerate(refs):
+                other = _seg_ref(ref, analysis)
+                if other not in others:
+                    continue
+                replaced[other] = chosen
+                if playing:
+                    refs[k] = None
+                    warnings.append(f"{other} is another take of {chosen}, which the plan chose (alternates); dropped, so the line plays once")
+                else:
+                    refs[k], playing = chosen, True
+                    warnings.append(f"{other} is another take of {chosen}, which the plan chose (alternates); {chosen} plays in its place")
+    for refs in items:
+        refs[:] = [ref for ref in refs if ref is not None]
+    return {**raw, "sections": sections}
 
 
 class _UsedLines:

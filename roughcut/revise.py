@@ -22,7 +22,8 @@ REVISE_INSTRUCTION = """\
 This cut has already been made, and the editor watched it in Final Cut Pro. Revise the previous plan \
 according to the editor's notes. Change only what the notes ask for. Keep everything else exactly as \
 it was: the same sections, segments and order, B-roll, music, alternates, flags, graphics and spellings, \
-unless a note says otherwise or a change forces it. Spellings you leave out still apply; to undo one the \
+unless a note says otherwise or a change forces it. When a note swaps one take of a line for another, the \
+take you use becomes that alternate's chosen one. Spellings you leave out still apply; to undo one the \
 notes say is wrong, return it with "correct" the same as "heard", and write that name in graphics' text as \
 heard. Earlier notes still apply. Return the complete revised plan in the same format, and in cut_notes say \
 briefly what you changed for these notes.

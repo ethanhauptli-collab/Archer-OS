@@ -278,6 +278,71 @@ def test_a_shared_line_across_unrelated_clips_is_dropped_only_when_long():
     assert len(normalize({"sections": [{"name": "x", "items": ["V01.S002", "V01.S003"]}]}, one).sections[0].items) == 2
 
 
+def _rundown():
+    """A restaurant rundown read to camera, with a retake: S008 and S010 are the same line, "let me redo that" between."""
+    lines = [
+        "First up, Kogi is Roy Choi's truck.", "It started the whole movement.", "Then Golden Hour for the sunset.",
+        "The bar sits right on the sand.", "Next is Sushi Kaze.", "Chef Kenji Tanaka does omakase.", "Now for pizza.",
+        "Dough Boy Pizza comes from Marco Belini.", "Wait, let me redo that.", "Dough Boy Pizza comes from Marco Belini.",
+        "That's the list for this year.",
+    ]
+    speech = [(1.0 + 3 * n, 3.4 + 3 * n, text) for n, text in enumerate(lines)]
+    return Analysis(clips=[make_clip("V01", seconds=40, sentences=speech), make_clip("V02", seconds=20)])
+
+
+def test_the_planners_alternates_decide_which_take_of_a_line_plays():
+    """The planner says it chose S010 over S008 (alternates) but its sections play both, or only S008: the line
+    plays once, as the take it says it chose."""
+    a = _rundown()
+    assert a.segment("V01.S008").text == a.segment("V01.S010").text
+    alternates = [{"chosen": "V01.S010", "others": ["V01.S008"], "note": "Used the retake."}]
+    # Both in the sections: the other take is dropped.
+    raw = {
+        "sections": [{"name": "Rundown", "items": ["V01.S001", "V01.S007", "V01.S008", "V01.S010", "V01.S011"], "broll": [
+            {"clip": "V02", "over": ["V01.S008"], "words": "Dough Boy Pizza", "source_in": -1, "reason": ""}]}],
+        "alternates": alternates,
+        "flags": [{"ref": "V01.S010", "note": "Used the retake. S008 and S009 are cut."}],
+    }
+    plan = normalize(raw, a, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S001", "V01.S007", "V01.S010", "V01.S011"]
+    assert any(w.startswith("V01.S008 is another take of V01.S010") for w in plan.warnings)
+    assert plan.sections[0].broll[0].over == ["V01.S010"]  # the shot on the line follows it to the take that plays
+    assert plan.alternates == [{"chosen": "V01.S010", "others": ["V01.S008"], "note": "Used the retake."}]
+    tl = build_timeline(plan, a, style=STYLES["medium"], name="t", fill=False)
+    assert "V01.S008" not in tl.seg_ranges and "V01.S010" in tl.seg_ranges
+    # Only the other in the sections: the chosen take plays in its place.
+    raw = {
+        "sections": [{"name": "Rundown", "items": ["V01.S001", "V01.S007", "V01.S008", "V01.S011"], "broll": []}],
+        "alternates": alternates,
+        "graphics": [{"kind": "lower_third", "segment": "V01.S008", "words": "Marco Belini", "text": "Marco Bellini", "subtext": "Dough Boy Pizza",
+                      "seconds": 3, "direction": ""}],
+    }
+    plan = normalize(raw, a, source="m:x")
+    assert [i.ref for i in plan.sections[0].items] == ["V01.S001", "V01.S007", "V01.S010", "V01.S011"]
+    assert any(w.startswith("V01.S008 is another take of V01.S010") and "in its place" in w for w in plan.warnings)
+    assert [g.segment for g in plan.graphics] == ["V01.S010"]
+    # More than one other take in the sections: the chosen one in the first one's place, the rest dropped.
+    raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S007", "V01.S009"]}],
+           "alternates": [{"chosen": "V01.S010", "others": ["V01.S008", "V01.S009", "V01.S010", "V01.S404"], "note": ""}]}
+    assert [i.ref for i in normalize(raw, a, source="m:x").sections[0].items] == ["V01.S010", "V01.S007"]
+    # Alternates that contradict each other don't swap a take back and forth.
+    raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S007"]}],
+           "alternates": [{"chosen": "V01.S010", "others": ["V01.S008"], "note": ""}, {"chosen": "V01.S008", "others": ["V01.S010"], "note": ""}]}
+    assert [i.ref for i in normalize(raw, a, source="m:x").sections[0].items] == ["V01.S010", "V01.S007"]
+    # The stringout plays everything, so `render` of a cut made without AI makes the same cut.
+    raw = {"sections": [{"name": "x", "items": ["V01.S008", "V01.S010"]}], "alternates": alternates}
+    assert [i.ref for i in normalize(raw, a, source="heuristic").sections[0].items] == ["V01.S008", "V01.S010"]
+    # Odd shapes from a model are still never fatal.
+    raw = {"sections": [{"name": "x", "items": "V01.S008"}, {"name": "y", "items": ["V01.S008"]}], "alternates": [{"chosen": "V01.S010", "others": 8}, "x"]}
+    assert [i.ref for s in normalize(raw, a, source="m:x").sections for i in s.items] == ["V01.S008"]
+    # The planner and the reviser are told which take "chosen" is, so a note that swaps takes isn't swapped back.
+    from roughcut.prompts import PLANNER_SYSTEM
+    from roughcut.revise import REVISE_INSTRUCTION
+
+    assert '"chosen" is the take in your sections' in " ".join(PLANNER_SYSTEM.split())
+    assert "the take you use becomes that alternate's chosen one" in " ".join(REVISE_INSTRUCTION.split())
+
+
 # ------------------------------------------------------------ T10: fillers and pacing
 
 
