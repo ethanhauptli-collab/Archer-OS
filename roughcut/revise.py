@@ -114,32 +114,64 @@ def split_ids(values: list[str]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _lifts(keep: str, avoid: str) -> bool:
-    """A --keep undoes an earlier --avoid of the same line, or of the clip (or the part of a clip) it's from.
+def _span(token: str, analysis: Analysis | None) -> tuple[float, float] | None:
+    """The seconds of its clip a line or range covers (None for a whole clip, or a line `analysis` can't find)."""
+    if m := _RANGE.match(token):
+        try:
+            a, b = float(m.group(2)), float(m.group(3))
+        except ValueError:
+            return None
+        return min(a, b), max(a, b)
+    seg = analysis.segment(token) if analysis is not None and _SEG.match(token) else None
+    return (seg.start, seg.end) if seg is not None else None
+
+
+def _lifts(keep: str, avoid: str, analysis: Analysis | None = None) -> bool:
+    """A --keep undoes an earlier --avoid only where they overlap: the same line, clip or range; a range of a
+    kept clip; a range that a kept line (its times from `analysis`) or range overlaps.
 
     A line left out by name stays out until it's kept by name: keeping its clip doesn't bring it back.
+    A line kept from a clip left out whole brings the whole clip back: a cut can't leave out all of a
+    clip but one line (`wide_lifts` says so).
     """
     if keep == avoid:
         return True
-    if _SEG.match(avoid):
+    if _SEG.match(avoid) or re.split(r"[.@]", keep, maxsplit=1)[0] != re.split(r"[.@]", avoid, maxsplit=1)[0]:
         return False
-    return re.split(r"[.@]", keep, maxsplit=1)[0] == re.split(r"[.@]", avoid, maxsplit=1)[0]
+    if _CLIP.match(keep):
+        return True
+    kept = _span(keep, analysis)
+    if kept is None:  # a line that isn't in the footage
+        return False
+    if _CLIP.match(avoid):
+        return True
+    left_out = _span(avoid, analysis)
+    return left_out is not None and kept[0] < left_out[1] and left_out[0] < kept[1]
 
 
-def standing_avoids(history: list, keep: list[str] | None = None) -> list[str]:
+def wide_lifts(avoids: list[str], keep: list[str], analysis: Analysis | None = None) -> list[str]:
+    """Warnings for a kept line or range that brings back a whole clip an earlier --avoid left out."""
+    return [
+        f"--keep {k} brings back all of {a}, which an earlier --avoid left out (a cut can't leave out a clip "
+        f"but one line of it); --avoid {a}@START-END leaves out the parts you still don't want"
+        for a in avoids if _CLIP.match(a) for k in keep if k != a and _lifts(k, a, analysis)
+    ]
+
+
+def standing_avoids(history: list, keep: list[str] | None = None, *, analysis: Analysis | None = None) -> list[str]:
     """Every --avoid of the revisions in `history` (plan.json's notes_history, oldest first) still in force.
 
     What the editor said to leave out stays out of every later version and re-cut, until a later
-    --keep (an entry's own, or `keep`: this run's) names it again.
+    --keep (an entry's own, or `keep`: this run's) overlaps it (`_lifts`).
     """
     out: list[str] = []
     for entry in history:
         if not isinstance(entry, dict):
             continue
         lifted = split_ids([str(k) for k in entry.get("keep") or []])
-        out = [a for a in out if not any(_lifts(k, a) for k in lifted)]
+        out = [a for a in out if not any(_lifts(k, a, analysis) for k in lifted)]
         out += [a for a in split_ids([str(a) for a in entry.get("avoid") or []]) if a not in out]
-    return [a for a in out if not any(_lifts(k, a) for k in keep or [])]
+    return [a for a in out if not any(_lifts(k, a, analysis) for k in keep or [])]
 
 
 @dataclass

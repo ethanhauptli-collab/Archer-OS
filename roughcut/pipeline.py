@@ -1011,7 +1011,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
 
         # The model's plan, as the revisions that made it left it: what the editor said to leave out stays out...
         revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
-        avoid = standing_avoids(revisions)
+        avoid = standing_avoids(revisions, analysis=analysis)
         if avoid:
             enforce(plan, analysis, keep=[], avoid=avoid)
         # ...and a line the last one was asked to keep and left out keeps its to-do marker, where that revision put it.
@@ -1424,7 +1424,7 @@ def revise(
     The planner sees the build's system prompt and media block (prompt-cached),
     the previous plan and the notes. Arguments left as None come from the saved run.
     """
-    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids, standing_avoids
+    from .revise import describe_changes, enforce, recover_brief, report_block, revision_request, split_ids, standing_avoids, wide_lifts
 
     t_start = time.monotonic()
     out_dir = out_dir.expanduser().resolve()
@@ -1479,7 +1479,7 @@ def revise(
     history = [h for h in revisions if h.get("notes")]  # a revision may be only --keep/--avoid
     keep_ids, avoid_ids = split_ids(keep or []), split_ids(avoid or [])
     previous = normalize(saved.get("raw") or saved["plan"], analysis, source=source)
-    made_without = standing_avoids(revisions)
+    made_without = standing_avoids(revisions, analysis=analysis)
     if made_without:
         # The cut as it was made: what earlier notes left out isn't in it (the model's own plan may still have it).
         enforce(previous, analysis, keep=[], avoid=made_without)
@@ -1487,7 +1487,10 @@ def revise(
     _shown_texts(previous.graphics, saved)
     respell_graphics(previous.graphics, previous.spellings)
     # Everything the editor has said to leave out, in these notes or earlier ones, unless these notes keep it.
-    leave_out = standing_avoids(revisions + [{"keep": keep_ids, "avoid": avoid_ids}])
+    leave_out = standing_avoids(revisions + [{"keep": keep_ids, "avoid": avoid_ids}], analysis=analysis)
+    for note in wide_lifts(made_without, keep_ids, analysis):
+        log(note)
+        extra_warnings.append(note)
     request = revision_request(
         previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
         graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,

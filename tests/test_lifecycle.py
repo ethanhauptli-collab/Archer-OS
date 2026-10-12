@@ -555,20 +555,66 @@ def test_an_avoid_lasts_through_later_revisions_until_a_keep_lifts_it(footage, t
     assert "V01.S006" in paper and "V02" not in paper
 
 
+class _Lines:
+    """Just enough of an Analysis for standing_avoids: where each line is."""
+
+    def __init__(self, spans: dict[str, tuple[float, float]]):
+        self.spans = spans
+
+    def segment(self, seg_id: str):
+        from types import SimpleNamespace
+
+        span = self.spans.get(seg_id)
+        return SimpleNamespace(id=seg_id, start=span[0], end=span[1]) if span else None
+
+
 def test_standing_avoids_last_until_a_keep_names_them():
-    from roughcut.revise import standing_avoids
+    from roughcut.revise import standing_avoids, wide_lifts
 
     history = [
         {"notes": "a", "keep": [], "avoid": ["V01.S006", "V02@0-4", "V03"]},
         {"notes": "b", "keep": ["V01.S006"], "avoid": ["V01.S002"]},
         {"notes": "c", "keep": [], "avoid": ["V01.S006"]},  # left out again
     ]
+    lines = _Lines({"V02.S001": (2.0, 3.5), "V02.S002": (4.5, 6.0), "V03.S001": (0.0, 2.0)})
     assert standing_avoids(history) == ["V02@0-4", "V03", "V01.S002", "V01.S006"]
-    # A kept line or clip lifts an avoid of that line, or of the clip (or part of the clip) it's from; keeping a clip
-    # doesn't bring back a line of it that was left out by name.
-    assert standing_avoids(history, ["V02.S001", "V01"]) == ["V03", "V01.S002", "V01.S006"]
+    # A kept clip lifts every avoid of it but a line left out by name; a kept line or range lifts a range it overlaps.
+    assert standing_avoids(history, ["V02", "V01"], analysis=lines) == ["V03", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V02.S001"], analysis=lines) == ["V03", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V02@3.5-5"], analysis=lines) == ["V03", "V01.S002", "V01.S006"]
+    # ...and nothing it doesn't: another part of the clip, or a line it can't place.
+    assert standing_avoids(history, ["V02.S002", "V02@4-6", "V01.S005"], analysis=lines) == ["V02@0-4", "V03", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V02.S001"]) == ["V02@0-4", "V03", "V01.S002", "V01.S006"]
+    # A line of a clip left out whole brings the clip back (a cut can't leave out all of a clip but one line), and says so.
     assert standing_avoids(history, ["V03"]) == ["V02@0-4", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V03.S001"], analysis=lines) == ["V02@0-4", "V01.S002", "V01.S006"]
+    assert standing_avoids(history, ["V03.S009"], analysis=lines) == ["V02@0-4", "V03", "V01.S002", "V01.S006"]  # no such line
+    said = wide_lifts(standing_avoids(history), ["V03.S001", "V03.S009", "V01.S002", "V02"], lines)
+    assert len(said) == 1 and said[0].startswith("--keep V03.S001 brings back all of V03")
     assert standing_avoids([{"notes": "old folder"}, "junk"]) == []
+
+
+def test_a_keep_lifts_only_the_avoids_it_overlaps(footage, tmp_path, fake, shared_cache):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache))
+
+    def items() -> list[str]:
+        return [i for s in json.loads((out / "plan.json").read_text())["plan"]["sections"] for i in s["items"]]
+
+    assert main(["revise", str(out), "Lose the second take.", "--avoid", "V01@6-8.1"]) == 0  # V01.S003 is at 6.5-8 s
+    assert "V01.S003" not in items()
+    # Keeping a line at 12-15 s says nothing about 6-8.1 s: on a single-camera shoot every line is in V01.
+    assert main(["revise", str(out), "Tighten the close.", "--keep", "V01.S005"]) == 0
+    assert "<leave_out>\nV01@6-8.1\n</leave_out>" in fake.calls[-1]["parts"][1].text
+    assert "V01.S003" not in items()
+    assert "Added **V01.S003**" not in (out / "edit_report.md").read_text()
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1].split("## Alternate", 1)[0]
+    assert "V01.S003" not in paper
+    # Keeping the line inside the range does lift it.
+    assert main(["revise", str(out), "Bring the second take back.", "--keep", "V01.S003"]) == 0
+    assert "<leave_out>" not in fake.calls[-1]["parts"][1].text
+    assert "V01.S003" in items()
 
 
 def test_name_spellings_last_through_revisions_and_re_cuts(footage, tmp_path, fake, shared_cache):
