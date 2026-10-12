@@ -78,6 +78,15 @@ after it, "correct": the right spelling of the same words, also without a posses
 punctuation after it}. They fix the captions and the names in graphics' text and subtext; a \
 graphic's words stay as the transcript has them. Only names you can confirm from \
 what you were given; never guess.
+11. Cut settings: the software trims the pauses and can punch in at jump cuts; say what the brief \
+asks for, read as the editor meant it. "pacing": tight for tight cuts, snappy, punchy or no dead \
+air; loose for let it breathe, slow or reflective; medium for a natural pace; unspecified when it \
+doesn't say ("not too tight" isn't tight, and "a tight deadline" or "tight shots" aren't about \
+pacing). "punch_ins": on only when it asks for punch-ins (alternating zooms) at the jump cuts \
+throughout, not for a one-off reframe of a moment; off when it turns them down; otherwise \
+unspecified. "graphics_asked": whether it asks for on-screen graphics, titles, names or text. When \
+there is a <preset_brief>, the editor's own <brief> wins where they differ, and only the editor's \
+own brief counts for graphics_asked.
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.
@@ -269,8 +278,24 @@ seconds at most, never two at once), and add none where the footage gives no goo
 </motion_graphics>"""
 
 
-def render_brief(context: str, target_seconds: float | None, script: str | None, *, graphics: bool = False, graphics_style: str = "") -> str:
+def own_words(context: str, preset_brief: str) -> str:
+    """The brief without the preset's part, which comes first."""
+    context, preset_brief = (context or "").strip(), (preset_brief or "").strip()
+    return context[len(preset_brief) :].strip() if preset_brief and context.startswith(preset_brief) else context
+
+
+def render_brief(
+    context: str, target_seconds: float | None, script: str | None, *, graphics: bool = False, graphics_style: str = "", preset_brief: str = "",
+) -> str:
+    """`preset_brief`: the preset's part of `context` (it comes first), shown apart so the editor's own words can win."""
     parts = []
+    preset_brief = (preset_brief or "").strip()
+    if preset_brief and (context or "").strip().startswith(preset_brief):
+        parts.append(
+            "<preset_brief>\nThe standing brief of the preset this video uses (its channel or brand). The editor's own brief "
+            "below adds to it and wins where they differ.\n\n" + preset_brief + "\n</preset_brief>"
+        )
+        context = own_words(context, preset_brief) or "No brief of its own: follow the preset's."
     parts.append("<brief>\n" + (context.strip() or "No brief given. Make the strongest cut the footage supports.") + "\n</brief>")
     if target_seconds:
         parts.append(f"<target_length>about {seconds_to_clock(target_seconds)} ({target_seconds:.0f} seconds)</target_length>")

@@ -129,10 +129,39 @@ PLAN_SCHEMA: dict = {
                 "additionalProperties": False,
             },
         },
+        # Cut settings the software applies, not the plan: what the brief asks for, as the editor meant it.
+        "pacing": {
+            "type": "string",
+            "enum": ["tight", "medium", "loose", "unspecified"],
+            "description": (
+                "How hard the brief asks for pauses to be trimmed. tight: tight cuts, snappy, punchy, fast-paced, no dead air. "
+                "loose: let it breathe, slow, reflective, unhurried. medium: a natural pace in between, or tight and loose both asked "
+                "for. unspecified: the brief doesn't say. 'Not too tight' is not tight; 'a tight deadline' or 'tight shots' aren't about pacing."
+            ),
+        },
+        "punch_ins": {
+            "type": "string",
+            "enum": ["on", "off", "unspecified"],
+            "description": (
+                "Punch-ins are alternating zooms at every jump cut the B-roll doesn't cover. on: the brief asks for them across the "
+                "cut ('punch in on the jump cuts', 'use punch-ins'). off: it turns them down. unspecified: otherwise, including a "
+                "one-off reframe of a moment ('punch in on Roy's face for the last line'), which is not on."
+            ),
+        },
+        "graphics_asked": {
+            "type": "boolean",
+            "description": (
+                "Whether the brief asks for on-screen graphics, titles, names or text (lower thirds, title cards, names on screen, "
+                "callouts, kinetic captions). false when it turns them down or doesn't mention them."
+            ),
+        },
     },
-    "required": ["title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings"],
+    "required": [
+        "title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings", "pacing", "punch_ins", "graphics_asked",
+    ],
     "additionalProperties": False,
 }
+PACINGS = ("tight", "medium", "loose")  # the plan's pacing when the brief says one ("unspecified" otherwise)
 
 
 @dataclass
@@ -236,6 +265,10 @@ class Plan:
     graphics: list[GraphicSpec] = field(default_factory=list)
     target_seconds: float | None = None  # the length the brief asked for (not the model's)
     spellings: list[dict] = field(default_factory=list)  # {"heard", "correct"}: names the transcript gets wrong
+    # What the planner read in the brief (or a reviser in the notes): Auto pacing and punch-ins follow it.
+    pacing: str = "unspecified"  # tight / medium / loose / unspecified
+    punch_ins: str = "unspecified"  # on / off / unspecified
+    graphics_asked: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -265,6 +298,9 @@ class Plan:
             "graphics": [asdict(g) for g in self.graphics],
             "target_seconds": self.target_seconds,
             "spellings": self.spellings,
+            "pacing": self.pacing,
+            "punch_ins": self.punch_ins,
+            "graphics_asked": self.graphics_asked,
         }
 
 
@@ -437,6 +473,13 @@ def normalize(raw: dict, analysis: Analysis, *, source: str = "", still_seconds:
         plan.music.append(MusicCue(clip.id, min(kept), max(kept), source_in))
 
     plan.cut_notes = str(raw.get("cut_notes") or "")
+    # A plan from before these were asked for (or a model that left them out) says nothing.
+    pacing = str(raw.get("pacing") or "").strip().lower()
+    plan.pacing = pacing if pacing in PACINGS else "unspecified"
+    punch = raw.get("punch_ins")
+    punch = ("on" if punch else "off") if isinstance(punch, bool) else str(punch or "").strip().lower()
+    plan.punch_ins = punch if punch in ("on", "off") else "unspecified"
+    plan.graphics_asked = raw.get("graphics_asked") is True
     graphics = [
         dict(g, segment=lines.replaced.get(str(g.get("segment") or "").strip().upper(), g.get("segment"))) if isinstance(g, dict) else g
         for g in raw.get("graphics") or []

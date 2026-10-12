@@ -450,32 +450,53 @@ def test_revise_replans_from_notes_with_the_builds_cached_prompt(footage, tmp_pa
     assert saved["settings"]["context"] == "Family trip" and saved["revision_of"] == 1
 
 
-def test_revise_notes_about_pacing_or_punch_ins_say_how_to_change_them(footage, tmp_path, fake, shared_cache):
-    # The planner can't change cut settings, so notes asking for them used to vanish without a word.
+def test_revise_notes_set_pacing_and_punch_ins_as_the_reviser_reads_them(footage, tmp_path, fake, shared_cache):
+    # The reviser reads the notes against the cut's settings and says what they ask for; that sets the new version's.
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache, context="Short and punchy.\n\nFamily trip", preset_brief="Short and punchy.", style="medium"))
+    fake.plan = dict(CANNED_PLAN, pacing="loose", punch_ins="on", graphics_asked=False)
     result = pipeline.revise(out, "Make it looser, let it breathe, and punch in on the jump cuts.", Options(inputs=[]))
+    request = fake.calls[-1]["parts"][1].text
+    assert "<cut_settings>" in request and "medium pacing" in request and "punch-ins off" in request and "motion graphics off" in request
+    assert "pacing" in request.split("<cut_settings>")[1] and "punch_ins" in request.split("</editor_notes>")[1]
     settings = json.loads((out / "plan.json").read_text())["settings"]
-    assert (settings["style"], settings["punch_in"]) == ("medium", False), "notes don't change cut settings"
+    assert (settings["style"], settings["punch_in"]) == ("loose", True)
     assert settings["preset_brief"] == "Short and punchy.", "which part of the brief is the preset's, kept"
-    pace = next(w for w in result.warnings if w.startswith("Your notes ask for loose pacing"))
-    punch = next(w for w in result.warnings if w.startswith("Your notes ask for punch-ins"))
-    assert '("looser")' in pace and "Re-cut" in pace and f"roughcut render {out} --style loose" in pace
-    assert '("punch in")' in punch and "Punch-ins On" in punch and f"roughcut render {out} --punch-in" in punch
+    assert result.project == "footage - Rough Cut v2 (loose, fake-model)"
+    assert json.loads((out / "result.json").read_text())["cut"]["punch_in"] is True
     block = result.report.read_text().split("## Revision notes")[1].split("Changes from v1")[0]
+    pace, punch = "Pacing: loose, as your notes ask (v1 was medium).", "Punch-ins: on, as your notes ask (v1 had none)."
     assert pace in block and punch in block, "in the revision block, next to the notes"
-    assert pace in (out / "roughcut.log").read_text()
+    log = (out / "roughcut.log").read_text()
+    assert pace in log and punch in log
+    assert not [w for w in result.warnings if w.startswith("Your notes ask for")], "done, so not a warning"
 
-    # Notes about the lines, or already true of the cut, say nothing.
-    for notes in ("tighter hook, drop the second interview line, more drone over the intro", "the punch-in on V03 looks soft, lose it",
-                  "Keep it medium paced.", "No punch-ins."):
-        result = pipeline.revise(out, notes, Options(inputs=[]))
-        assert not [w for w in result.warnings if w.startswith("Your notes ask for")], notes
+    # Notes about the lines leave the settings as they are; "remove the punch-ins" turns them off.
+    fake.plan = dict(CANNED_PLAN, pacing="unspecified", punch_ins="unspecified", graphics_asked=False)
+    result = pipeline.revise(out, "tighter hook, drop the second interview line", Options(inputs=[]))
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("loose", True)
+    assert "Pacing:" not in result.report.read_text() and "Punch-ins:" not in result.report.read_text()
+    fake.plan = dict(CANNED_PLAN, pacing="unspecified", punch_ins="off", graphics_asked=False)
+    result = pipeline.revise(out, "Remove the punch-ins, they look cheap.", Options(inputs=[]))
+    assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is False
+    assert "Punch-ins: off, as your notes ask (v3 had them)." in result.report.read_text()
+
+    # A flag given to revise wins over the notes, and says so.
+    fake.plan = dict(CANNED_PLAN, pacing="tight", punch_ins="on", graphics_asked=False)
+    assert main(["revise", str(out), "Speed it up, and punch in again.", "--style", "medium", "--no-punch-in"]) == 0
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("medium", False)
+    report = (out / "edit_report.md").read_text()
+    assert "Your notes ask for tight pacing, but --style medium was given, so this version is medium." in report
+    assert "Your notes ask for punch-ins, but --no-punch-in was given, so this version has none." in report
+
     # Graphics asked for while they're off: say how to turn them on.
+    fake.plan = dict(CANNED_PLAN, pacing="unspecified", punch_ins="unspecified", graphics_asked=True)
     result = pipeline.revise(out, "Add a lower third for Maria.", Options(inputs=[]))
     note = next(w for w in result.warnings if w.startswith("Your notes ask for graphics"))
-    assert "--graphics" in note
-    # What the note says to do works, and the app's Re-cut sees the result.
+    assert "--graphics" in note and note in result.report.read_text().split("## Revision notes")[1]
+    # Re-cut still changes them with no model call, and the app's Re-cut sees the result.
     assert main(["render", str(out), "--punch-in"]) == 0
     assert json.loads((out / "result.json").read_text())["cut"]["punch_in"] is True
     assert main(["render", str(out), "--style", "loose"]) == 0

@@ -18,7 +18,7 @@ from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
 from .plan import Plan, heuristic_plan, normalize, plan_schema, respell_graphics, spelling_key
-from .prompts import PLANNER_SYSTEM, render_brief, render_media
+from .prompts import PLANNER_SYSTEM, own_words, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
 from .report_html import report_page
@@ -33,10 +33,10 @@ class Options:
     out: Path | None = None
     name: str | None = None
     context: str = ""
-    preset_brief: str = ""  # the preset's part of `context` (it comes first): pacing and punch-ins read your own words before it
+    preset_brief: str = ""  # the preset's part of `context` (it comes first): the planner sees it apart, so your own words win
     script: str | None = None
     target_seconds: float | None = None
-    style: str = "medium"
+    style: str = "medium"  # "auto": what the planner reads in the brief (build only)
     keep_fillers: bool = False
     provider: str = "anthropic"
     model: str | None = None
@@ -57,7 +57,7 @@ class Options:
     fades: bool = True  # de-click fades at audio edits, soft fades on B-roll nat sound
     stringout: bool = True
     fill: bool = True  # cover narration the plan left without picture
-    punch_in: bool | None = None  # punch in on jump cuts; None: when the brief asks for it
+    punch_in: bool | None = None  # punch in on jump cuts; None: when the planner reads the brief asking for it
     graphics: bool = False  # Claude-designed motion graphics, rendered to ProRes 4444
     graphics_style: str = ""  # look and brand for them: colors, fonts, mood
     graphics_logo: str | None = None  # logo file designs may show (<img src="brand:logo">)
@@ -238,27 +238,26 @@ def render_options(opts: Options, settings: dict, overrides: set[str] | None = N
     return out
 
 
-# What a brief asks for that isn't in the plan: pacing (--style auto) and punch-ins on jump cuts.
-# A cue counts only inside its own clause: a "no", "don't" or "avoid" earlier in that clause
-# turns it down ("don't cut it too tight", "no punch-ins"), one in another clause doesn't
-# ("there's no B-roll, so punch in on the jump cuts").
+# What a brief asks for that's a cut setting, not a choice of lines: pacing (--style auto), punch-ins on
+# jump cuts, and graphics while they're off. The planner reads the brief and says (the plan's pacing,
+# punch_ins and graphics_asked). Without a model (--provider none, or the stringout when the model fails)
+# nothing has read it, so a few plain wording rules stand in: tight or loose only for a clear cue, punch-ins
+# only when asked for at the cuts, medium and off otherwise. A cue counts only inside its own clause: a "no",
+# "don't" or "avoid" earlier in that clause turns it down ("don't cut it too tight", "no punch-ins"), one in
+# another clause doesn't ("there's no B-roll, so punch in on the jump cuts").
 
-# Where a clause ends: punctuation, a spaced dash, or a word that starts a new thought.
-_CLAUSE_END = re.compile(r"[.;:!?,()\n]|\s[-–—]\s|[–—]|\b(?:and|but|so|then|instead|because|though|although|yet|plus|also)\b", re.I)
+# Where a clause ends: punctuation, a bullet, a spaced dash, or a word that starts a new thought.
+_CLAUSE_END = re.compile(r"[.;:!?,()\n•]|\s[-–—]\s|[–—]|\b(?:and|but|so|then|instead|because|though|although|yet|plus|also)\b", re.I)
 # "no"/"without"/"skip" turn down only what they name ("no punch-ins", "without zoom cuts"), not
 # a request after it ("without B-roll we need punch-ins"); "don't"/"never"/"avoid" reach further
 # ("we really don't want you to punch in").
 _NOUN_NOT = r"\b(?:no|without|skip|none of|nothing|zero|less)\b(?!-)"  # not "a no-nonsense promo"
 _VERB_NOT = r"\b(?:not|never|avoid(?:ing)?|cannot|(?:do|does|did|is|are|was|were|wo|ca|should|would|could|must)n['’]?t|no need (?:to|for))\b"
-_NOT = re.compile(rf"(?P<noun>{_NOUN_NOT})|(?P<verb>{_VERB_NOT})", re.I)
-# Negative words that ask for it anyway: "don't forget to punch in", "I don't mind punch-ins".
-_NOT_REALLY = re.compile(
-    r"(?:(?:do|does)n['’]?t|do not) (?:forget|be afraid|hesitate|mind)\b|not (?:afraid|only|just)\b|never (?:leave|forget)\b"
-    r"|(?:\w+n['’]?t|not|never) (?:\w+ )?mind\b",
-    re.I,
-)
+_NOT = re.compile(rf"(?P<verb>{_VERB_NOT})|(?P<noun>{_NOUN_NOT})", re.I)
+_NOT_REALLY = re.compile(r"(?:\w+n['’]?t|not|never) (?:forget|be afraid|hesitate|mind)\b", re.I)  # "don't forget to punch in"
 _TOO = re.compile(r"\b(?:too|overly)\s*$", re.I)  # "the last one was too tight" isn't asking for tight
-_NO_AFTER = re.compile(r"\s*[:?=]\s*(?:no|none|nope|off|never)\b", re.I)  # "Punch-ins: none"
+# "Punch-ins: none", "Punch-ins - no thanks"; not "punch in on the cuts - no B-roll was shot".
+_NO_AFTER = re.compile(r"\s*[:?=–—-]\s*(?:no|none|nope|off|never)\b(?=\s*(?:$|[.,;:!?)\n]|please\b|thanks?\b|thank you\b))", re.I)
 
 
 def _clause_before(text: str, start: int) -> str:
@@ -280,21 +279,11 @@ def _turned_down(text: str, m: re.Match) -> bool:
     return False
 
 
-def _a_name(text: str, m: re.Match) -> bool:
-    """A capitalized cue in a name: "Tight Lines Fishing Co", "Snappy Salads", "The Loose Goose"."""
-    if not m.group(0)[:1].isupper():
-        return False
-    before = text[: m.start()].rstrip(" \t")
-    return bool(re.match(r"[ \t]+[A-Z]", text[m.end() :])) or (bool(before) and before[-1] not in ".!?:;\n-–—*>")
-
-
 def _cues(pattern: re.Pattern, text: str) -> list[tuple[re.Match, bool]]:
-    """Each match outside a name, and whether its clause turns it down. One joined to a turned-down
-    cue by "and"/"or" goes with it ("don't make it tight and snappy", "no zoom-ins or punch-ins")."""
+    """Each match, and whether its clause turns it down. One joined to a turned-down cue by "and"/"or"
+    goes with it ("don't make it tight and snappy", "no zoom-ins or punch-ins")."""
     out: list[tuple[re.Match, bool]] = []
     for m in pattern.finditer(text):
-        if _a_name(text, m):
-            continue
         down = _turned_down(text, m)
         if not down and out and out[-1][1] and re.fullmatch(r"\s*,?\s*(?:and|or|nor)?\s*", text[out[-1][0].end() : m.start()], re.I):
             down = True
@@ -302,46 +291,23 @@ def _cues(pattern: re.Pattern, text: str) -> list[tuple[re.Match, bool]]:
     return out
 
 
-# Pacing named outright: "Pacing: loose", "pace should be tight", "medium pacing".
-_PACE_SAID = re.compile(
-    r"\b(?:pac(?:e|ing)|cut style|(?<!graphics )(?<!graphic )style)\s*(?:[:=–—-]|is|should be|of)?\s*(?:an? )?(tight|medium|loose|fast|quick|slow)\b"
-    r"|\b(tight|medium|loose)(?:[- ]paced|\s+pac(?:e|ing))\b",
+# Tight: "tight", "tighter", "snappy", "punchy", "fast-paced", "no dead air"; never "tight-knit", "tight shots"
+# or "a tight deadline". Loose: "let it breathe", "loose pacing", "keep it loose", "slow-paced", "looser".
+_TIGHT = re.compile(
+    r"\btight(?:er)?\b(?![- ]?knit)(?!\s+(?:on|shots?|close[- ]?ups?|cu|framing|budget|deadline|schedule|turnaround)\b)"
+    r"|\b(?:snapp|punch)(?:y|ier)\b|\bfast[- ]paced\b|\bno dead air\b",
     re.I,
 )
-_PACE_WORDS = {"fast": "tight", "quick": "tight", "slow": "loose"}
-# Tight only when it's about the cut ("tight cuts", "keep it tight", "tighter"), never "a tight
-# deadline", "tight shots", "tight-knit" or "hold on tight".
-_TIGHT = re.compile(
-    r"\btight(?:er)?(?=[- ]?(?:cuts?|cutting|edit(?:s|ed|ing)?|pac(?:e|ed|ing)|pauses|of (?:the )?dead|cutdown|\d))"
-    r"|\b(?:keep|make|cut|edit|trim|get)\s+(?:it|this|things|them|everything|the (?:edit|cut|pacing|pace|video|piece|promo|episode))\s+"
-    r"(?:(?:super|nice and|extra|very|really|pretty|real|good and|too|overly)\s+)?tight\b(?![- ]?knit)"
-    r"|(?:^|(?<=[.;:!?,\n]))[ \t*-]*(?:(?:super|extra|very|nice and)\s+)?tight\b(?=\s*(?:[.,;:!?\n]|$|\s[-–—]\s))"
-    r"|\btightly (?:cut|edited|paced)\b"
-    r"|\btight(?:en(?:ed|ing)?|er)\b(?=\s*(?:[.,;:!?)\n]|$|\s[-–—]\s|than\b|up\b|overall\b|throughout\b|it\b|this\b|things\b|everything\b"
-    r"|(?:the |all the |every )?(?:cuts?|cutting|edit(?:s|ing)?|pac(?:e|ing)|pauses|dead|silences?)\b))"
-    r"|\bsnapp(?:y|ier)\b|\bpunch(?:y|ier)\b|\b(?:fast|quick|rapid)[- ]?(?:paced?|pacing|cuts?|cutting|fire|edit(?:s|ing)?)\b"
-    r"|\b(?:every|each) pause\b|\btrim\w* (?:[\w']+ ){0,3}(?:hard|tight)\b|\bcut (?:the )?(?:pauses|dead air|silences?) (?:hard|tight)\b",
-    re.I | re.M,
-)
 _LOOSE = re.compile(
-    r"\blooser\b(?![- ]?(?:shots?|framing|frames?|fit))|\bloosely (?:cut|edited|paced)\b|\bloose(?=[- ]?(?:cuts?|cutting|edit(?:s|ed|ing)?|pac(?:e|ed|ing)|feel)\b)"
-    r"|\b(?:keep|make|cut|edit|leave)\s+(?:it|this|things|them|everything|the (?:edit|cut|pacing|pace|video|piece|episode))\s+"
-    r"(?:(?:super|nice and|very|really|pretty|real|good and|too|overly)\s+)?loose\b"
-    r"|(?:^|(?<=[.;:!?\n]))[ \t*-]*(?:(?:nice and|very)\s+)?loose\b(?=\s*(?:[.,;:!?\n]|$|\s[-–—]\s))"
-    r"|\blet (?:[\w'’]+\s+){0,4}breathe\b|\broom to breathe\b|\bbreathing room\b"
-    r"|\bslow(?:er)?(?:[- ]paced?|[- ]pacing| and)\b|\bslow (?:it|things) down\b|\bslower than\b|\bunhurried\b|\brelaxed\b"
-    r"|\b(?:(?:do|does)n['’]?t|do not|never|no need to) rush\b|\blet (?:[\w'’]+\s+){0,3}play out\b"
-    r"|\bhold (?:the |on )?(?:shots?|moments?)(?: a (?:bit|beat))? longer\b|\b(?:gentle|calm|easy|leisurely) pac(?:e|ing)\b",
+    r"\blet (?:[\w'’]+\s+){0,3}breathe\b|\broom to breathe\b|\bbreathing room\b"
+    r"|\bloose(?:ly)?[- ]?(?:pac(?:e|ed|ing)|cuts?|edit(?:s|ed)?)\b|\b(?:keep|make) (?:it|this) loose\b"
+    r"|\blooser\b(?![- ]?(?:shots?|framing|fit))|\bslow(?:er)?[- ]pac(?:e|ed|ing)\b|\bpac(?:e|ing)\s*[:=–—-]\s*loose\b",
     re.I,
 )
 
 
 def _pace(text: str) -> tuple[str, str | None] | None:
     """What this text says about pacing: (style, the words that say it; None when it asks for both), or None for nothing."""
-    for m in _PACE_SAID.finditer(text):
-        if not _turned_down(text, m):
-            said = (m.group(1) or m.group(2)).lower()
-            return _PACE_WORDS.get(said, said), m.group(0).strip()
     tight, loose = _cues(_TIGHT, text), _cues(_LOOSE, text)
     asked_tight = [m for m, down in tight if not down]
     asked_loose = [m for m, down in loose if not down]
@@ -351,63 +317,37 @@ def _pace(text: str) -> tuple[str, str | None] | None:
         return "loose", asked_loose[0].group(0).strip()
     if asked_tight and asked_loose:
         return "medium", None
-    if tight or loose:
+    if tight or loose:  # only turned down: medium, quoting the words that turn it down
         m = (tight + loose)[0][0]
         return "medium", " ".join((_clause_before(text, m.start()) + m.group(0)).split()[-6:])
     return None
 
 
-def _own_words(brief: str, preset_brief: str) -> str:
-    """The brief without the preset's part, which comes first."""
-    brief, preset_brief = (brief or "").strip(), (preset_brief or "").strip()
-    return brief[len(preset_brief) :] if preset_brief and brief.startswith(preset_brief) else brief
-
-
 def style_from_brief(brief: str, preset_brief: str = "") -> tuple[str, str]:
-    """The cut style for --style auto: tight or loose when the brief asks for it, else medium. Returns (style, why).
+    """The cut style the brief's wording asks for, without a model: tight or loose for a clear cue, else medium.
+    Returns (style, why).
 
     `preset_brief`: the preset's part of the brief. Your own words decide first; the preset's only when yours say nothing about pace.
     """
-    for text, whose in ((_own_words(brief, preset_brief), "the brief"), (preset_brief, "the preset's brief")):
+    for text, whose in ((own_words(brief, preset_brief), "the brief"), (preset_brief, "the preset's brief")):
         found = _pace(text or "")
         if found:
             style, said = found
             return style, f'{whose} says "{said}"' if said else f"{whose} asks for both tight and loose pacing"
-    return "medium", "the default; the brief doesn't ask for tight or loose pacing"
+    return "medium", "the brief doesn't ask for tight or loose pacing"
 
 
-# Punch-ins: the plural ("punch-ins", "zoom cuts") on its own, or "punch in" / "zoom in" / "scale up"
-# on the cuts. "Punch in on Roy's face" is one reframe, not a punch-in at every jump cut.
+# Punch-ins: "punch-ins" / "zoom-ins", or "punch in" / "zoom in" on the cuts. "Punch in on Roy's face" is one
+# reframe, not a punch-in at every jump cut.
 _PUNCH_IN = re.compile(
-    r"\b(?:punch(?:es|ing|ed)?[- ]?ins?|zoom(?:s|ing|ed)?[- ]?ins?|zoom[- ]?cuts|punch[- ]in zooms|digital zooms?"
-    r"|scal(?:e|es|ing|ed) (?:it |the shot |the frame )?up|zoom(?:s|ing)?(?=\s+on\s))\b",
+    r"\b(?:punch|zoom)[- ]?ins\b"
+    r"|\b(?:punch|zoom)(?:ing)?[- ]in(?:\s+(?:on|at))?\s+(?:(?:the|every|each|all)\s+)?(?:other\s+)?(?:jump[- ]?)?cuts?\b",
     re.I,
 )
-_ON_THE_CUTS = re.compile(
-    r"\s*(?:[\w%.'’-]+\s+){0,2}?(?:on|at|between|across|over|for|in)\s+"
-    r"(?:(?:the|every|each|all|alternating|alternate|other|those|these|any|some|my|our|his|her|their)\s+){0,3}"
-    r"(?:(?:jump[- ]?)?cuts?|edits?|talking[- ]heads?|talking parts|interviews?|a[- ]roll|takes|lines)\b",
-    re.I,
-)
-_ON_SOMETHING = re.compile(r"\s*(?:[\d%.]+\s+)?(?:on|at|onto|into)\s+\S", re.I)  # "on Roy's face", "at the shop"
-_JUMP_CUTS = re.compile(r"\bjump[- ]?cuts?\b", re.I)
-
-
-def _punch_asked(text: str, m: re.Match) -> bool:
-    """Whether this punch phrase asks for punch-ins at the jump cuts (and not one reframe)."""
-    if _ON_THE_CUTS.match(text, m.end()):
-        return True
-    if _ON_SOMETHING.match(text, m.end()):
-        return False
-    if re.search(r"(?:ins|cuts|zooms)$", m.group(0), re.I):
-        return True
-    start = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
-    ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i >= 0]
-    return bool(_JUMP_CUTS.search(text[start : min(ends) if ends else len(text)]))  # "hide the jump cuts with a punch in"
 
 
 def _punch(text: str) -> tuple[bool, str] | None:
-    found = [(m, down) for m, down in _cues(_PUNCH_IN, text) if _punch_asked(text, m) or down]
+    found = _cues(_PUNCH_IN, text)
     for m, down in found:
         if not down:
             return True, m.group(0)
@@ -418,9 +358,9 @@ def _punch(text: str) -> tuple[bool, str] | None:
 
 
 def read_punch_in(brief: str, preset_brief: str = "") -> tuple[bool | None, str]:
-    """(True, its words) when the brief asks for punch-ins on the jump cuts, (False, its words) when it
-    turns them down, (None, "") when it says nothing. Your own words decide before the preset's."""
-    for text in (_own_words(brief, preset_brief), preset_brief):
+    """The brief's wording, without a model: (True, its words) when it asks for punch-ins on the jump cuts,
+    (False, its words) when it turns them down, (None, "") when it says nothing. Your own words decide before the preset's."""
+    for text in (own_words(brief, preset_brief), preset_brief):
         found = _punch(text or "")
         if found:
             return found
@@ -433,9 +373,11 @@ def punch_in_from_brief(brief: str, preset_brief: str = "") -> str:
     return words if asked else ""
 
 
-# Graphics a brief asks for, to say so when motion graphics are off: "lower thirds", "names on screen", "list the chef names".
+# Graphics a brief asks for, without a model: "lower thirds", "names on screen", "list the chef names"
+# (not "the graphics designer").
 _GRAPHICS = re.compile(
-    r"\b(?:motion graphics?|graphics|a graphic(?!\s+design)|lower[- ]thirds?|title cards?|callouts?|kinetic (?:captions?|type|text)"
+    r"\b(?:motion graphics?|graphics|a graphic)\b(?!\s+(?:design|department))"
+    r"|\b(?:lower[- ]thirds?|title cards?|callouts?|kinetic (?:captions?|type|text)"
     r"|on[- ]screen (?:text|names?|titles?|labels?|graphics?)|name (?:titles?|supers?|plates?|cards?)"
     r"|(?:list|show|put|display)\s+(?:[\w'’&]+\s+){0,4}?names?)\b",
     re.I,
@@ -447,45 +389,80 @@ def graphics_from_brief(brief: str) -> str:
     return next((m.group(0) for m, down in _cues(_GRAPHICS, brief or "") if not down), "")
 
 
-def notes_about_cut_settings(notes: str, opts: Options, out_dir: Path) -> list[str]:
-    """Revise notes that ask for another pacing, punch-ins or graphics while they're off: the planner can't
-    change those (they're cut settings), so say so and how, instead of letting the request vanish."""
-    folder = shlex.quote(str(out_dir))
-    out = []
-    pace = _pace(notes or "")
-    if pace and pace[1] and pace[0] != opts.style:
-        out.append(
-            f'Your notes ask for {pace[0]} pacing ("{pace[1]}"), but notes change which lines play, not the pacing, so this version '
-            f"is still {opts.style}. Re-cut it at {pace[0].capitalize()} (no AI call), or `roughcut render {folder} --style {pace[0]}`."
-        )
-    asked, words = read_punch_in(notes)
+def settings_from_plan(opts: Options, plan: Plan) -> Options:
+    """Auto pacing (--style auto) and Auto punch-ins (no --punch-in flag), as the planner read the brief. A plan
+    no model made (--provider none, or the stringout after the model failed) goes by the brief's wording.
+    Logged either way, so a misreading shows."""
+    by_model = plan.source != "heuristic"
+    if opts.style not in STYLES:
+        if by_model:
+            style = plan.pacing if plan.pacing in STYLES else "medium"
+            why = "the brief asks for it" if plan.pacing in STYLES else "the brief doesn't say"
+        else:
+            style, why = style_from_brief(opts.context, opts.preset_brief)
+        opts = replace(opts, style=style)
+        log(f"pacing: {style} ({why})")
+    if opts.punch_in is None:
+        if by_model:
+            asked = {"on": True, "off": False}.get(plan.punch_ins)
+            why = "the brief asks for it" if asked else "the brief turns them down"
+        else:
+            asked, words = read_punch_in(opts.context, opts.preset_brief)
+            why = f'the brief says "{words}"'
+        opts = replace(opts, punch_in=bool(asked))
+        if asked:
+            log(f"punching in on jump cuts ({why})")
+        elif asked is False:  # said either way, so a misreading shows
+            log(f"not punching in ({why})")
+    return opts
+
+
+def settings_from_notes(plan: Plan, opts: Options, given: set[str], previous: int | None) -> tuple[Options, list[str]]:
+    """The pacing and punch-ins a revision's notes ask for, as the reviser read them ("make it looser", "remove the
+    punch-ins"), unless a flag given to revise sets them. Returns this version's options and what to say about them."""
+    was = f"v{previous}" if previous else "the previous cut"
+    said = []
+    if plan.pacing in STYLES and plan.pacing != opts.style:
+        if "style" in given:
+            said.append(f"Your notes ask for {plan.pacing} pacing, but --style {opts.style} was given, so this version is {opts.style}.")
+        else:
+            said.append(f"Pacing: {plan.pacing}, as your notes ask ({was} was {opts.style}).")
+            opts = replace(opts, style=plan.pacing)
+    asked = {"on": True, "off": False}.get(plan.punch_ins)
     if asked is not None and asked != bool(opts.punch_in):
-        out.append(
-            f'Your notes ask for {"punch-ins" if asked else "no punch-ins"} ("{words}"), but notes don\'t change punch-ins, a cut setting. '
-            f'Re-cut it with Punch-ins {"On" if asked else "Off"} (no AI call), or `roughcut render {folder} {"--punch-in" if asked else "--no-punch-in"}`.'
-        )
-    if not opts.graphics and (asked_graphics := graphics_from_brief(notes)):
-        out.append(
-            f'Your notes ask for graphics ("{asked_graphics}"), but motion graphics are off for this cut, so the revision has none. '
-            f"Revise with them on: `roughcut revise {folder} --graphics` and the same notes."
-        )
-    return out
+        if "punch_in" in given:
+            flag, has = ("--punch-in", "has them") if opts.punch_in else ("--no-punch-in", "has none")
+            said.append(f"Your notes ask for {'punch-ins' if asked else 'no punch-ins'}, but {flag} was given, so this version {has}.")
+        else:
+            said.append(f"Punch-ins: {'on' if asked else 'off'}, as your notes ask ({was} {'had none' if asked else 'had them'}).")
+            opts = replace(opts, punch_in=asked)
+    return opts, said
 
 
-def graphics_off_note(opts: Options, out_dir: Path, *, made_without_ai: bool) -> str | None:
+def graphics_off_note(opts: Options, out_dir: Path, *, asked: bool | None, made_without_ai: bool) -> str | None:
     """With motion graphics off, a brief that asks for them gets none: say so, and how to add them.
-    Only your own words count: a preset's brief describing its graphics, turned off on purpose, doesn't."""
-    asked = graphics_from_brief(_own_words(opts.context, opts.preset_brief))
-    if opts.graphics or not asked:
+
+    `asked`: the planner's reading (plan.graphics_asked). None when no model read the brief: then the wording
+    of your own words decides (a preset's brief describing its graphics, turned off on purpose, doesn't count).
+    """
+    if opts.graphics:
+        return None
+    said = ""
+    if asked is None:
+        words = graphics_from_brief(own_words(opts.context, opts.preset_brief))
+        if not words:
+            return None
+        said = f' ("{words}")'
+    elif not asked:
         return None
     add = f"`roughcut revise {shlex.quote(str(out_dir))} --graphics {shlex.quote('add the graphics the brief asks for')}`"
     if made_without_ai:
         return (
-            f'The brief asks for graphics ("{asked}"), but this cut was made without AI, which designs them, so it has none. '
+            f"The brief asks for graphics{said}, but this cut was made without AI, which designs them, so it has none. "
             f"{add} adds them without re-transcribing (with your Claude plan: add --provider claude-code)."
         )
     return (
-        f'The brief asks for graphics ("{asked}"), but motion graphics are off, so this cut has none. '
+        f"The brief asks for graphics{said}, but motion graphics are off, so this cut has none. "
         f"Turn on Motion graphics (--graphics in Terminal) and build again, or {add} adds them without re-transcribing."
     )
 
@@ -550,7 +527,7 @@ def default_out_dir(inputs: list[Path]) -> Path:
 
 
 def style_for(opts: Options) -> Style:
-    base = STYLES[opts.style]
+    base = STYLES["medium" if opts.style == "auto" else opts.style]  # auto: medium until the planner has read the brief
     if opts.keep_fillers:
         return replace(base, remove_fillers=False)  # keeps the style's B-roll pacing too
     return base
@@ -628,7 +605,9 @@ def media_part(analysis: Analysis, style: Style) -> TextPart:
 def plan_with_model(provider: Provider, analysis: Analysis, opts: Options) -> tuple[Plan, dict]:
     parts = [
         media_part(analysis, style_for(opts)),
-        TextPart(render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)),
+        TextPart(render_brief(
+            opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style, preset_brief=opts.preset_brief,
+        )),
     ]
     # Thinking counts against max_tokens; a long narration plan needs the room.
     raw = provider.complete_json(
@@ -781,24 +760,10 @@ def build(opts: Options) -> Result:
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
     _plan_saved_at(None)
     start_log(out_dir, "build")
-    if opts.style not in STYLES:  # "auto": the pacing the brief asks for
-        style, why = style_from_brief(opts.context, opts.preset_brief)
-        opts = replace(opts, style=style)
-        log(f"pacing: {style} ({why})")
-    if opts.punch_in is None:
-        asked, words = read_punch_in(opts.context, opts.preset_brief)
-        opts = replace(opts, punch_in=bool(asked))
-        if asked:
-            log(f'punching in on jump cuts (the brief says "{words}")')
-        elif asked is False:  # said either way, so a misreading shows
-            log(f'not punching in (the brief says "{words}")')
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
     provider = make_provider(opts.provider, model=opts.model, base_url=opts.base_url, api_key_env=opts.api_key_env, effort=opts.effort)
-    asks_graphics = graphics_off_note(opts, out_dir, made_without_ai=provider is None)
-    if asks_graphics:
-        log(asks_graphics)  # now, while there's time to stop and turn them on
     if provider is not None:
         log(f"checking {provider.name} access ({provider.model})")
         provider.verify()
@@ -818,7 +783,7 @@ def build(opts: Options) -> Result:
     visual_log = None
 
     usage = []
-    extra_warnings: list[str] = [asks_graphics] if asks_graphics else []
+    extra_warnings: list[str] = []
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision
@@ -842,7 +807,7 @@ def build(opts: Options) -> Result:
 
     prompt = (
         "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n"
-        + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style)
+        + render_brief(opts.context, opts.target_seconds, opts.script, graphics=opts.graphics, graphics_style=opts.graphics_style, preset_brief=opts.preset_brief)
     )
 
     fell_back = False
@@ -873,6 +838,12 @@ def build(opts: Options) -> Result:
             fell_back = True
     if not plan.sections:
         raise RoughcutError("Nothing to cut: no speech or visual clips were found.")
+    # Auto pacing and punch-ins, as the planner read the brief (saved with the run, so re-cuts keep them).
+    opts = settings_from_plan(opts, plan)
+    asks_graphics = graphics_off_note(opts, out_dir, asked=plan.graphics_asked if plan.source != "heuristic" else None, made_without_ai=provider is None)
+    if asks_graphics:
+        log(asks_graphics)
+        extra_warnings.insert(0, asks_graphics)
 
     # Save what the model was paid for before anything else can fail. Nothing
     # before this point touches the output folder's earlier files, so a run
@@ -1454,7 +1425,9 @@ def revise(
         # A folder from before settings were saved: the brief is in the prompt it sent.
         for k, v in recover_brief((out_dir / "prompt.md").read_text(encoding="utf-8")).items():
             settings.setdefault(k, v)
-    opts = render_options(opts, settings, overrides)
+    # The cut settings given to revise: they win over what the notes ask for.
+    given = set(overrides) if overrides is not None else {f for f in RENDER_FIELDS if getattr(opts, f) != getattr(Options(inputs=[]), f)}
+    opts = render_options(opts, settings, given)
     opts = replace(
         opts,
         stringout=False,  # one new Rough Cut; the stringout doesn't change with notes
@@ -1486,10 +1459,6 @@ def revise(
             raise RoughcutError(problem)
     extra_warnings: list[str] = []
     opts = replace(opts, graphics_logo=_saved_logo(settings, extra_warnings if opts.graphics else []))
-    settings_notes = notes_about_cut_settings(notes, opts, out_dir)
-    for note in settings_notes:
-        log(note)
-    extra_warnings += settings_notes
     measure_missing_levels(analysis, opts)
 
     revisions = [h for h in saved.get("notes_history") or [] if isinstance(h, dict)]
@@ -1511,16 +1480,18 @@ def revise(
     request = revision_request(
         previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
         graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,
+        preset_brief=opts.preset_brief, style=opts.style, punch_in=bool(opts.punch_in),
     )
     prev_entry = versions.current(out_dir) or {}
     prev_n = prev_entry.get("n")
+    cut_style = style_for(opts)  # the media block shows what this cut keeps of each line (the build sent the same at its pacing)
     t = time.monotonic()
     progress.stage("plan", f"Revising the edit with {p.model}")
     log(f"revising the edit with {p.name}:{p.model}: {notes.strip()[:200]}")
     try:
         with progress.doing(f"revising the edit with {p.model}"):
             raw = p.complete_json(
-                PLANNER_SYSTEM, [media_part(analysis, style_for(opts)), TextPart(request)], plan_schema(opts.graphics),
+                PLANNER_SYSTEM, [media_part(analysis, cut_style), TextPart(request)], plan_schema(opts.graphics),
                 schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
             )
     except ProviderAuthError:
@@ -1565,6 +1536,17 @@ def revise(
     if before_seconds is None:
         before_seconds = build_timeline(previous, analysis, style=style_for(opts), name="previous", format_override=opts.format, fill=opts.fill).seconds
 
+    # Pacing and punch-ins as the reviser read the notes ("make it looser", "remove the punch-ins"), unless a flag says otherwise.
+    opts, settings_notes = settings_from_notes(plan, opts, given, prev_n)
+    if not opts.graphics and plan.graphics_asked:
+        settings_notes.append(
+            f"Your notes ask for graphics, but motion graphics are off for this cut, so the revision has none. "
+            f"Revise with them on: `roughcut revise {shlex.quote(str(out_dir))} --graphics` and the same notes."
+        )
+        extra_warnings.append(settings_notes[-1])
+    for note in settings_notes:
+        log(note)
+
     version = versions.next_number(out_dir)
     versions.snapshot(out_dir, before=version)
     new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True), "vision_model": settings.get("vision_model")}
@@ -1572,7 +1554,7 @@ def revise(
     record["notes_history"] = revisions + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
         record["revision_of"] = prev_n
-    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, style_for(opts)) + "\n\n# Brief\n\n" + request
+    prompt = "# System\n\n" + PLANNER_SYSTEM + "\n\n# Media\n\n" + render_media(analysis, cut_style) + "\n\n# Brief\n\n" + request
     save_checkpoint(out_dir, analysis, prompt, record)
     if opts.graphics:
         versions.adopt_old_graphics(out_dir)  # unchanged graphics from an older release's folder: reuse their clips

@@ -1,6 +1,6 @@
 import Foundation
 
-/// How hard pauses are trimmed (`--style`). `.auto` lets the CLI take it from the brief.
+/// How hard pauses are trimmed (`--style`). `.auto` lets the CLI take it from the planner's reading of the brief.
 public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
     case auto, tight, medium, loose
 
@@ -12,7 +12,7 @@ public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
 
     public var detail: String {
         switch self {
-        case .auto: return "From the brief, your words before the preset's: tight for tight cuts, snappy, punchy or fast-paced; loose for loose, let it breathe or slow-paced; otherwise (or \"not too tight\") medium."
+        case .auto: return "As Claude reads the brief, your words before the preset's: tight for tight cuts, snappy or no dead air; loose for let it breathe or slow and reflective; otherwise medium. Without AI, from its wording."
         case .tight: return "Pauses trimmed hard. Punchy YouTube pace."
         case .medium: return "Natural pauses up to about half a second."
         case .loose: return "Room to breathe. Good for reflective pieces."
@@ -20,7 +20,7 @@ public enum CutStyle: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
-/// Punch-ins on jump cuts (`--punch-in` / `--no-punch-in`). `.auto` lets the brief decide ("punch in on jump cuts").
+/// Punch-ins on jump cuts (`--punch-in` / `--no-punch-in`). `.auto`: on when the planner reads the brief asking for them.
 public enum PunchIn: String, CaseIterable, Codable, Identifiable, Sendable {
     case auto, on, off
 

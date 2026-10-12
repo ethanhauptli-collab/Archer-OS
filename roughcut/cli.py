@@ -47,7 +47,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
     g.add_argument(
         "--style", choices=["auto", "tight", "medium", "loose"], action=_StyleAction,
-        help="how aggressively pauses are trimmed (default, auto: tight or loose when the brief asks for it, otherwise medium)",
+        help="how aggressively pauses are trimmed (default, auto: the pacing the planner reads in the brief, medium when it says none; without AI, from its wording)",
     )
     g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
@@ -64,7 +64,7 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--stringout", action=argparse.BooleanOptionalAction, help="add the 'Stringout' project (default: on; --no-stringout leaves it out)")
     g.add_argument(
         "--punch-in", action=argparse.BooleanOptionalAction,
-        help="alternate a 112%% punch-in at each jump cut no B-roll covers (default: when the brief asks for it, e.g. 'punch in on jump cuts')",
+        help="alternate a 112%% punch-in at each jump cut no B-roll covers (default: when the planner reads the brief asking for it, e.g. 'punch in on jump cuts')",
     )
     g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
     p.add_argument("--name", help="project/event name (default: folder name)")

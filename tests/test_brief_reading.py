@@ -1,7 +1,9 @@
-"""What a brief says about pacing, punch-ins and graphics, read the way the owner writes briefs.
+"""What a brief says about pacing, punch-ins and graphics.
 
-A "no", "don't" or "avoid" counts only in its own clause, "tight" only when it's about the cut,
-your own words before a preset's, and "punch in on Roy's face" is one reframe, not a setting.
+The planner reads the whole brief and says what it asks for (the plan's pacing, punch_ins and
+graphics_asked); Auto pacing and Auto punch-ins follow that. Without a model (--provider none, or
+the stringout when the model fails) a few plain wording rules stand in: tight or loose only for
+clear cues not turned down in their own clause, punch-ins only when asked for at the cuts.
 """
 
 from __future__ import annotations
@@ -9,74 +11,262 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import CANNED_PLAN, FakeProvider
 
-from roughcut import presets
-from roughcut.pipeline import graphics_from_brief, punch_in_from_brief, read_punch_in, style_from_brief
+from roughcut import pipeline, presets
+from roughcut.pipeline import graphics_from_brief, graphics_off_note, punch_in_from_brief, read_punch_in, style_from_brief
+from roughcut.plan import PLAN_SCHEMA, normalize
+from roughcut.timeline import STYLES
+
+# ------------------------------------------------------------ the planner's reading
+
+
+def _plan(**fields) -> dict:
+    plan = json.loads(json.dumps(CANNED_PLAN))
+    plan.update(fields)
+    return plan
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    provider = FakeProvider()
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    return provider
+
+
+def _opts(footage, out, cache, **kw) -> pipeline.Options:
+    return pipeline.Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=cache, **kw)
+
+
+def test_the_plan_schema_asks_the_planner_what_the_brief_says():
+    props = PLAN_SCHEMA["properties"]
+    assert props["pacing"]["enum"] == ["tight", "medium", "loose", "unspecified"]
+    assert props["punch_ins"]["enum"] == ["on", "off", "unspecified"]
+    assert props["graphics_asked"]["type"] == "boolean"
+    assert {"pacing", "punch_ins", "graphics_asked"} <= set(PLAN_SCHEMA["required"])
+    for name in ("pacing", "punch_ins", "graphics_asked"):
+        assert len(props[name]["description"]) > 60, name
+    assert "one-off" in props["punch_ins"]["description"] or "one reframe" in props["punch_ins"]["description"]
+
+
+def test_normalize_keeps_the_reading_and_tolerates_a_plan_without_it(footage, tmp_path, fake):
+    from roughcut.analyze import Analysis
+
+    pipeline.build(_opts(footage, tmp_path / "out", tmp_path / "c", style="medium"))
+    analysis = Analysis.load(tmp_path / "out" / "analysis.json")
+    plan = normalize(_plan(pacing="loose", punch_ins="on", graphics_asked=True), analysis, source="fake:fake-model")
+    assert (plan.pacing, plan.punch_ins, plan.graphics_asked) == ("loose", "on", True)
+    assert plan.to_json()["pacing"] == "loose" and plan.to_json()["punch_ins"] == "on" and plan.to_json()["graphics_asked"] is True
+    older = normalize(CANNED_PLAN, analysis, source="fake:fake-model")  # an older plan.json, or a model that left them out
+    assert (older.pacing, older.punch_ins, older.graphics_asked) == ("unspecified", "unspecified", False)
+    odd = normalize(_plan(pacing="Very tight", punch_ins=True, graphics_asked="yes"), analysis, source="fake:fake-model")
+    assert (odd.pacing, odd.punch_ins, odd.graphics_asked) == ("unspecified", "on", False)
+
+
+@pytest.mark.parametrize(
+    "pacing, punch_ins, style, punch_in, said",
+    [
+        ("tight", "on", "tight", True, ["pacing: tight (the brief asks for it)", "punching in on jump cuts (the brief asks for it)"]),
+        ("loose", "off", "loose", False, ["pacing: loose (the brief asks for it)", "not punching in (the brief turns them down)"]),
+        ("medium", "unspecified", "medium", False, ["pacing: medium (the brief asks for it)"]),
+        ("unspecified", "unspecified", "medium", False, ["pacing: medium (the brief doesn't say)"]),
+    ],
+)
+def test_auto_pacing_and_punch_ins_follow_the_planners_reading(footage, tmp_path, fake, capsys, pacing, punch_ins, style, punch_in, said):
+    fake.plan = _plan(pacing=pacing, punch_ins=punch_ins, graphics_asked=False)
+    out = tmp_path / "out"
+    # The wording rules would read this brief the other way: the planner's reading decides.
+    result = pipeline.build(_opts(footage, out, tmp_path / "c", context="Keep it loose, no punch-ins", style="auto"))
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == (style, punch_in), "saved, so re-cuts keep them"
+    assert result.project == f"footage - Rough Cut v1 ({style}, fake-model)"
+    log = capsys.readouterr().err
+    for line in said:
+        assert line in log
+    if punch_ins == "unspecified":
+        assert "punching in" not in log
+
+
+def test_an_auto_build_shows_the_planner_kept_lengths_at_medium(footage, tmp_path, fake):
+    from roughcut.analyze import Analysis
+
+    fake.plan = _plan(pacing="tight", punch_ins="unspecified", graphics_asked=False)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", style="auto"))
+    sent = next(c for c in fake.calls if c["purpose"] == "edit plan")["parts"][0].text
+    analysis = Analysis.load(out / "analysis.json")
+    assert sent == pipeline.media_part(analysis, STYLES["medium"]).text, "before the planner has read the brief, at medium"
+    assert pipeline.style_for(pipeline.Options(inputs=[], style="auto")) == STYLES["medium"]
+
+
+def test_a_plan_without_the_reading_cuts_at_medium_without_punch_ins(footage, tmp_path, fake, capsys):
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", context="Tight cuts, punch in on the jump cuts.", style="auto"))
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("medium", False), "a model planned it: no guessing from the wording"
+    assert "pacing: medium (the brief doesn't say)" in capsys.readouterr().err
+
+
+def test_a_pacing_or_punch_in_you_pick_wins_over_the_planner(footage, tmp_path, fake, capsys):
+    fake.plan = _plan(pacing="tight", punch_ins="on", graphics_asked=False)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, tmp_path / "c", style="loose", punch_in=False))
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("loose", False)
+    assert "pacing:" not in capsys.readouterr().err
+    # From the command line, and a preset's pacing over the app's --style auto.
+    from roughcut.cli import main
+
+    common = ["-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--no-menu"]
+    assert main(["build", str(footage), *common, "--style", "medium", "--no-punch-in"]) == 0
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("medium", False)
+    assert main(["build", str(footage), *common, "--preset", "save-the-kid", "--no-graphics", "--style", "auto"]) == 0
+    assert json.loads((out / "plan.json").read_text())["settings"]["style"] == "loose", "the preset's own pacing"
+    assert main(["build", str(footage), *common]) == 0
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("tight", True), "Auto: the planner's reading"
+    # A re-cut keeps them.
+    assert main(["render", str(out), "--format", "vertical"]) == 0
+    settings = json.loads((out / "plan.json").read_text())["settings"]
+    assert (settings["style"], settings["punch_in"]) == ("tight", True)
+
+
+def test_the_planner_sees_which_part_of_the_brief_is_the_presets(footage, tmp_path, fake):
+    stk = presets.SAVE_THE_KID_BRIEF
+    pipeline.build(_opts(footage, tmp_path / "out", tmp_path / "c", context=stk + "\n\nThe hike with Myles. Keep it tight.", preset_brief=stk, style="auto"))
+    brief = next(c for c in fake.calls if c["purpose"] == "edit plan")["parts"][1].text
+    assert brief.index("<preset_brief>") < brief.index(stk) < brief.index("</preset_brief>") < brief.index("<brief>\nThe hike with Myles. Keep it tight.\n</brief>")
+    assert brief.count(stk) == 1
+    assert "pacing" in pipeline.PLANNER_SYSTEM and "punch_ins" in pipeline.PLANNER_SYSTEM and "graphics_asked" in pipeline.PLANNER_SYSTEM
+
+
+# ------------------------------------------------------------ a brief that asks for graphics while they're off
+
+
+def test_the_planner_says_the_brief_asks_for_graphics_while_theyre_off(footage, tmp_path, fake, capsys):
+    from roughcut.cli import main
+
+    fake.plan = _plan(pacing="unspecified", punch_ins="unspecified", graphics_asked=True)
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "-c", "Name each chef on screen as they come up.", "--transcriber", "none",
+                 "--cache-dir", str(tmp_path / "c"), "--no-menu"]) == 0
+    printed = capsys.readouterr()
+    result = json.loads((out / "result.json").read_text())
+    note = next(w for w in result["warnings"] if w.startswith("The brief asks for graphics"))
+    assert "motion graphics are off" in note and "roughcut revise" in note and "--graphics" in note
+    top = (out / "edit_report.md").read_text().split("- **Rough cut:**")[0]
+    assert note in top, "at the top of the report, not only in its Warnings"
+    assert note in printed.out, "at the end of the CLI's output"
+    assert note in (out / "roughcut.log").read_text()
+
+
+def test_no_graphics_note_unless_the_planner_says_so_or_when_theyre_on(footage, tmp_path, fake, monkeypatch):
+    from roughcut import graphics
+
+    # The wording rules would see graphics in this brief; the planner says it doesn't ask for them.
+    fake.plan = _plan(pacing="unspecified", punch_ins="unspecified", graphics_asked=False)
+    result = pipeline.build(_opts(footage, tmp_path / "o1", tmp_path / "c", context="The graphics designer is in the video."))
+    assert not any("asks for graphics" in w for w in result.warnings)
+    # Graphics on: nothing to warn about.
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+    monkeypatch.setattr(graphics, "make", lambda *a, **k: ([], [], []))
+    fake.plan = _plan(pacing="unspecified", punch_ins="unspecified", graphics_asked=True, graphics=[])
+    result = pipeline.build(_opts(footage, tmp_path / "o2", tmp_path / "c", context="Lower thirds for each chef.", graphics=True))
+    assert not any("asks for graphics" in w for w in result.warnings)
+
+
+def test_a_cut_without_ai_reads_the_graphics_request_from_the_wording(footage, tmp_path, capsys):
+    from roughcut.cli import main
+
+    out = tmp_path / "out"
+    common = ["--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]
+    assert main(["build", str(footage), "-o", str(out), "-c", "Add lower thirds for each chef.", *common]) == 0
+    captured = capsys.readouterr()
+    assert 'The brief asks for graphics ("lower thirds"), but this cut was made without AI' in captured.out, "in the CLI's summary, not only the log"
+    assert "--provider claude-code" in captured.out
+    assert main(["build", str(footage), "-o", str(out), "-c", "The graphics designer is in the video.", *common]) == 0
+    assert "asks for graphics" not in capsys.readouterr().out
+
+
+def test_the_presets_own_graphics_line_is_not_a_request(tmp_path):
+    stk = presets.SAVE_THE_KID_BRIEF
+    opts = pipeline.Options(inputs=[], context=stk + "\n\nThe hike.", preset_brief=stk)
+    assert graphics_off_note(opts, tmp_path, asked=None, made_without_ai=True) is None
+    opts = pipeline.Options(inputs=[], context=stk + "\n\nLower thirds for each person.", preset_brief=stk)
+    assert '("Lower thirds")' in graphics_off_note(opts, tmp_path, asked=None, made_without_ai=True)
+    assert graphics_off_note(opts, tmp_path, asked=False, made_without_ai=False) is None, "a model planned it: its reading decides"
+    assert graphics_off_note(pipeline.Options(inputs=[], graphics=True), tmp_path, asked=True, made_without_ai=False) is None
+
+
+# ------------------------------------------------------------ without AI: the plain wording rules
 
 TIGHT = [
-    "Keep it punchy, under 60 seconds.",
-    "Make it snappier than the last one.",
-    "Make it punchier",
-    "Fast cuts, high energy, music driven.",
-    "Quick pace, get to the food fast.",
-    "High energy promo with quick cuts between the chefs.",
-    "Rapid-fire rundown of every vendor.",
     "Keep it tight.",
-    "Venture OC promo for the new food hall. Keep it tight, 60 seconds, end on the opening date.",
-    "Instagram reel, vertical, super tight, hook in the first 2 seconds.",
-    "Super tight edit for reels.",
-    "Tight pacing throughout.",
-    "Tight: under 90s.",
-    "Tight 30s cutdown.",
-    "A tight 60 for Instagram.",
-    "Tighten up the pauses, he rambles.",
-    "He tends to ramble; tighten it up a lot.",
+    "Keep it tight",
+    "Short and tight.",
+    "Make it short and tight.",
+    "Keep it short and tight",
+    "I want it tight",
+    "I want this tight.",
+    "It should be tight.",
+    "It needs to be tight",
+    "Needs to feel tight.",
+    "Tight and energetic",
+    "Tight and fun, 60 seconds",
+    "Fun, tight and upbeat",
+    "Keep the interviews tight",
+    "Edit tight",
+    "Cut tight",
+    "Make it tighter and faster",
     "Cut it tighter than v1.",
-    "Make it tighter.",
+    "Promo\n\n• Tight cuts\n• Punch-ins on jump cuts\n• Lower thirds for each chef",
+    "1) Tight cuts\n2) Punch-ins on jump cuts\n3) Lower thirds for each chef",
+    "(Tight cuts please)",
+    '"Tight cuts"',
+    "Venture OC promo, Tight cuts, lower thirds for each chef",
+    "Venture OC Promo: Tight Cuts, Lower Thirds",
+    "Relaxed beach cafe promo. Keep it tight.",
+    "Promo for a relaxed, family-friendly brewery, tight cuts",
+    "Use the slow and dreamy drone shots for B-roll, tight cuts on the interviews",
+    "Slow and steady build, tight cuts",
+    "The pace is slow in the original, make it snappier",
+    "Keep it punchy, under 60 seconds.",
+    "Make it punchier",
     "Fast-paced and energetic, end on the CTA.",
     "Snappy edit, no dead air.",
-    "Trim the dead air hard, every pause out.",
-    "Trim pauses tight but keep the breaths before the punchline.",
-    "do tight cuts of dead space and list the restaurants and chef names with motion graphics in the right center side of frame",
-    "no filler and tight cuts",
+    "No dead air.",
     "no dead air, keep it tight",
+    "no filler and tight cuts",
     "without music, punchy",
     "A no-nonsense punchy promo.",
     "Keep it tight but not rushed.",
     "Keep it tight, not too loose",
-    "Fast-paced, but don't cut off his laughs.",
-    "Don't be afraid to cut it tight.",
+    "Instagram reel, vertical, super tight, hook in the first 2 seconds.",
+    "Tight 30s cutdown.",
     "Pacing: tight.",
-    "Pace: fast. Energy: high.",
+    "do tight cuts of dead space and list the restaurants and chef names with motion graphics in the right center side of frame",
+    "Tight cuts with no dead air and punch-ins on the jump cuts",
 ]
 LOOSE = [
     "Let it breathe.",
     "Let the moments breathe, this is about my son.",
     "Let the story breathe; don't rush it.",
     "Let the chefs' stories breathe.",
-    "Keep it loose and conversational.",
-    "Keep it loose.",
-    "Loose, documentary feel.",
-    "Loosely cut, documentary feel.",
-    "a looser cut",
+    "Loose pacing, documentary feel.",
     "Slow-paced and reflective.",
-    "Slow and reflective, hold on the kids.",
-    "Slow it down this time.",
-    "Slower than the last episode.",
-    "Unhurried, give the moments room to breathe.",
-    "Don't rush the emotional moments.",
-    "Relaxed pace, Sunday vibe.",
-    "Keep the pacing relaxed, it's a Sunday vlog.",
-    "Let the laughter play out.",
-    "Episode 14: the hike. Hold shots longer on the views, and let it breathe.",
+    "a looser cut",
+    "Looser than the last one.",
+    "Keep it loose and conversational.",
     "keep it loose, not tight",
     "Pacing: loose.",
     "Pacing - loose",
-    "Style: loose",
+    "Episode 14: the hike. Hold shots longer on the views, and let it breathe.",
 ]
 MEDIUM = [
     "",
-    # Turned down: the opposite of a request for tight.
+    "The OC Vibe food hall.",
+    # Turned down in its own clause.
     "Don't cut it too tight, it's a reflective piece",
     "Don’t cut it too tight",  # the apostrophe a Mac text field types
     "Don't make it too tight, let the chef talk.",
@@ -84,45 +274,31 @@ MEDIUM = [
     "Not too tight - Ethan talks slowly and it should feel natural.",
     "No tight cuts, it's a eulogy for my dad.",
     "Avoid tight cuts on the emotional parts.",
-    "avoid tight cuts",
     "no need to be tight",
     "nothing snappy or punchy, this is a memorial",
     "never snappy",
-    "not snappy, reflective",
-    "Don't cut it too snappy",
-    "no fast-paced edits",
-    "Not a fast-paced edit. Let the chef explain each dish.",
-    "No slow pacing, this is a hype video.",
     "the last one was too tight",
     # "tight" that isn't about the cut.
     "We're on a tight deadline, just need a first pass by Friday.",
     "Shot on a tight budget so there isn't much B-roll.",
-    "Tight turnaround on this one, client review Monday.",
     "We shot this on a tight schedule so some takes are rough; pick the cleanest reads.",
-    "Tight on time, just get the story in order.",
     "Tight shots of the food, wide shots of the dining room.",
     "Use the tight close-ups of the plating as B-roll.",
-    "Tight CU of the burger for the open.",
-    "Tightly framed interview, so cover jump cuts with B-roll.",
-    "Tightly cropped verticals.",
+    "Tight framing on the chef.",
     "A tight-knit community of chefs and owners.",
-    "These chefs are really tight with each other.",
-    "Keep the lower thirds tight and minimal.",
-    "The owners have a tight relationship with local farms.",
-    "It's a tight squeeze in the kitchen, show that.",
-    "The space is tight, show the crowd energy.",
-    "Hold on tight, the drive is bumpy.",
-    "Tighten the ending.",
-    "tighter hook, drop the second interview line, more drone over the intro",
-    "Punch Bowl Social, Tight Lines Fishing Co, Snappy Salads, The Loose Goose",
-    "Graphics style: loose hand-drawn feel",
+    "Tightly framed interview, so cover jump cuts with B-roll.",
+    # Words near pacing that don't ask for it.
     "Tie up any loose ends in the story by the final line.",
     "End on the punch line about the tacos.",
+    "Lower third style: loose, handwritten",
+    "Graphics style: loose hand-drawn feel",
+    "Keep every pause he takes in the eulogy part",
+    "Quick edit for Instagram",
+    "Relaxed, family-friendly brewery promo.",
     # Both, or said outright.
     "Punchy open but let the emotional moments breathe.",
     "tighter, but let the moments breathe",
     "Pacing: medium.",
-    "Pacing should be medium, nothing rushed.",
 ]
 
 PUNCH_IN = [
@@ -130,54 +306,39 @@ PUNCH_IN = [
     "Punching in on the jump cuts is fine.",
     "Use punch-ins to hide the jump cuts.",
     "Add punch-ins",
+    "Add Punch-Ins",
+    "Punch-Ins On Jump Cuts",
+    "• Punch-ins on jump cuts",
     "Zoom in on jump cuts.",
-    "Zoom-ins on the cuts.",
     "Use zoom-ins on jump cuts.",
-    "Add some zoom cuts on the talking head.",
-    "Do a punch in at each jump cut.",
-    "Scale up 110% on alternating jump cuts.",
-    "Zoom in 10% on every other cut.",
-    "Use digital zooms to hide the jump cuts.",
-    "Hide the jump cuts with a punch in.",
-    "Interview with the owner, single cam. Punch in on every other jump cut so it doesn't look choppy.",
+    "Punch in on every other jump cut so it doesn't look choppy.",
+    "punch in every other cut",
+    "Punch in at each cut.",
     # Another clause's "no" doesn't reach the request.
     "There's no B-roll so punch in on the jump cuts.",
     "We don't have B-roll so punch in on jump cuts.",
-    "Skip the B-roll and punch in on the cuts instead.",
     "Without B-roll we need punch-ins on the jump cuts.",
-    "Single camera, no b-roll, so punch in on the jump cuts",
     "Tight cuts with no dead air and punch-ins on the jump cuts",
     "no B-roll and punch in on jump cuts",
     "Avoid long pauses and punch in on jump cuts",
-    "cut out the pauses without B-roll and punch in on the jump cuts",
-    "no filler and punch in on jump cuts",
     "no ums and punch-ins",
-    "no ums but punch in on the cuts",
-    "Interview with the owner, single cam. No B-roll was shot, so use punch-ins to cover the edits.",
+    "Punch in on the jump cuts - no B-roll was shot.",
+    "Punch-ins: no question, on every jump cut",
     # Negative words that still ask for it.
     "Don't forget to punch in on the jump cuts.",
-    "Don't be afraid to punch in on jump cuts.",
     "I don't mind punch-ins on the talking parts.",
-    "Never leave a raw jump cut: punch in.",
-    "Keep it punchy and punch in on the jump cuts.",
-    "A rundown of 12 vendors, quick cuts between each, punch-ins on the jump cuts.",
 ]
 NO_PUNCH_IN = [
     "",
     "No punch-ins please.",
     "No punch ins or zooms, keep it clean.",
-    "No zooms.",
     "no B-roll or punch-ins",
-    "no zooms or punch-ins",
     "I don't want any punch-ins, it's a doc.",
     "don't add punch-ins",
     "Don't punch in on jump cuts",
     "Don’t punch in on jump cuts",
     "never use punch-ins",
-    "Never punch in.",
     "without any punch-ins",
-    "without zoom cuts",
-    "Avoid zoom cuts.",
     "avoid using punch ins",
     "Skip the punch-ins, just cut it straight",
     "We really don't want you to punch in on the cuts",
@@ -185,65 +346,62 @@ NO_PUNCH_IN = [
     "Please don't do any of those zoom-in jump cuts, the client hates them.",
     "Punch-ins: none please",
     "punch ins? no.",
+    "Punch-ins - no",
+    "Punch-ins – no thanks",
     # One reframe on one moment, not a punch-in at every jump cut.
     "Punch in on the burger when he takes the first bite.",
     "Punch in on Roy's face for the last line.",
-    "List the restaurants and chefs. Punch in on Roy's face when he says the truck started it all.",
     "Punch in at the reveal",
-    "Can you punch in on the speaker during the Q&A answers?",
     "Zoom in on the chef when he talks about the menu.",
-    "Zoom in on the menu board when he mentions prices.",
-    "Add zoom-ins on the food",
-    "Scale up the logo",
-    "the punch-in on V03 looks soft, lose it",
     # Not about framing at all.
     "Dad punches in at the shop at 6am, show the morning routine.",
     "Me punching in at work at 6am, then the drive home.",
     "a punchy promo",
     "the punch line",
-    "Punch Bowl Social, Tight Lines Fishing Co",
 ]
 
 
 @pytest.mark.parametrize("brief", TIGHT)
-def test_briefs_that_ask_for_a_tight_cut(brief):
+def test_without_ai_briefs_that_ask_for_a_tight_cut(brief):
     assert style_from_brief(brief)[0] == "tight"
 
 
 @pytest.mark.parametrize("brief", LOOSE)
-def test_briefs_that_ask_for_a_loose_cut(brief):
+def test_without_ai_briefs_that_ask_for_a_loose_cut(brief):
     assert style_from_brief(brief)[0] == "loose"
 
 
 @pytest.mark.parametrize("brief", MEDIUM)
-def test_briefs_that_dont_ask_for_tight_or_loose(brief):
+def test_without_ai_briefs_that_dont_ask_for_tight_or_loose(brief):
     assert style_from_brief(brief)[0] == "medium"
 
 
-def test_a_turned_down_tight_says_why():
+def test_without_ai_the_log_quotes_the_words_it_read():
+    assert style_from_brief("Short and tight.") == ("tight", 'the brief says "tight"')
     assert style_from_brief("Don't cut it too tight, it's a reflective piece") == ("medium", 'the brief says "Don\'t cut it too tight"')
     assert style_from_brief("keep it loose, not tight") == ("loose", 'the brief says "keep it loose"')
+    assert style_from_brief("") == ("medium", "the brief doesn't ask for tight or loose pacing")
 
 
 @pytest.mark.parametrize("brief", PUNCH_IN)
-def test_briefs_that_ask_for_punch_ins(brief):
+def test_without_ai_briefs_that_ask_for_punch_ins(brief):
     assert punch_in_from_brief(brief)
     assert read_punch_in(brief)[0] is True
 
 
 @pytest.mark.parametrize("brief", NO_PUNCH_IN)
-def test_briefs_that_dont_ask_for_punch_ins(brief):
+def test_without_ai_briefs_that_dont_ask_for_punch_ins(brief):
     assert not punch_in_from_brief(brief)
+    assert read_punch_in(brief)[0] is not True
 
 
-def test_a_turned_down_punch_in_says_so():
+def test_without_ai_a_turned_down_punch_in_says_so():
     assert read_punch_in("No punch-ins please.") == (False, "No punch-ins")
+    assert read_punch_in("Punch-ins - no")[0] is False
     assert read_punch_in("Punch in on Roy's face for the last line.") == (None, "")
 
 
 def test_the_built_in_preset_briefs_read_as_their_own_pacing():
-    assert style_from_brief(presets.VENTURE_OC_BRIEF)[0] == "tight"
-    assert style_from_brief(presets.SAVE_THE_KID_BRIEF)[0] == "loose"
     for preset in presets.BUILT_IN.values():
         assert style_from_brief(preset.brief)[0] == preset.style, preset.name
         assert read_punch_in(preset.brief) == (None, ""), preset.name
@@ -251,12 +409,12 @@ def test_the_built_in_preset_briefs_read_as_their_own_pacing():
 
 @pytest.mark.parametrize("preset", sorted(presets.BUILT_IN))
 @pytest.mark.parametrize("own", [*TIGHT, *LOOSE, *MEDIUM, *PUNCH_IN, *NO_PUNCH_IN])
-def test_your_own_words_beat_the_presets_brief(preset, own):
+def test_without_ai_your_own_words_beat_the_presets_brief(preset, own):
     # The preset's brief comes first, then yours (`--preset` in Terminal, a preset picked in the app).
     preset_brief = presets.BUILT_IN[preset].brief
     whole = preset_brief + "\n\n" + own if own else preset_brief
     mine = style_from_brief(own)
-    said_nothing = mine[1].startswith("the default")
+    said_nothing = mine[1] == "the brief doesn't ask for tight or loose pacing"
     assert style_from_brief(whole, preset_brief)[0] == (presets.BUILT_IN[preset].style if said_nothing else mine[0])
     assert read_punch_in(whole, preset_brief) == read_punch_in(own)
 
@@ -269,6 +427,8 @@ def test_a_preset_brief_says_what_it_reads_when_yours_says_nothing():
 GRAPHICS = [
     "do tight cuts of dead space and list the restaurants and chef names based on this script with motion graphics in the right center side of frame",
     "Add lower thirds for each chef.",
+    "Add Lower Thirds for each chef",
+    "• Lower thirds for each speaker",
     "A lower third with each speaker's name and role.",
     "Put their names on screen as they're introduced.",
     "Show the names on screen.",
@@ -286,17 +446,19 @@ NO_GRAPHICS = [
     "Keep it tight and let the chef talk.",
     "The chef's name is Roy Choi.",
     "She runs a graphic design studio downstairs.",
+    "The graphics designer is in the video.",
+    "Our graphics department made the logo.",
     "List the best moments first.",
 ]
 
 
 @pytest.mark.parametrize("brief", GRAPHICS)
-def test_briefs_that_ask_for_graphics(brief):
+def test_without_ai_briefs_that_ask_for_graphics(brief):
     assert graphics_from_brief(brief)
 
 
 @pytest.mark.parametrize("brief", NO_GRAPHICS)
-def test_briefs_that_dont_ask_for_graphics(brief):
+def test_without_ai_briefs_that_dont_ask_for_graphics(brief):
     assert not graphics_from_brief(brief)
 
 
@@ -309,7 +471,7 @@ def config(tmp_path, monkeypatch):
     return tmp_path / "config"
 
 
-def test_a_build_reads_your_words_before_its_presets(footage, config, tmp_path, capsys):
+def test_a_build_without_ai_reads_your_words_before_its_presets(footage, config, tmp_path, capsys):
     from roughcut.cli import main
 
     # A preset of your own with no pacing of its own: Auto reads the briefs, yours first.
@@ -328,7 +490,7 @@ def test_a_build_reads_your_words_before_its_presets(footage, config, tmp_path, 
     assert "pacing: tight (the preset's brief says \"punchy\")" in capsys.readouterr().err
 
 
-def test_a_build_says_when_it_reads_no_punch_ins(footage, tmp_path, capsys):
+def test_a_build_without_ai_says_how_it_read_punch_ins(footage, tmp_path, capsys):
     from roughcut.cli import main
 
     out = tmp_path / "out"
@@ -336,7 +498,7 @@ def test_a_build_says_when_it_reads_no_punch_ins(footage, tmp_path, capsys):
     assert main(["build", str(footage), "-o", str(out), "-c", "No punch-ins please, it's a doc.", *common]) == 0
     assert 'not punching in (the brief says "No punch-ins")' in capsys.readouterr().err
     assert main(["build", str(footage), "-o", str(out), "-c", "There's no B-roll so punch in on the jump cuts.", *common]) == 0
-    assert 'punching in on jump cuts (the brief says "punch in")' in capsys.readouterr().err
+    assert 'punching in on jump cuts (the brief says "punch in on the jump cuts")' in capsys.readouterr().err
     assert json.loads((out / "plan.json").read_text())["settings"]["punch_in"] is True
 
 
@@ -353,54 +515,3 @@ def test_the_apps_preset_brief_is_sent_apart_and_not_twice(footage, tmp_path, ca
     settings = json.loads((out / "plan.json").read_text())["settings"]
     assert settings["context"] == f"{preset_brief}\n\nLet the chefs' stories breathe.", "the preset's brief once"
     assert settings["preset_brief"] == preset_brief
-
-
-# ------------------------------------------------------------ a brief that asks for graphics while they're off
-
-SCALE_BRIEF = (
-    "do tight cuts of dead space and list the restaurants and chef names based on this script "
-    "with motion graphics in the right center side of frame:\nKogi - Roy Choi\nOx Burger - Damon Cho"
-)
-
-
-def test_a_brief_asking_for_graphics_while_theyre_off_says_how_to_add_them(footage, tmp_path, monkeypatch):
-    from conftest import FakeProvider
-
-    from roughcut import pipeline
-
-    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
-    out = tmp_path / "out"
-    opts = pipeline.Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=tmp_path / "c", context=SCALE_BRIEF, style="auto")
-    result = pipeline.build(opts)
-    note = next(w for w in result.warnings if w.startswith("The brief asks for graphics"))
-    assert '"list the restaurants and chef names"' in note and "motion graphics are off" in note
-    assert "roughcut revise" in note and "--graphics" in note and "--graphics in Terminal" in note
-    report = (out / "edit_report.md").read_text()
-    top = report.split("- **Rough cut:**")[0]
-    assert note in top, "at the top of the report, not only in its Warnings"
-    assert note in json.loads((out / "result.json").read_text())["warnings"]
-    assert note in (out / "roughcut.log").read_text()
-
-
-def test_no_graphics_note_when_the_brief_turns_them_down_or_theyre_on(footage, tmp_path, monkeypatch):
-    from conftest import FakeProvider
-
-    from roughcut import pipeline
-
-    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
-    opts = pipeline.Options(inputs=[footage], out=tmp_path / "o1", name="footage", transcriber="none", cache_dir=tmp_path / "c", context="No graphics, tight cuts.")
-    assert not any("asks for graphics" in w for w in pipeline.build(opts).warnings)
-    # A preset's brief that describes its graphics, with graphics turned off on purpose: not a request of yours.
-    stk = presets.SAVE_THE_KID_BRIEF
-    opts = pipeline.Options(inputs=[footage], out=tmp_path / "o2", name="footage", transcriber="none", cache_dir=tmp_path / "c", context=stk + "\n\nThe hike.", preset_brief=stk)
-    assert not any("asks for graphics" in w for w in pipeline.build(opts).warnings)
-
-
-def test_a_cut_without_ai_says_the_graphics_need_it(footage, tmp_path, capsys):
-    from roughcut.cli import main
-
-    out = tmp_path / "out"
-    assert main(["build", str(footage), "-o", str(out), "-c", "Add lower thirds for each chef.", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c")]) == 0
-    captured = capsys.readouterr()
-    assert 'The brief asks for graphics ("lower thirds"), but this cut was made without AI' in captured.out, "in the CLI's summary, not only the log"
-    assert "--provider claude-code" in captured.out

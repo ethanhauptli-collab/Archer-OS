@@ -25,7 +25,13 @@ it was: the same sections, segments and order, B-roll, music, alternates, flags,
 unless a note says otherwise or a change forces it. Spellings you leave out still apply; to undo one the \
 notes say is wrong, return it with "correct" the same as "heard", and write that name in graphics' text as \
 heard. Earlier notes still apply. Return the complete revised plan in the same format, and in cut_notes say \
-briefly what you changed for these notes."""
+briefly what you changed for these notes.
+For this revision, pacing, punch_ins and graphics_asked say what these notes ask for (the brief's were \
+applied already), read against <cut_settings>. pacing: the pacing the notes ask for, so from medium "make it \
+looser", "too tight" or "let him finish his thoughts" is loose, and "it drags", "speed it up" or "tighter \
+overall" is tight; a note about one moment ("a tighter hook") isn't about pacing. punch_ins: on when they ask \
+for punch-ins at the jump cuts, off when they ask to remove them. unspecified for either when the notes don't \
+ask to change it. graphics_asked: whether these notes ask for on-screen graphics, titles, names or text."""
 
 
 def _snippet(text: str, n: int = 90) -> str:
@@ -82,11 +88,19 @@ def revision_request(
     earlier_notes: list[str],
     keep: list[str],
     avoid: list[str],
+    preset_brief: str = "",
+    style: str = "medium",
+    punch_in: bool = False,
 ) -> str:
-    """The one non-cached part of a revision request (the media part is the build's, byte for byte)."""
-    brief = render_brief(context, target_seconds, script, graphics=graphics, graphics_style=graphics_style)
+    """The one non-cached part of a revision request (the media part is the build's, byte for byte).
+    `style`, `punch_in`: the cut's settings, which notes like "make it looser" are read against."""
+    brief = render_brief(context, target_seconds, script, graphics=graphics, graphics_style=graphics_style, preset_brief=preset_brief)
     brief = brief.removesuffix("Build the rough cut plan.").rstrip()
-    parts = [brief, "<previous_plan>\n" + render_previous_plan(previous, analysis) + "\n</previous_plan>"]
+    settings = (
+        f"This cut is at {style} pacing (tight, medium or loose: how hard pauses are trimmed), with punch-ins "
+        f"{'on' if punch_in else 'off'} and motion graphics {'on' if graphics else 'off'}."
+    )
+    parts = [brief, "<cut_settings>\n" + settings + "\n</cut_settings>", "<previous_plan>\n" + render_previous_plan(previous, analysis) + "\n</previous_plan>"]
     if earlier_notes:
         parts.append("<earlier_notes>\n" + "\n".join(f"- {n}" for n in earlier_notes) + "\n</earlier_notes>")
     parts.append("<editor_notes>\n" + (notes.strip() or "(no notes; see the requirements below)") + "\n</editor_notes>")
@@ -356,7 +370,8 @@ def describe_changes(previous: Plan, revised: Plan, analysis: Analysis, *, befor
 
 
 def report_block(notes: str, earlier: list[str], changes: list[str], missing_keeps: list[str], settings_notes: list[str] | None = None) -> list[str]:
-    """Markdown for the top of the paper edit. `settings_notes`: what the notes asked for that's a cut setting, and how to change it."""
+    """Markdown for the top of the paper edit. `settings_notes`: the pacing and punch-ins the notes changed (or a flag
+    kept), and graphics they asked for while they're off."""
     L = ["## Revision notes", ""]
     L += [f"> {line}" if line.strip() else ">" for line in (notes.strip() or "(no notes)").splitlines()] + [""]
     for n in settings_notes or []:
