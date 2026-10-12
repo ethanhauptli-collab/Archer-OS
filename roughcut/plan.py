@@ -547,8 +547,9 @@ def _take_to_play(
     """Which take of `alt`'s line plays: the chosen one, unless the editor or the revision says another.
 
     An other take in the cut plays instead when the chosen one is left out (--avoid), when it is kept (--keep),
-    or, in a revision of a cut that played the line, when the revision put it there: in place of the chosen take
-    (notes that swap takes; the reviser may leave the alternates as they were), or as the take that played.
+    or, in a revision of a cut that played one take of the line, when the revision put it there: in place of the
+    chosen take (notes that swap takes; the reviser may leave the alternates as they were), or as the take that
+    played. A cut that played several takes (the stringout plays every one) swapped nothing.
     """
     chosen = alt["chosen"]
     present = [seg for seg in in_cut if seg in alt["others"] and not avoided(seg)]
@@ -562,7 +563,7 @@ def _take_to_play(
     if kept:
         warnings.append(f"{kept} plays as asked (--keep): it's another take of {chosen}, so it's the chosen take now (alternates) and {chosen} doesn't play")
         return kept
-    if played is not None and present and chosen not in in_cut and (chosen in played or any(o in played for o in alt["others"])):
+    if played is not None and present and chosen not in in_cut and len([t for t in [chosen, *alt["others"]] if t in played]) == 1:
         take = next((seg for seg in present if seg in played), present[0])
         if chosen in played:
             warnings.append(f"{take} plays in place of {chosen}, the take of this line the last version played: the revision swapped them, so it's the chosen take now (alternates)")

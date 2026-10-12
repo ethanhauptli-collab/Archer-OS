@@ -607,6 +607,12 @@ def _lines_played(out: Path) -> list[str]:
     return [i for s in json.loads((out / "plan.json").read_text())["plan"]["sections"] for i in s["items"] if ".S" in i]
 
 
+def _mountain_takes_in_cut(out: Path) -> list[str]:
+    """The takes of the mountain line the latest version plays, from its paper edit (a re-cut keeps plan.json's plan)."""
+    paper = (out / "edit_report.md").read_text().split("## Paper edit", 1)[1].split("\n## ", 1)[0]
+    return [seg for seg in ("V01.S001", "V01.S003") if f"**{seg}**" in paper]
+
+
 def test_the_editors_avoid_and_keep_decide_which_take_of_a_line_plays(footage, tmp_path, fake, shared_cache):
     out = tmp_path / "out"
     pipeline.build(_opts(footage, out, shared_cache))
@@ -639,6 +645,21 @@ def test_the_editors_avoid_and_keep_decide_which_take_of_a_line_plays(footage, t
     fake.plan = plan
     assert main(["revise", str(out), "Keep the first take.", "--keep", "V01.S001"]) == 0
     assert "V01.S001" in _lines_played(out) and "V01.S003" not in _lines_played(out)
+
+
+def test_revising_a_cut_made_without_ai_plays_the_take_the_revision_chose(footage, tmp_path, monkeypatch, shared_cache):
+    """The stringout played every take, so a revision with only the other take in its sections swapped nothing: the
+    take its alternates chose plays, as a build would play it."""
+    out = tmp_path / "out"
+    build = ["build", str(footage), "-o", str(out), "--name", "footage", "--provider", "none", "--transcriber", "none", "--cache-dir", str(shared_cache)]
+    assert main(build) == 0
+    assert _mountain_takes_in_cut(out) == ["V01.S001", "V01.S003"]
+    fake = FakeProvider(_first_take_plan())
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: fake)
+    result = pipeline.revise(out, "Make a short cut.", Options(inputs=[]), provider="fake")
+    assert _mountain_takes_in_cut(out) == ["V01.S003"]
+    assert any(w.startswith("V01.S001 is another take of V01.S003") and "in its place" in w for w in result.warnings)
+    assert not any("swapped" in w for w in result.warnings)
 
 
 def test_notes_that_swap_one_take_for_another_are_kept_in_re_cuts_and_later_revisions(footage, tmp_path, fake, shared_cache):
