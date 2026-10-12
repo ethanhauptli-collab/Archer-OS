@@ -1060,10 +1060,14 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
             else:
                 specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""
             planned_graphics = sum(1 for g in specs if g.text)
-            # The graphics without a design that would have a place in this cut: what --design-missing designs.
-            missing = [g for g in graphics.place(specs, rough, analysis, []) if g.index not in html]
+            # The graphics without a design this cut has room for beside the designed ones: what --design-missing designs.
+            # One that would only fit by pushing a designed one out stays out: designing it would just swap them.
+            designed = set(html)
+            fits, pushes = graphics.room_for(specs, designed, rough, analysis)
             if design_missing:
-                if missing:
+                if fits:
+                    with_room = [g if i in designed or i in fits else replace(g, text="") for i, g in enumerate(specs)]
+                    missing = [g for g in graphics.place(with_room, rough, analysis, []) if g.index in fits]
                     designer = StopAtLimit(_saved_provider(settings, source))
                     usage.append(designer.usage)
                     with progress.doing(f"designing {len(missing)} graphics that have no design yet"):
@@ -1074,10 +1078,15 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                         )
                     limit_hit = designer.limit
                 else:
-                    log("--design-missing: no graphic placed in this cut is missing a design")
+                    log("--design-missing: this cut has no room for a graphic that has no design yet")
             # Only designed graphics are placed: one without a design never pushes a designed one off the timeline.
             # make() keeps the rest in graphics.json, so a later re-cut (or --design-missing) can place them.
-            ready = [g if i in html else replace(g, text="") for i, g in enumerate(specs)]
+            shown = set(html)
+            if shown - designed:
+                # A new design goes in where it still fits beside the designed ones (one that didn't come back can change that).
+                new, _ = graphics.room_for([g if i in html else replace(g, text="") for i, g in enumerate(specs)], designed, rough, analysis)
+                shown = designed | set(new)
+            ready = [g if i in shown else replace(g, text="") for i, g in enumerate(specs)]
             # make() rewrites graphics.json and the designs: keep this version's copies first.
             versions.snapshot(out_dir, before=version)
             versions.adopt_old_graphics(out_dir)  # clips named before the digest was in the name are reused, not rendered again
@@ -1087,12 +1096,20 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                 )
             graphics_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
-            undone = sum(1 for g in missing if g.index not in html)
-            fits = {g.index for g in missing}
-            graphics_warnings += [
-                f"graphic {g.text!r} has no design yet, and no room in this cut (its words aren't in it, or it would cover another graphic); left out"
-                for i, g in enumerate(specs) if g.text and i not in html and i not in fits
-            ]
+            undone = sum(1 for i in fits if i not in html)
+            for i, g in enumerate(specs):
+                if g.text and i in html and i not in shown:
+                    graphics_warnings.append(f"graphic {g.text!r} is designed now, but has no room beside the others in this cut; its design waits in graphics/left-out/")
+                if not g.text or i in html or i in fits:
+                    continue
+                if i in pushes:
+                    graphics_warnings.append(
+                        f"graphic {g.text!r} has no design yet; designing it would push out {', '.join(map(repr, pushes[i]))}, so it's left out"
+                    )
+                else:
+                    graphics_warnings.append(
+                        f"graphic {g.text!r} has no design yet, and no room in this cut (its words aren't in it, or it would cover another graphic); left out"
+                    )
             if undone:
                 graphics_note = (
                     f"{undone} not designed: the usage limit was reached" if limit_hit is not None

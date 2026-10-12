@@ -1464,17 +1464,51 @@ def test_a_recut_never_lets_a_graphic_without_a_design_push_a_designed_one_out(f
     built = pipeline.build(_opts(footage, out, shared_cache, graphics=True, style="loose"))
     assert _on_timeline(built) == ["The Kids"]  # "Long Day" never got its design
 
+    assert not any("shortened" in w and "'Long Day'" in w for w in built.warnings)  # it isn't on the timeline to be shortened
+
     _no_model(monkeypatch)
     for style in ("tight", "loose"):  # the app's Re-cut, and back
         again = pipeline.rerender(out, Options(inputs=[], style=style), overrides={"style"})
         assert _on_timeline(again) == ["The Kids"], style  # "Long Day" would leave it out at a tight pace, but it has no design to show
-        assert again.summary["graphics"] == {
-            "planned": 2, "placed": 2, "rendered": 1, "note": "1 not designed yet; `roughcut render --design-missing` adds it",
-        }
+        if style == "tight":  # designing "Long Day" wouldn't add it to this cut, only swap it in for "The Kids"
+            assert again.summary["graphics"] == {"planned": 2, "placed": 1, "rendered": 1, "note": None}
+            assert "graphic 'Long Day' has no design yet; designing it would push out 'The Kids', so it's left out" in again.warnings
+            assert not any("--design-missing" in w for w in again.warnings)
+        else:
+            assert again.summary["graphics"] == {
+                "planned": 2, "placed": 2, "rendered": 1, "note": "1 not designed yet; `roughcut render --design-missing` adds it",
+            }
         manifest = _graphics_manifest(out)
         assert set(manifest) == {"Long Day", "The Kids"} and manifest["The Kids"].get("html") and not manifest["Long Day"].get("html")
         validate_dtd(again.fcpxml)
         check_invariants(again.fcpxml)
+
+
+def test_design_missing_never_pushes_a_designed_graphic_out(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: LeavesOutG01(_back_to_back_names()))
+    _fake_renders(monkeypatch, clear_mov)
+    out = tmp_path / "out"
+    pipeline.build(_opts(footage, out, shared_cache, graphics=True, style="loose"))
+
+    # At a tight pace only one of the two fits: "The Kids" has its design, so --design-missing has nothing to add.
+    _no_model(monkeypatch)
+    tight = pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"}, design_missing=True)
+    assert _on_timeline(tight) == ["The Kids"]
+    assert tight.summary["graphics"] == {"planned": 2, "placed": 1, "rendered": 1, "note": None}
+    assert "graphic 'Long Day' has no design yet; designing it would push out 'The Kids', so it's left out" in tight.warnings
+    assert not (out / "graphics" / graphics.LEFT_OUT).is_dir() or not any((out / "graphics" / graphics.LEFT_OUT).iterdir())
+    validate_dtd(tight.fcpxml)
+
+    # At a loose pace both fit: it designs "Long Day" only, and "The Kids" stays as it was.
+    designer = FakeProvider(_back_to_back_names())
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: designer)
+    loose = pipeline.rerender(out, Options(inputs=[], style="loose"), overrides={"style"}, design_missing=True)
+    assert _on_timeline(loose) == ["Long Day", "The Kids"]
+    assert loose.summary["graphics"] == {"planned": 2, "placed": 2, "rendered": 2, "note": None}
+    (call,) = [c for c in designer.calls if c["schema_name"] == "graphics"]
+    assert "Long Day" in call["parts"][-1].text.split("<graphics>")[-1] and "The Kids" not in call["parts"][-1].text.split("<graphics>")[-1]
+    validate_dtd(loose.fcpxml)
+    check_invariants(loose.fcpxml)
 
 
 def test_a_graphic_one_recut_left_out_comes_back_in_the_next_without_the_model(footage, tmp_path, monkeypatch, shared_cache, clear_mov):

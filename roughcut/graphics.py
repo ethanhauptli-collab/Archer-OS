@@ -263,6 +263,33 @@ def place(specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, warnings: 
     return placed
 
 
+def room_for(specs: list[GraphicSpec], designed: set[int], tl: Timeline, analysis: Analysis) -> tuple[list[int], dict[int, list[str]]]:
+    """The graphics without a design (plan positions not in `designed`) this cut has room for beside the designed ones.
+
+    Each is tried in plan order beside the designed ones (and the ones without a design that fit before
+    it): it fits when it is placed and everything placed without it still is, so designing it never
+    pushes a designed graphic off the timeline. Returns (positions that fit, {position: texts it would push out}).
+    """
+
+    def shown(positions: set[int]) -> set[int]:
+        return {g.index for g in place([s if i in positions else replace(s, text="") for i, s in enumerate(specs)], tl, analysis, [])}
+
+    have = {i for i in designed if i < len(specs)}
+    on = shown(have)
+    fits: list[int] = []
+    pushes: dict[int, list[str]] = {}
+    for i, spec in enumerate(specs):
+        if not spec.text or i in have:
+            continue
+        now = shown(have | set(fits) | {i})
+        if i in now and on <= now:
+            fits.append(i)
+            on = now
+        elif i in now:
+            pushes[i] = [specs[k].text for k in sorted(on - now)]
+    return fits, pushes
+
+
 def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) -> list[PlacedGraphic]:
     """Never two graphics on screen at once: shorten the earlier one, or leave the later one out.
 
@@ -296,8 +323,13 @@ def one_at_a_time(placed: list[PlacedGraphic], fps: float, warnings: list[str]) 
     return kept
 
 
+def _shortened_said(prev: PlacedGraphic, g: PlacedGraphic) -> tuple[str, str]:
+    return f"graphic {prev.spec.text!r} shortened to ", f"s so it's gone before {g.spec.text!r}"
+
+
 def shortened_warning(prev: PlacedGraphic, g: PlacedGraphic, seconds: float) -> str:
-    return f"graphic {prev.spec.text!r} shortened to {seconds:.1f}s so it's gone before {g.spec.text!r}"
+    head, tail = _shortened_said(prev, g)
+    return f"{head}{seconds:.1f}{tail}"
 
 
 def make_way_back(placed: list[PlacedGraphic], present: set[str]) -> dict[str, tuple[int, int]]:
@@ -357,6 +389,16 @@ def _said_back(g: PlacedGraphic, was: PlacedGraphic, placed: list[PlacedGraphic]
             if stale in warnings:
                 warnings.remove(stale)
             log(f"{g.slug}: back to {g.frames / fps:.1f}s, since {gone.spec.text!r} isn't on the timeline")
+
+
+def _gone_unshortened(placed: list[PlacedGraphic], present: set[str], warnings: list[str]) -> None:
+    """Drop the warning that a graphic was shortened for the next one when it isn't on the timeline after all."""
+    for g in placed:
+        nxt = next((o for o in placed if o.index == g.shortened_for), None) if g.id not in present else None
+        if nxt is not None:
+            # Its length may have changed since (it moved back onto its words): match the warning whatever it says.
+            head, tail = _shortened_said(g, nxt)
+            warnings[:] = [w for w in warnings if not (w.startswith(head) and w.endswith(tail) and re.fullmatch(r"[\d.]+", w[len(head) : -len(tail)]))]
 
 
 # ------------------------------------------------------------------ re-timing a design for another cut
@@ -1515,6 +1557,7 @@ def make(
     note_new_designs(placed, html, fd)
     # Made way for a graphic that has no design: start on its words, and hold for the full length, after all.
     back = make_way_back(placed, set(html))
+    _gone_unshortened(placed, set(html), warnings)
     for g in placed:
         if g.id in back:
             was = replace(g)
@@ -1538,6 +1581,7 @@ def make(
     files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
     # Made way for a graphic that didn't render: render it again on its words and at its full length (the old clip stays if that fails).
     back = make_way_back(placed, set(files))
+    _gone_unshortened(placed, set(files), warnings)
     if back:
         redo = [g for g in placed if g.id in back]
         before = {g.id: (replace(g), files.pop(g.id), notes.get(g.id)) for g in redo}

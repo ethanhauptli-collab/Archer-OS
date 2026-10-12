@@ -586,6 +586,22 @@ def test_an_overlapping_graphic_is_left_out_when_the_one_before_cant_make_room()
     assert only.word_times[-1][1] > 2.5  # "weeks." comes well after the stat would have started
 
 
+def test_a_graphic_without_a_design_has_room_only_beside_the_designed_ones():
+    caption = spec("kinetic_caption", "V01.S003", "Today we're heading up the mountain", "Today we're heading up the mountain", 0)
+    stat = spec("stat", "V01.S003", "heading", "Stat", 2)
+    a, plan, tl = small_cut([caption, stat])
+    # Designing the caption would only swap it in for the designed stat: no room for it.
+    assert graphics.room_for(plan.graphics, {1}, tl, a) == ([], {0: ["Stat"]})
+    # The stat has no room beside the designed caption; with neither designed, the first that fits wins.
+    assert graphics.room_for(plan.graphics, {0}, tl, a) == ([], {})
+    assert graphics.room_for(plan.graphics, set(), tl, a) == ([0], {})
+    # Names read back to back both fit: the first is shortened for the second, which is designed.
+    first = spec("lower_third", "V01.S003", "the mountain", "Mountain", 3)
+    second = spec("lower_third", "V01.S004", "It's going to be a long day", "Long Day", 3)
+    a, plan, tl = small_cut([first, second])
+    assert graphics.room_for(plan.graphics, {1}, tl, a) == ([0], {})
+
+
 def test_names_read_back_to_back_each_get_their_graphic():
     # A rundown: one name ends a line, the next starts the line after. The second used to be left out.
     first = spec("lower_third", "V01.S003", "the mountain", "Mountain", 3)
@@ -1311,6 +1327,9 @@ def test_a_graphic_that_waited_for_one_that_never_arrives_starts_on_its_words(tm
     assert (long_day.start, long_day.frames, long_day.word_times) == (alone.start, alone.frames, alone.word_times)
     assert [(j["id"], j["frames"]) for j in jobs] == [(long_day.id, alone.frames)]
     assert next(c for c in tl.connected if c.clip_id == long_day.id).start == alone.start
+    _, placing, _ = placed_for([first, second])
+    assert any(w.startswith("graphic 'Mountain' shortened to") for w in placing)  # placed, it made way for "Long Day"...
+    assert not any("shortened" in w for w in warnings)  # ...but it isn't on the timeline, and "Long Day" didn't wait
 
     # The same when the one it waited for doesn't render: it's rendered again, on its words.
     a, plan, tl = small_cut([first, second])
@@ -1323,3 +1342,4 @@ def test_a_graphic_that_waited_for_one_that_never_arrives_starts_on_its_words(tm
     assert next(c for c in tl.connected if c.clip_id == long_day.id).start == alone.start
     entry = next(g for g in json.loads((tmp_path / "out2" / "graphics.json").read_text())["graphics"] if g["id"] == long_day.id)
     assert (entry["start_frame"], entry["frames"]) == (alone.start, alone.frames) and entry["rendered"] == entry["digest"]
+    assert not any("shortened" in w for w in warnings)
