@@ -528,6 +528,14 @@ def kits(con: sqlite3.Connection) -> list[str]:
     return [str(n) for (n,) in _query(con, "SELECT name FROM project_kits ORDER BY name COLLATE NOCASE")]
 
 
+def named(con: sqlite3.Connection, name: str) -> tuple[bool, bool]:
+    """(a collection has this name, a kit has it), by Studio's own rule: letters A-Z in any case.
+    The two are separate lists, so one name can be both."""
+    collection = _query(con, "SELECT 1 FROM collections WHERE name = ? COLLATE NOCASE LIMIT 1", (name,))
+    kit = _query(con, "SELECT 1 FROM project_kits WHERE name = ? COLLATE NOCASE LIMIT 1", (name,))
+    return bool(collection), bool(kit)
+
+
 def original_path(root: str, relative: str) -> str | None:
     """Library root + "/" + the path below it, or None when either isn't a plain path (Studio's own rule)."""
     if not isinstance(root, str) or not isinstance(relative, str) or not root.startswith("/") or not relative:

@@ -62,15 +62,88 @@ def levels_section(tl: Timeline, analysis: Analysis) -> list[str]:
         L += ["| Clip | Used as | Measured | Volume | Note |", "|---|---|---|---|---|"]
         for r in tl.levels:
             clip = analysis.clip(r["clip"])
-            measured = f"{r['lufs']:.1f} LUFS" + (" (speech)" if r.get("words") else "")
+            if r.get("lufs") is not None:
+                measured = f"{r['lufs']:.1f} LUFS" + (" (speech)" if r.get("words") else "")
+            else:  # a sound effect too short for a loudness reading
+                measured = f"peak {r['peak']:.1f} dBFS" if r.get("peak") is not None else "not measured"
             volume = f"{r['volume']:+g} dB" if r["volume"] else "as recorded"
             L.append(f"| {clip.media.name} | {r['use']} | {measured} | {volume} | {r['why']} |")
     leveled = {r["clip"] for r in tl.levels}
     used = {c.clip_id for c in tl.spine} | {c.clip_id for c in tl.connected}
-    unmeasured = sorted(c.media.name for c in analysis.clips if c.id in used and c.media.has_audio and c.id not in leveled and c.role != "graphic")
+    unmeasured = sorted(
+        c.media.name for c in analysis.clips if c.id in used and c.media.has_audio and c.id not in leveled and c.role not in ("graphic", "sfx")
+    )
     if unmeasured:
         L += ["", "Not measured, so left as recorded: " + ", ".join(unmeasured) + "."]
     return L + [""]
+
+
+AMOUNT_TEXT = {
+    "soft": "soft: a whoosh at each section change, and a pop or hit as a lower third, title card or stat lands",
+    "full": "full: the soft set, plus a whoosh into each B-roll stretch without speech and a riser into the last section",
+}
+
+
+def sound_effects_section(tl: Timeline, sfx: dict | None) -> list[str]:
+    """The accents placed (time, what, file, level), where the sounds came from, and what was left out of the pool."""
+    if not sfx or sfx.get("pool") is None:
+        return []
+    from .accents import describe
+    from .sfx import skipped_lines
+
+    pool, amount = sfx["pool"], sfx.get("amount") or "soft"
+    L = ["## Sound effects", ""]
+    counts = describe(pool.counts())
+    where = " and ".join(pool.asked) if pool.asked else "the sounds given"
+    if sfx.get("off"):
+        L += [f"Off for this cut ({sfx['off']}). The pool is kept: {len(pool.sounds)} sounds from {where}.", ""]
+        return L
+    if not pool.sounds:
+        L += [f"None: no usable sound effects in {where}."]
+    elif amount == "none":
+        L += [f"None: the brief or notes asked for no sound effects. The pool has {len(pool.sounds)} sounds ({counts}) from {where}."]
+    elif not tl.accents:
+        missed = sfx.get("missed") or {}
+        nothing = "" if missed.get("no_sound") or missed.get("too_short") or missed.get("replayed") else " Nothing in this cut calls for one."
+        L += [f"No accents on this cut ({AMOUNT_TEXT.get(amount, amount)}).{nothing} The pool has {len(pool.sounds)} sounds ({counts}) in {where}."]
+    else:
+        L += [
+            f"{len(tl.accents)} accent{'s' if len(tl.accents) != 1 else ''} ({AMOUNT_TEXT.get(amount, amount)}), from {len(pool.sounds)} sounds "
+            f"({counts}) in {where}. They're on the effects.SFX role: Timeline Index > Roles mutes or solos them all, and each one's "
+            "Volume is in the audio inspector."
+        ]
+    L.append("")
+    if tl.accents:
+        credits = any(a.get("provider") or a.get("license") for a in tl.accents)
+        L += ["| Time | Accent | File | Level |" + (" Provider and license |" if credits else ""), "|---|---|---|---|" + ("---|" if credits else "")]
+        for a in tl.accents:
+            level = f"{a['volume']:+g} dB" + (" (under a word)" if a.get("under_words") else "")
+            cell = lambda text: " ".join(str(text).replace("|", "/").split())  # noqa: E731
+            row = f"| `{_tc(a['frame'], tl)}` | {cell(a['kind'] + ' ' + a['label'])} | {cell(a['file'])} | {level} |"
+            if credits:
+                row += f" {cell(', '.join(x for x in (a.get('provider'), a.get('license')) if x) or '-')} |"
+            L.append(row)
+        L.append("")
+    missed = sfx.get("missed") or {}
+    for kind, n in sorted((missed.get("no_sound") or {}).items()):
+        L.append(f"- No {kind} in the pool, so {n} place{'s' if n != 1 else ''} that would take one {'have' if n != 1 else 'has'} none.")
+    for kind, n in sorted((missed.get("too_short") or {}).items()):
+        L.append(
+            f"- {n} place{'s' if n != 1 else ''} would take a {kind}, but every {kind} in the pool is shorter than a frame at this cut's frame rate."
+        )
+    if missed.get("replayed"):
+        n = missed["replayed"]
+        L.append(
+            f"- {n} more place{'s' if n != 1 else ''} had no sound left that hadn't played in the 10 s before or after: "
+            "more sounds of that kind in the pool give each one its own."
+        )
+    if L[-1].startswith("- "):
+        L.append("")
+    skipped = skipped_lines(pool)
+    if skipped:
+        L += ["Not in the pool: " + "; ".join(skipped) + "."]
+    L += [f"- {n}" for n in pool.notes]
+    return L + [""] if skipped or pool.notes else L
 
 
 def build_report(
@@ -85,8 +158,10 @@ def build_report(
     graphics: list | None = None,
     revision: list[str] | None = None,
     graphics_refs: list[str] | None = None,
+    sfx: dict | None = None,
 ) -> str:
-    raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role != "graphic")
+    """`sfx`: {"pool": the sound-effect pool, "amount": none/soft/full, "off": why they're off, or None}, when the run has one."""
+    raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role not in ("graphic", "sfx"))
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
     L = [f"# {plan.title}", ""]
     failures = [w for w in (extra_warnings or []) if "planning failed" in w or "no usable sections" in w]
@@ -102,7 +177,7 @@ def build_report(
         L += [f"_{plan.logline}_", ""]
     L += [
         f"- **Rough cut:** {tl.review.length_line() if tl.review else seconds_to_clock(tl.seconds)} ({tl.width}x{tl.height}, {tl.frame_duration.denominator / tl.frame_duration.numerator:.3f} fps)",
-        f"- **Raw media:** {seconds_to_clock(raw)} across {sum(1 for c in analysis.clips if c.role != 'graphic')} clips; {seconds_to_clock(speech)} of transcribed speech",
+        f"- **Raw media:** {seconds_to_clock(raw)} across {sum(1 for c in analysis.clips if c.role not in ('graphic', 'sfx'))} clips; {seconds_to_clock(speech)} of transcribed speech",
     ]
     if stringout is not None and stringout.spine:
         L.append(f"- **Stringout** (all dialogue, dead air removed): {seconds_to_clock(stringout.seconds)}")
@@ -200,12 +275,13 @@ def build_report(
             L.append(f"| `{_tc(g.start, tl)}` | {g.id} | {g.spec.kind.replace('_', ' ')} | {text.replace('|', '/')} | {file} |")
         L.append("")
 
+    L += sound_effects_section(tl, sfx)
     L += levels_section(tl, analysis)
 
     L += ["## Media", "", "| ID | File | Role | Length | Notes |", "|---|---|---|---|---|"]
     for c in analysis.clips:
-        if c.role == "graphic":
-            continue  # listed under Motion graphics
+        if c.role in ("graphic", "sfx"):
+            continue  # listed under Motion graphics and Sound effects
         length = "still" if c.media.kind == "image" else seconds_to_clock(float(c.media.duration))
         desc = (c.visual or {}).get("description", "")
         if not desc and c.has_transcript and c.segments:

@@ -12,6 +12,9 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
     public var graphicsStyle: String?
     public var logo: String?
     public var look: [String]?
+    /// Sound effects for accents (`--sfx`, `--sfx-from`): only presets you saved have them (nil from older CLIs).
+    public var sfx: [String]?
+    public var sfxFrom: [String]?
     /// "built in" or where the user's copy is saved.
     public var source: String?
 
@@ -43,6 +46,13 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
         options.graphicsStyle = graphicsStyle ?? ""
         options.graphicsLogo = logo ?? ""
         options.graphicsLook = look ?? []
+        // Only a preset with sound effects changes yours: the built-in ones have none, and picking one keeps your folder.
+        if let sfx, !sfx.isEmpty {
+            options.sfx = sfx.map { URL(fileURLWithPath: $0) }
+        }
+        if let sfxFrom, !sfxFrom.isEmpty {
+            options.sfxFrom = sfxFrom
+        }
     }
 }
 

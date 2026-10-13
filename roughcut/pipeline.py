@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import os
 import re
 import shlex
 import time
@@ -12,17 +13,18 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
-from . import progress, references, versions
-from .analyze import Analysis, Cache, analyze, default_cache_dir, log, measure_levels
+from . import accents, progress, references, sfx, versions
+from .analyze import Analysis, Cache, Clip, analyze, default_cache_dir, log, measure_levels
 from .captions import clean_spelling
 from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
 from .media import AUDIO_EXTS, require_tools, scan
-from .plan import Plan, as_played, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spec_key, spelling_key
+from .plan import SFX_AMOUNTS, Plan, as_played, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spec_key, spelling_key
 from .prompts import PLANNER_SYSTEM, own_words, pacing_choice, render_brief, render_media
 from .providers import Provider, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, cost_breakdown, make_provider
 from .report import build_report
 from .report_html import report_page
+from .textio import Stalled, bounded
 from .timeline import DIALOGUE_LEVEL, STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
 from .versions import atomic_write, fit_name, planner_label, safe_name, short_slug, slug
@@ -65,6 +67,11 @@ class Options:
     graphics_look: tuple[str, ...] = ()  # approved designs (.html) new ones should match
     graphics_refs: tuple[str, ...] = ()  # --graphics-ref: pictures showing the look; once stored, their names in graphics/references/
     music: list[Path] = field(default_factory=list)  # --music: songs to lay under the cut (not transcribed)
+    sfx: tuple[str, ...] = ()  # --sfx: sound-effect files or folders (absolute paths), for accents (accents.py)
+    sfx_from: tuple[str, ...] = ()  # --sfx-from: Venture Studio collections or kits by name, or kit files Studio exported
+    sfx_named: tuple[str, ...] = ()  # the --sfx-from names typed for this build: one Studio doesn't have stops it before its folder is made
+    sfx_off: bool = False  # --no-sfx: no accents (and the pool isn't read)
+    sfx_amount: str | None = None  # none / soft / full; None: as the planner reads the brief (soft when it says nothing)
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -162,6 +169,7 @@ def run_summary(
     planned_graphics: int | None = None,
     undesigned: int = 0,
     refs: references.ReferenceSet | None = None,
+    sfx_summary: dict | None = None,
 ) -> dict:
     """Counts for the end of a run: graphics planned/placed/rendered, visual-log coverage, what was skipped, cost.
 
@@ -185,6 +193,7 @@ def run_summary(
         "visual_log": visual_log,
         "skipped": {"files": list(skipped_files or []), "plan_refs": len(plan.warnings)},
         "usage": cost_breakdown(usage) if usage and any(u.calls for u in usage) else None,
+        "sfx": sfx_summary,  # the CLI's summary only: not part of the app's done payload
     }
 
 
@@ -207,7 +216,10 @@ def visual_coverage(analysis: Analysis) -> dict:
 
 
 # Cut settings `roughcut render` takes from the saved run unless a flag overrides them.
-RENDER_FIELDS = ("style", "format", "keep_fillers", "broll_db", "music_db", "fill", "stringout", "dialogue_level", "fades", "punch_in")
+RENDER_FIELDS = (
+    "style", "format", "keep_fillers", "broll_db", "music_db", "fill", "stringout", "dialogue_level", "fades", "punch_in",
+    "sfx", "sfx_from", "sfx_off", "sfx_amount",
+)
 
 
 def run_settings(opts: Options, provider: Provider | None = None) -> dict:
@@ -426,7 +438,71 @@ def settings_from_plan(opts: Options, plan: Plan) -> Options:
             log(f"punching in on jump cuts ({why})")
         elif asked is False or by_model:  # said either way, so a misreading shows ("punch in on Roy's face" is a one-off)
             log(f"not punching in ({why})")
+    if opts.sfx_amount not in SFX_AMOUNTS:
+        read = by_model and plan.sfx in SFX_AMOUNTS
+        opts = replace(opts, sfx_amount=plan.sfx if read else "soft")
+        if sfx_wanted(opts):
+            why = {"none": "the brief turns them down", "soft": "the brief asks for a few", "full": "the brief asks for lots"}[plan.sfx] if read else (
+                "the brief doesn't say" if by_model else "made without AI"
+            )
+            log(f"sound effects: {opts.sfx_amount} ({why})")
+        elif read and plan.sfx != "none" and not opts.sfx_off:
+            log("The brief asks for sound effects, but none were given (--sfx FOLDER, or --sfx-from with a Venture Studio collection), so this cut has none.")
     return opts
+
+
+def sfx_wanted(opts: Options) -> bool:
+    """Accents asked for: sounds were given (--sfx, --sfx-from or a preset's) and not turned off (--no-sfx)."""
+    return not opts.sfx_off and bool(opts.sfx or opts.sfx_from)
+
+
+def sfx_sources(opts: Options, *, strict: bool = False):
+    """What --sfx and --sfx-from name (reading Studio's catalog copy, never the sound files). `strict`: a build's
+    typed names must exist in Studio's catalog, checked before its folder is made."""
+    if not sfx_wanted(opts):
+        return None
+    try:
+        return sfx.sources(opts.sfx, opts.sfx_from, strict=opts.sfx_named if strict else (), cache_dir=opts.cache_dir)
+    except sfx.SourceError as e:
+        raise RoughcutError(str(e)) from None
+
+
+def sound_pool(opts: Options, record: dict, *, sources=None) -> tuple[sfx.Pool | None, list[str]]:
+    """The sounds this cut's accents come from, and warnings for the paper edit.
+
+    A re-cut or revision takes the pool saved in plan.json, so it never reads the share or Studio again;
+    `sources` (a build, or new --sfx/--sfx-from) reads them now, each file under a deadline, and saves
+    the pool in `record`'s settings. A saved pool that came out empty (a share that was offline) is read again.
+    """
+    settings = record.setdefault("settings", {})
+    saved = settings.get("sfx_pool")
+    if sources is None and isinstance(saved, dict) and saved.get("sounds"):
+        return sfx.Pool.from_json(saved), []
+    if not sfx_wanted(opts):
+        return (sfx.Pool.from_json(saved) if isinstance(saved, dict) else None), []
+    if sources is None:
+        sources = sfx_sources(opts)
+    pool = sfx.build_pool(sources, Cache(opts.cache_dir or default_cache_dir()), workers=opts.workers)
+    settings["sfx_pool"] = pool.to_json()
+    for line in pool.notes + pool.warnings:
+        log(line)
+    return pool, pool.warnings
+
+
+def sfx_setting(opts: Options) -> tuple[str, str | None]:
+    """(amount, why the accents are off or None)."""
+    if opts.sfx_off:
+        return "none", "--no-sfx"
+    return (opts.sfx_amount if opts.sfx_amount in SFX_AMOUNTS else "soft"), None
+
+
+def place_accents(rough: Timeline, analysis: Analysis, pool, opts: Options, plan: Plan, graphics: list | None = None) -> dict | None:
+    """Put the accents on the rough cut (again, with the graphics' events once they're attached). Returns the paper edit's
+    view of them, or None when the run has no pool."""
+    amount, off = sfx_setting(opts)
+    kinds = {g.id: g.spec.kind for g in graphics or []}
+    missed = accents.place(rough, analysis, None if off else pool, amount, graphic_kinds=kinds, heuristic=plan.source == "heuristic")
+    return {"pool": pool, "amount": amount, "off": off, "missed": missed} if pool is not None else None
 
 
 def settings_from_notes(plan: Plan, opts: Options, given: set[str], previous: int | None) -> tuple[Options, list[str]]:
@@ -448,6 +524,21 @@ def settings_from_notes(plan: Plan, opts: Options, given: set[str], previous: in
         else:
             said.append(f"Punch-ins: {'on' if asked else 'off'}, as your notes ask ({was} {'had none' if asked else 'had them'}).")
             opts = replace(opts, punch_in=asked)
+    if plan.sfx in SFX_AMOUNTS:
+        current, off = sfx_setting(opts)
+        have = bool(opts.sfx or opts.sfx_from)
+        if plan.sfx == "none" and (off or not have or current == "none"):
+            pass  # none asked for, none there
+        elif plan.sfx != "none" and not have:
+            said.append(
+                "Your notes ask for sound effects, but this cut has none to use. Revise again with --sfx FOLDER (or --sfx-from and a "
+                "Venture Studio collection) and the same notes."
+            )
+        elif off and "sfx_off" in given:
+            said.append("Your notes ask for sound effects, but --no-sfx was given, so this version has none.")
+        elif plan.sfx != current or off:
+            said.append(f"Sound effects: {plan.sfx}, as your notes ask ({was} had {'none' if off else current}).")
+            opts = replace(opts, sfx_amount=plan.sfx, sfx_off=False)
     return opts, said
 
 
@@ -555,23 +646,57 @@ def music_problem(song: Path | str) -> str | None:
     return None
 
 
-def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
+SFX_CHECK_SECONDS = 3.0  # is a sound effect still there: a network share gets this long to answer
+
+
+def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool = True, sounds: bool = True) -> list[str]:
     """Clips a cut uses whose files are gone from where the footage was read.
 
     `render` and `revise` reuse that reading, so a song taken out of Downloads or a moved
-    footage folder would otherwise only show up as missing media in Final Cut.
+    footage folder would otherwise only show up as missing media in Final Cut. Sound effects
+    (often on a network share) are checked under a deadline: a share that doesn't answer is said so.
+    `footage`, `sounds`: which of the two to check (the accents are placed again once graphics are attached,
+    so their files are checked for the cut that is written).
     """
     used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
-    gone = [c for c in analysis.clips if c.id in used and not Path(c.media.path).exists()]
-    if not gone:
-        return []
-    named = "; ".join(f"{c.media.name} ({'the music bed, ' if c.music_bed else ''}was at {c.media.path})" for c in gone[:3])
-    more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
-    return [
-        f"{len(gone)} file{'s' if len(gone) != 1 else ''} this cut uses {'are' if len(gone) != 1 else 'is'} no longer where the footage was read: "
-        f"{named}{more}. Final Cut will show {'them' if len(gone) != 1 else 'it'} as missing media: put {'them' if len(gone) != 1 else 'it'} back, "
-        "or relink in Final Cut (File > Relink Files)."
-    ]
+    gone, unanswered = [], []
+    for c in analysis.clips:
+        if c.id not in used:
+            continue
+        if c.role != "sfx":
+            if footage and not Path(c.media.path).exists():
+                gone.append(c)
+            continue
+        if not sounds:
+            continue
+        if unanswered:  # the share already didn't answer: don't wait on it again for each file
+            unanswered.append(c)
+            continue
+        try:
+            if not bounded(os.path.exists, c.media.path, seconds=SFX_CHECK_SECONDS, what=c.media.name):
+                gone.append(c)
+        except Stalled:
+            unanswered.append(c)
+    out = []
+    if gone:
+        def where(c: Clip) -> str:
+            return f"{c.media.name} ({'the music bed, ' if c.music_bed else 'a sound effect, ' if c.role == 'sfx' else ''}was at {c.media.path})"
+
+        named = "; ".join(where(c) for c in gone[:3])
+        more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
+        out.append(
+            f"{len(gone)} file{'s' if len(gone) != 1 else ''} this cut uses {'are' if len(gone) != 1 else 'is'} no longer where the footage was read: "
+            f"{named}{more}. Final Cut will show {'them' if len(gone) != 1 else 'it'} as missing media: put {'them' if len(gone) != 1 else 'it'} back, "
+            "or relink in Final Cut (File > Relink Files)."
+        )
+    if unanswered:
+        n = len(unanswered)
+        out.append(
+            f"The folder or share holding {n} sound effect{'s' if n != 1 else ''} this cut uses didn't answer, so Roughcut couldn't check "
+            f"{'they are' if n != 1 else 'it is'} still there ({unanswered[0].media.path}). Final Cut shows {'them' if n != 1 else 'it'} as "
+            "missing media until it's back."
+        )
+    return out
 
 
 def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None) -> Analysis:
@@ -582,7 +707,7 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         problem = music_problem(song)
         if problem:
             raise RoughcutError(problem)
-    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir])
+    files = footage_files(opts, out_dir)
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -606,6 +731,37 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         read = {Path(c.media.path).resolve() for c in analysis.clips}
         skipped += [f.name for f in files if Path(f).resolve() not in read]
     return analysis
+
+
+def sound_locations(opts: Options) -> list[Path]:
+    """Where the --sfx files and folders really are, links followed, to keep them out of the footage scan.
+
+    Found under a deadline (a folder on a share that's asleep): then they are taken as spelled, and only
+    the ones spelled inside a footage folder can be left out.
+    """
+    if not opts.sfx:
+        return []
+    spelled = [os.path.normpath(str(Path(p).expanduser().absolute())) for p in opts.sfx]
+    try:
+        return [Path(p) for p in bounded(lambda: [os.path.realpath(p) for p in spelled], seconds=SFX_CHECK_SECONDS, what="finding the sound effects")]
+    except Stalled:
+        return [Path(p) for p in spelled if any(_lexically_inside(p, str(Path(i).expanduser().absolute())) for i in opts.inputs)]
+
+
+def footage_files(opts: Options, out_dir: Path) -> list[Path]:
+    """The media files to analyse: the footage folders and songs, without the output folder. Sound effects are never
+    footage: a --sfx folder or file inside a footage folder (or reached through a link to it) is left out of the scan."""
+    held = sound_locations(opts)
+    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir] + held)
+    if held:
+        files = [f for f in files if not any(f == h or h in f.parents for h in held)]
+    return files
+
+
+def _lexically_inside(path: str, folder: str) -> bool:
+    """`path` is `folder` or below it, by their spelling only (a sound-effect folder may be on a share that's asleep)."""
+    a, b = os.path.normpath(os.path.abspath(path)), os.path.normpath(folder)
+    return a != b and (a.startswith(b.rstrip("/") + "/"))
 
 
 def media_part(analysis: Analysis, style: Style) -> TextPart:
@@ -826,6 +982,7 @@ def build(opts: Options) -> Result:
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
     _plan_saved_at(None)
     studio_warning, studio_note = studio_guard(out_dir, opts.cache_dir)  # before the folder is created
+    sounds = sfx_sources(opts, strict=True)  # a Studio collection typed for this build that doesn't exist stops it here
     start_log(out_dir, "build")
     _log_studio(studio_warning, studio_note)
 
@@ -924,7 +1081,7 @@ def build(opts: Options) -> Result:
     try:
         return _finish_build(
             opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
-            summary_base={"skipped_files": skipped_files, "visual_log": visual_log},
+            summary_base={"skipped_files": skipped_files, "visual_log": visual_log}, sounds=sounds,
         )
     except BaseException as e:
         _mark_plan_saved(e, out_dir)
@@ -934,21 +1091,29 @@ def build(opts: Options) -> Result:
 def _finish_build(
     opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
     *, command: str = "build", carry: dict | None = None, report_extra=None, entry_extra: dict | None = None, summary_base: dict | None = None,
-    design_notes: list[str] | None = None, restyle: bool = False, fallback: dict | None = None,
+    design_notes: list[str] | None = None, restyle: bool = False, fallback: dict | None = None, sounds=None,
 ) -> Result:
     """Cut, make graphics, write the version. `carry` (revise): earlier graphic designs to reuse.
     `design_notes`: the notes of the revisions that asked for another look, oldest first, handed to the designer as the editor's
     direction (when it designs all graphics again); `restyle`: the look in `carry` is the current one, which they change in part;
     `fallback`: the earlier designs (_design_pool), kept for a graphic whose new design never comes back.
     `report_extra(rough, outcome)` returns the report's keyword arguments, and may add "changes" (kept in the Result, not the report);
-    it is called again once the graphics are made, with what they came to (revise.change_items)."""
+    it is called again once the graphics are made, with what they came to (revise.change_items).
+    `sounds`: the sound-effect sources to read now (sfx.Sources); without them the pool saved in `record` is used."""
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
-    extra_warnings += missing_media(analysis, rough, stringout)
+    pool, pool_warnings = sound_pool(opts, record, sources=sounds)
+    extra_warnings += pool_warnings
+    sfx_report = place_accents(rough, analysis, pool, opts, plan)
+    with_sfx = accents.with_clips(analysis, rough, pool)
+    extra_warnings += missing_media(with_sfx, rough, stringout, sounds=False)
+    sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
     entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
     extra = report_extra(rough) if report_extra else {}
     changes = extra.pop("changes", None)
-    placed, with_graphics = [], analysis
+    if sfx_report is not None:
+        extra["sfx"] = sfx_report
+    placed, with_graphics = [], with_sfx
     graphics_note = None
     refs = None
     outcome: dict = {}
@@ -963,7 +1128,7 @@ def _finish_build(
                 "`roughcut render` adds any whose designs were saved, and `roughcut render --design-missing` designs the rest."
             ]
             interim = write_outputs(
-                out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
+                out_dir, name, record, plan, with_sfx, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + sound_warnings + pending, **extra),
                 version=version, command=command, entry=entry, quiet=True,
             )
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
@@ -995,7 +1160,10 @@ def _finish_build(
                         logo=opts.graphics_logo, look=opts.graphics_look, spellings=plan.spellings, references=refs,
                     )
             extra_warnings += g_warnings
-            with_graphics = replace(analysis, clips=analysis.clips + g_clips)
+            # Again, with a pop or hit on each graphic now attached: the paper edit and the missing-media check are about this placement.
+            sfx_report = place_accents(rough, analysis, pool, opts, plan, placed) or sfx_report
+            with_graphics = accents.with_clips(analysis, rough, pool, g_clips)
+            sound_warnings = missing_media(with_graphics, rough, stringout, footage=False)
             timings["graphics"] = time.monotonic() - t
             if report_extra is not None and carry is not None:
                 # What the list of changes says about the graphics is what came of them, not what the plan meant.
@@ -1003,6 +1171,8 @@ def _finish_build(
                 outcome["placed"] = {g.index for g in placed}  # the ones with room; the rest never had any
                 extra = report_extra(rough, outcome)
                 changes = extra.pop("changes", None)
+            if sfx_report is not None:
+                extra["sfx"] = sfx_report
             limit_hit = designer.limit
             if limit_hit is not None:
                 limit_missing = undesigned(out_dir)
@@ -1015,6 +1185,7 @@ def _finish_build(
     elif opts.graphics and fell_back:
         extra_warnings.append("Motion graphics were on, but AI planning failed, so this cut has none.")
         graphics_note = "none: AI planning failed"
+    extra_warnings += sound_warnings
     timings["total"] = time.monotonic() - t_start
     fcpxml_path, report_path = write_outputs(
         out_dir,
@@ -1034,6 +1205,7 @@ def _finish_build(
     summary = run_summary(
         plan, graphics_on=opts.graphics, placed=placed, with_graphics=with_graphics, usage=usage,
         skipped_files=base.get("skipped_files"), visual_log=base.get("visual_log"), graphics_note=graphics_note, refs=refs,
+        sfx_summary=accents.summary(rough),
     )
     result = save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, fell_back, warnings, rough.dead_air,
@@ -1062,6 +1234,9 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     settings = saved.get("settings") or {}
     prev_entry = versions.current(out_dir) or {}  # the version this re-cut follows, as it was written: what "changed" is measured from
     before = _previous_cut(out_dir, prev_entry)
+    if overrides is None:
+        default = Options(inputs=[])
+        overrides = {f for f in RENDER_FIELDS if getattr(opts, f) != getattr(default, f)}
     opts = render_options(opts, settings, overrides)
     measure_missing_levels(analysis, opts)
     name = opts.name or saved.get("name") or out_dir.name.removesuffix("_roughcut")
@@ -1100,8 +1275,14 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     version = versions.next_number(out_dir)
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
-    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + missing_media(analysis, rough, stringout)
-    placed, with_graphics = [], analysis
+    # The saved pool, so the accents come back without reading the share or Studio; new --sfx/--sfx-from read theirs now.
+    fresh = bool({"sfx", "sfx_from"} & set(overrides)) and sfx_wanted(opts)
+    pool, pool_warnings = sound_pool(opts, record, sources=sfx_sources(opts) if fresh else None)
+    sfx_report = place_accents(rough, analysis, pool, opts, plan)
+    with_sfx = accents.with_clips(analysis, rough, pool)
+    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + pool_warnings + missing_media(with_sfx, rough, stringout, sounds=False)
+    sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
+    placed, with_graphics = [], with_sfx
     planned_graphics, graphics_note = None, None
     usage: list = []
     limit_hit, undone = None, 0
@@ -1167,7 +1348,10 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                     None, ready, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=house, planned=specs,
                 )
             graphics_warnings += g_warnings
-            with_graphics = replace(analysis, clips=analysis.clips + g_clips)
+            # Again, with a pop or hit on each graphic now attached: the paper edit and the missing-media check are about this placement.
+            sfx_report = place_accents(rough, analysis, pool, opts, plan, placed) or sfx_report
+            with_graphics = accents.with_clips(analysis, rough, pool, g_clips)
+            sound_warnings = missing_media(with_graphics, rough, stringout, footage=False)
             undone = sum(1 for i in fits if i not in html)
             for i, g in enumerate(specs):
                 if g.text and i in html and i not in shown:
@@ -1203,12 +1387,14 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         )
         changes = changes_record(items, unchanged, prev_entry["n"])
         report_changes = ["## Re-cut", ""] + changes_lines(items, prev_entry["n"]) + [""]
+    graphics_warnings += sound_warnings
     fcpxml_path, report_path = write_outputs(
         out_dir, name, record, plan, with_graphics, rough, stringout,
         {
             "graphics": placed, "extra_warnings": graphics_warnings, "usage": usage,
             "graphics_refs": [Path(n).name for n in references.stored_names(settings.get("graphics_refs"))],
             **({"revision": report_changes} if report_changes else {}),
+            **({"sfx": sfx_report} if sfx_report else {}),
         },
         version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
     )
@@ -1216,6 +1402,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     summary = run_summary(
         plan, graphics_on=graphics_on, placed=placed, with_graphics=with_graphics, planned_graphics=planned_graphics, graphics_note=graphics_note,
         visual_log=visual_coverage(analysis) if any(c.visual for c in analysis.clips) else None, usage=usage, undesigned=undone, refs=refs,
+        sfx_summary=accents.summary(rough),
     )
     result = save_result(Result(
         out_dir, fcpxml_path, report_path, plan, rough, stringout, warnings=warnings, dead_air=rough.dead_air,
@@ -1723,6 +1910,7 @@ def revise(
             previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
             graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,
             preset_brief=opts.preset_brief, style=opts.style, punch_in=bool(opts.punch_in),
+            sfx=sfx_setting(opts)[0] if opts.sfx or opts.sfx_from else None,
         )
         t = time.monotonic()
         progress.stage("plan", f"Revising the edit with {p.model}")
@@ -1746,6 +1934,7 @@ def revise(
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}", **takes)
     if look_only:  # what the earlier plan read from its brief or notes isn't something these (no) notes ask for
         plan.pacing, plan.punch_ins, plan.graphics_asked, plan.redesign_graphics = "unspecified", "unspecified", False, "unspecified"
+        plan.sfx = "unspecified"
     raw = chosen_takes(raw, analysis, **takes)  # saved: re-cuts and the next revision play the same takes
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=leave_out, previous=previous)
     plan.warnings += enforced.warnings
@@ -1788,6 +1977,7 @@ def revise(
         extra_warnings.append(
             f"{settings_notes[-1]} Revise with them on: `roughcut revise {shlex.quote(str(out_dir))} --graphics` and the same notes."
         )
+    extra_warnings += [n for n in settings_notes if n.startswith("Your notes ask for sound effects, but this cut has none")]
     # Reference images given now replace the run's saved ones (and are stored only now: a revision that failed above changed nothing).
     new_refs = False
     if given_refs:
@@ -1851,11 +2041,13 @@ def revise(
         block = report_block(notes, [h["notes"] for h in history], changes_lines(items, prev_n, skip=settings_notes), enforced.missing_keeps, settings_notes)
         return {"revision": block, "changes": changes_record(items, unchanged, prev_n)}
 
+    # New --sfx/--sfx-from are read now; otherwise the build's pool, saved in plan.json, places the accents again.
+    sounds = sfx_sources(opts) if {"sfx", "sfx_from"} & given and sfx_wanted(opts) else None
     try:
         return _finish_build(
             opts, out_dir, name, p, analysis, plan, record, False, [p.usage], timings, extra_warnings, t_start, version,
             command="revise", carry=carry, report_extra=report_extra, entry_extra={"notes": notes.strip(), "revision_of": prev_n},
-            design_notes=direction if again else [], restyle=bool(again) and not fresh, fallback=fallback,
+            design_notes=direction if again else [], restyle=bool(again) and not fresh, fallback=fallback, sounds=sounds,
         )
     except BaseException as e:
         _mark_plan_saved(e, out_dir)

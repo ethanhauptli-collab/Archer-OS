@@ -1,8 +1,9 @@
 """Presets: a brand's or channel's usual settings, picked with `--preset NAME`.
 
 A preset holds the brief, target length, pacing, sequence format, whether
-motion graphics are on, the graphics look, an optional logo and approved
-designs from an earlier run for new graphics to match. Two are
+motion graphics are on, the graphics look, an optional logo, approved
+designs from an earlier run for new graphics to match, and (yours only)
+sound effects for accents: folders and Venture Studio collections. Two are
 built in (venture-oc, save-the-kid). `roughcut preset save` stores your
 own, or your version of a built-in one (exact brand colors, a logo), as JSON
 in your user config folder.
@@ -95,12 +96,17 @@ class Preset:
     graphics_style: str = ""
     logo: str | None = None  # PNG/SVG/JPEG/WebP the graphics may show
     look: tuple[str, ...] = ()  # approved designs (.html) new graphics should match
+    # Sound effects for accents (--sfx, --sfx-from). Only your presets have them: the built-in ones run on Macs without them.
+    sfx: tuple[str, ...] = ()  # files or folders
+    sfx_from: tuple[str, ...] = ()  # Venture Studio collections or kits by name
     source: str = field(default="built in", compare=False)  # built in / saved / saved over built in
 
     def to_json(self) -> dict:
         d = asdict(self)
         d.pop("source")
         d["look"] = list(self.look)
+        d["sfx"] = list(self.sfx)
+        d["sfx_from"] = list(self.sfx_from)
         return d
 
     def summary(self) -> str:
@@ -119,6 +125,8 @@ class Preset:
             bits.append("logo")
         if self.look:
             bits.append(f"approved look ({len(self.look)} design{'s' if len(self.look) != 1 else ''})")
+        if self.sfx or self.sfx_from:
+            bits.append("sound effects")
         return ", ".join(bits)
 
 
@@ -174,7 +182,7 @@ def _file(name: str) -> Path:
     return presets_dir() / f"{_clean_name(name)}.json"
 
 
-FIELDS = ("description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo", "look")
+FIELDS = ("description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo", "look", "sfx", "sfx_from")
 TEXT_FIELDS = ("description", "brief", "graphics_style")  # "" when unset; the others are None
 
 
@@ -200,6 +208,10 @@ def _from_file(path: Path) -> Preset:
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise PresetError(f"the preset {path} has a problem: look should be a list of .html files. {fix}")
             value = tuple(value)
+        elif key in ("sfx", "sfx_from"):
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise PresetError(f"the preset {path} has a problem: {key} should be a list of {'paths' if key == 'sfx' else 'names'}. {fix}")
+            value = tuple(v for v in value if v.strip())
         elif key in TEXT_FIELDS:
             value = "" if value is None else str(value)
         else:
@@ -447,6 +459,10 @@ def flags(preset: Preset, command: str) -> list[str]:
             out.append(f"--graphics-logo={preset.logo}")
         for page in preset.look:
             out.append(f"--graphics-look={page}")
+        for path in preset.sfx:
+            out.append(f"--sfx={path}")
+        for name in preset.sfx_from:
+            out.append(f"--preset-sfx-from={name}")  # one Studio doesn't have (any more) is a warning, never a stop
     return out
 
 
@@ -486,6 +502,10 @@ def add_commands(sub) -> None:
         help=f"approve graphics from an earlier run as the look new ones match: its output folder, then up to {LOOK_MAX} graphic ids (default: the first two of different kinds)",
     )
     lk.add_argument("--no-look", action="store_true", help="drop the approved designs")
+    fx = s.add_mutually_exclusive_group()
+    fx.add_argument("--sfx", action="append", metavar="PATH", help="sound effects for accents: a file or folder (repeat for more; replaces the preset's)")
+    fx.add_argument("--no-sfx", action="store_true", help="drop the sound effects (files, folders and Studio collections)")
+    s.add_argument("--sfx-from", action="append", metavar="NAME", help="sound effects from a Venture Studio collection or kit by name (repeat for more; replaces the preset's)")
     rm = actions.add_parser("remove", help="delete a saved preset (a built-in one comes back as it was)")
     rm.add_argument("name")
 
@@ -499,6 +519,7 @@ def _print(preset: Preset) -> None:
     print(f"  look      {preset.graphics_style or '(the default look)'}")
     print(f"  logo      {preset.logo or 'none'}")
     print(f"  approved  {', '.join(Path(p).name for p in preset.look) or 'none'}")
+    print(f"  sound fx  {', '.join([*preset.sfx, *(f'Venture Studio: {n}' for n in preset.sfx_from)]) or 'none'}")
     print("  brief")
     for line in preset.brief.splitlines() or ["(none)"]:
         print(f"    {line}")
@@ -592,6 +613,13 @@ def _command(args: argparse.Namespace) -> int:
         preset.logo = None
     elif args.logo:
         preset.logo = str(Path(args.logo).expanduser().resolve())
+    if args.no_sfx:
+        preset.sfx, preset.sfx_from = (), ()
+    if args.sfx:
+        # By spelling only: a sound-effects folder may be on a share that isn't connected right now.
+        preset.sfx = tuple(dict.fromkeys(os.path.normpath(str(Path(p).expanduser().absolute())) for p in args.sfx if p.strip()))
+    if args.sfx_from:
+        preset.sfx_from = tuple(dict.fromkeys(n.strip() for n in args.sfx_from if n.strip()))
     path = save(preset)
     print(f"Saved the {name} preset to {path}: {preset.summary()}.")
     print(f"Use it with: roughcut build FOLDER --preset {name}")

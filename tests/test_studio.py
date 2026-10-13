@@ -23,9 +23,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
-from conftest import FakeProvider
+from conftest import CANNED_PLAN, FakeProvider, ffmpeg
 
-from roughcut import analyze, cli, pipeline, progress, studio
+from roughcut import analyze, cli, pipeline, progress, sfx, studio
 from roughcut.cli import main
 from roughcut.pipeline import Options
 
@@ -868,3 +868,118 @@ def test_status_text_when_studio_is_not_installed(tmp_path, monkeypatch, capsys)
     assert main(["studio", "status", "--where", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "Venture Studio: not installed" in out and "isn't inside a Venture Studio library" in out
+
+
+# ---------------------------------------------------------------- sound effects from Studio (--sfx-from)
+
+
+def _sounds(library: Path) -> None:
+    """Real audio in the library, where Studio's catalog says it is."""
+    folder = library / "Sound Effects" / "Accents"
+    folder.mkdir(parents=True, exist_ok=True)
+    swell = "volume='exp(-((t-0.5)*(t-0.5))/0.02)':eval=frame"
+    ffmpeg("-f", "lavfi", "-i", "anoisesrc=a=0.5:d=1:r=48000", "-af", swell, str(folder / "whoosh_soft_01.wav"))
+    ffmpeg("-f", "lavfi", "-i", "anoisesrc=a=0.5:d=0.8:r=48000", "-af", swell, str(folder / "take_02.wav"))  # classed by its Studio tags
+    ffmpeg("-f", "lavfi", "-i", "anoisesrc=a=0.9:d=1.2:r=48000", "-af", "volume='exp(-4*t)':eval=frame", str(folder / "impact_hit_01.wav"))
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=500:duration=0.5:sample_rate=48000", str(folder / "whoosh_ogg.flac"))
+    (library / "Sound Effects" / "Template").mkdir(exist_ok=True)
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=500:duration=0.5:sample_rate=48000", str(library / "Sound Effects" / "Template" / "whoosh_inside.wav"))
+
+
+def _sfx_catalog(fake: FakeStudio, *, kits=None) -> None:
+    rel = "Sound Effects/Accents/"
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[
+        _asset(1, rel + "whoosh_soft_01.wav", kind="audio", category="audio", provider="Vendor A", license="Standard", duration=1.0),
+        _asset(2, rel + "take_02.wav", kind="audio", category="audio", tags="transition, fast", provider="Vendor A", license="Standard"),
+        _asset(3, rel + "impact_hit_01.wav", kind="audio", category="audio", provider="Vendor B", license="Extended"),
+        _asset(4, rel + "whoosh_ogg.flac", kind="audio", category="audio"),  # Studio lists it; Roughcut doesn't read it
+        _asset(5, "Sound Effects/Template/whoosh_inside.wav", kind="audio", category="audio", browse_visible=0),  # inside a template
+        _asset(6, rel + "whoosh_gone.wav", kind="audio", category="audio", missing=1),
+        _asset(7, rel + "whoosh_moved.wav", kind="audio", category="audio"),  # the snapshot is a day old: moved since
+        _asset(8, rel + "long_whoosh.wav", kind="audio", category="audio", duration=30.0),  # Studio's length says it's no accent
+        _asset(9, "Footage/clip.mov", kind="video", category="video"),
+    ], collections={"Promo Sounds": [1, 2, 3, 4, 5, 6, 7, 8, 9]}, kits=kits)
+
+
+def test_sound_effects_from_a_studio_collection(footage, fake, library, tmp_path, monkeypatch, only_the_cache_is_opened):
+    _sounds(library)
+    _sfx_catalog(fake)
+    provider = FakeProvider(dict(CANNED_PLAN, sfx="soft"))
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    out = tmp_path / "out"
+    with untouched(fake.dir, library):
+        assert main(["build", str(footage), "-o", str(out), "--name", "footage", "--transcriber", "none", "--cache-dir", str(tmp_path / "cache"),
+                     "--sfx-from", "promo sounds"]) == 0
+    assert all(p.parent.name == studio.CACHE_FOLDER for p in only_the_cache_is_opened)
+    saved = json.loads((out / "plan.json").read_text())
+    pool = sfx.Pool.from_json(saved["settings"]["sfx_pool"])
+    assert sorted(s.name for s in pool.sounds) == ["impact_hit_01.wav", "take_02.wav", "whoosh_soft_01.wav"]
+    take = next(s for s in pool.sounds if s.name == "take_02.wav")
+    assert take.kind == "whoosh" and take.asset_id == 2 and (take.provider, take.license) == ("Vendor A", "Standard")
+    assert take.origin == "collection promo sounds" and take.path == f"{library}/Sound Effects/Accents/take_02.wav"
+    report = (out / "edit_report.md").read_text()
+    section = report.split("## Sound effects")[1].split("\n## ")[0]
+    assert 'the Venture Studio collection "promo sounds"' in section and "Provider and license" in section and "Vendor A, Standard" in section
+    assert "whoosh_ogg.flac" in section and "long_whoosh.wav" in section
+    assert "whoosh_inside" not in report and "whoosh_gone" not in report.split("## Warnings")[0]
+    assert any("no longer there (whoosh_moved.wav)" in w for w in json.loads((out / "result.json").read_text())["warnings"])
+    xml = next(out.glob("*.fcpxml")).read_text()
+    assert "effects.SFX" in xml and (library / "Sound Effects" / "Accents").as_uri() + "/" in xml, "referenced in place, in the library"
+
+
+def test_a_collection_typed_for_a_build_must_exist_and_a_presets_need_not(footage, fake, library, tmp_path, monkeypatch, capsys):
+    _sfx_catalog(fake, kits={"Promo Sounds": [3], "Promo Kit": [3]})
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
+    out = tmp_path / "out"
+    base = ["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "cache")]
+    assert main(base + ["--sfx-from", "Whooshs"]) == 1
+    assert "Venture Studio has no collection or kit named 'Whooshs'" in capsys.readouterr().err
+    assert not out.exists(), "stopped before the output folder was made"
+    assert main(base + ["--sfx-from", "kit:Promo Sounds 2"]) == 1 and not out.exists()
+    # The same name from a preset (or a re-cut) is a warning: the run goes on without it.
+    assert main(base + ["--preset-sfx-from", "Whooshs"]) == 0
+    assert any("Whooshs" in w for w in json.loads((out / "result.json").read_text())["warnings"])
+    # A name that's both a collection and a kit: the collection, said so; "kit:" picks the kit.
+    src = sfx.sources([], ["Promo Sounds"], strict=["Promo Sounds"])
+    assert len(src.items) == 6 and "both a collection and a kit" in src.notes[-1]  # its audio, by Studio's browse filter
+    src = sfx.sources([], ["kit:promo sounds"], strict=["kit:promo sounds"])
+    assert [c.name for c in src.items] == ["impact_hit_01.wav"] and src.items[0].origin == "kit promo sounds"
+
+
+def test_studio_problems_never_stop_a_build(footage, tmp_path, monkeypatch):
+    """Not installed, no snapshot, a library that's offline: warnings, and the cut goes on without those sounds."""
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: FakeProvider())
+    monkeypatch.setenv(studio.STUDIO_ENV, str(tmp_path / "nowhere"))
+    result = pipeline.build(Options(inputs=[footage], out=tmp_path / "a", transcriber="none", cache_dir=tmp_path / "cache",
+                                    sfx_from=("Promo Sounds",), sfx_named=("Promo Sounds",)))
+    assert result.timeline.accents == [] and any("Venture Studio is not installed" in w for w in result.warnings)
+
+
+def test_an_offline_library_drops_its_sounds(fake, library, tmp_path):
+    _sounds(library)
+    _sfx_catalog(fake)
+    src = sfx.sources([], ["Promo Sounds"])
+    shutil.move(str(library), str(library.parent / "unplugged"))  # the share isn't mounted any more
+    try:
+        pool = sfx.build_pool(src, analyze.Cache(tmp_path / "c"))
+    finally:
+        shutil.move(str(library.parent / "unplugged"), str(library))
+    assert pool.sounds == [] and "is offline" in pool.warnings[0] and "Studio Library" in pool.warnings[0]
+
+
+def test_sound_effects_from_a_kit_studio_exported(footage, fake, library, tmp_path, monkeypatch):
+    _sounds(library)
+    rel = library / "Sound Effects" / "Accents"
+    kit = _kit(tmp_path, project={"kit_id": 1, "name": "Promo kit", "description": "", "assets": [
+        {"asset_id": 1, "name": "Soft whoosh", "kind": "audio", "extension": "wav", "provider": "Vendor A", "license": "Standard",
+         "original_reference": str(rel / "whoosh_soft_01.wav"), "catalog_missing": False, "readiness": "ready"},
+        {"asset_id": 3, "name": "impact_hit_01.wav", "kind": "audio", "extension": "wav", "original_reference": str(rel / "impact_hit_01.wav")},
+        {"asset_id": 9, "name": "clip.mov", "kind": "video", "extension": "mov", "original_reference": str(library / "clip.mov")},
+    ]})
+    pool = sfx.build_pool(sfx.sources([], [str(kit)], strict=[str(kit)]), analyze.Cache(tmp_path / "c"))
+    assert sorted((s.name, s.kind) for s in pool.sounds) == [("impact_hit_01.wav", "hit"), ("whoosh_soft_01.wav", "whoosh")]
+    assert pool.asked == ['the Venture Studio kit file "venture-project-promo-kit.json"']
+    with pytest.raises(sfx.SourceError, match="isn't a Venture Studio kit"):
+        bad = tmp_path / "notes.json"
+        bad.write_text("{}")
+        sfx.sources([], [str(bad)], strict=[str(bad)])

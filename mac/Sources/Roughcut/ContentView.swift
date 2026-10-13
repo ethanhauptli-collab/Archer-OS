@@ -206,6 +206,7 @@ struct BuildForm: View {
                     }
                     Toggle("Short fades at audio edits (no clicks)", isOn: $model.options.fades)
                     MusicPicker()
+                    SoundEffectsPicker()
                 }
 
                 Section("Output") {
@@ -433,6 +434,87 @@ struct MusicPicker: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// Sound effects for accents (`--sfx`), and Venture Studio collections (`--sfx-from`) when Studio is on this Mac.
+struct SoundEffectsPicker: View {
+    @Environment(AppModel.self) private var model
+    @State private var collection = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Sound effects")
+                Spacer()
+                Button(model.options.sfx.isEmpty ? "Choose a folder…" : "Add another…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = true
+                    panel.allowsMultipleSelection = true
+                    panel.allowedContentTypes = [.folder, .audio]
+                    panel.message = "A folder of sound effects (whooshes, risers, pops, hits), or single sounds. Roughcut only reads them."
+                    if panel.runModal() == .OK {
+                        for url in panel.urls where !model.options.sfx.contains(url) {
+                            model.options.sfx.append(url)
+                        }
+                    }
+                }
+            }
+            ForEach(model.options.sfx, id: \.self) { url in
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform").foregroundStyle(.secondary)
+                    Text(url.lastPathComponent).lineLimit(1).truncationMode(.middle).help(url.path)
+                    Spacer()
+                    Button {
+                        model.options.sfx.removeAll { $0 == url }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Remove")
+                }
+            }
+            ForEach(model.options.sfxFrom, id: \.self) { name in
+                HStack(spacing: 8) {
+                    Image(systemName: "square.stack").foregroundStyle(.secondary)
+                    Text("Venture Studio: \(name)").lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button {
+                        model.options.sfxFrom.removeAll { $0 == name }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Remove")
+                }
+            }
+            if model.doctor?.ventureStudio?.isInstalled == true {
+                HStack {
+                    TextField("Venture Studio collection", text: $collection, prompt: Text("A collection's name, e.g. Whooshes"))
+                        .onSubmit(addCollection)
+                    Button("Add", action: addCollection)
+                        .disabled(collection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            Text("Optional. Whooshes at section changes, pops and hits as graphics land (more when the brief asks for lots), classed by the words in the file names, set under the dialogue on their own role.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func addCollection() {
+        let name = collection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        if !model.options.sfxFrom.contains(name) {
+            model.options.sfxFrom.append(name)
+        }
+        if !model.options.sfxFromTyped.contains(name) {
+            model.options.sfxFromTyped.append(name)  // typed now: the build stops if Studio has no such collection
+        }
+        collection = ""
     }
 }
 

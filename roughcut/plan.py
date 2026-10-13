@@ -166,14 +166,25 @@ PLAN_SCHEMA: dict = {
                 "look alone. unspecified: they don't mention the graphics."
             ),
         },
+        "sfx": {
+            "type": "string",
+            "enum": ["none", "soft", "full", "unspecified"],
+            "description": (
+                "Sound-effect accents the software adds from the editor's sounds (whooshes at section changes, pops and hits as "
+                "graphics land, risers). none: the brief turns them down ('no sound effects', 'no whooshes'). soft: it asks for a few "
+                "or subtle ones. full: it asks for lots, punchy sound design, whooshes on the B-roll or risers. unspecified: it doesn't "
+                "mention sound effects."
+            ),
+        },
     },
     "required": [
         "title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings", "pacing", "punch_ins", "graphics_asked",
-        "redesign_graphics",
+        "redesign_graphics", "sfx",
     ],
     "additionalProperties": False,
 }
 PACINGS = ("tight", "medium", "loose")  # the plan's pacing when the brief says one ("unspecified" otherwise)
+SFX_AMOUNTS = ("none", "soft", "full")  # the plan's sfx when the brief says one ("unspecified" otherwise)
 
 
 @dataclass
@@ -291,6 +302,7 @@ class Plan:
     punch_ins: str = "unspecified"  # on / off / unspecified
     graphics_asked: bool = False
     redesign_graphics: str = "unspecified"  # a revision's notes ask for another look for the graphics: yes / no / unspecified
+    sfx: str = "unspecified"  # sound-effect accents: none / soft / full / unspecified
 
     def to_json(self) -> dict:
         return {
@@ -324,6 +336,7 @@ class Plan:
             "punch_ins": self.punch_ins,
             "graphics_asked": self.graphics_asked,
             "redesign_graphics": self.redesign_graphics,
+            "sfx": self.sfx,
         }
 
 
@@ -521,6 +534,9 @@ def normalize(
     redesign = raw.get("redesign_graphics")
     redesign = ("yes" if redesign else "no") if isinstance(redesign, bool) else str(redesign or "").strip().lower()
     plan.redesign_graphics = redesign if redesign in ("yes", "no") else "unspecified"
+    sfx = raw.get("sfx")
+    sfx = ("soft" if sfx else "none") if isinstance(sfx, bool) else str(sfx or "").strip().lower()
+    plan.sfx = sfx if sfx in SFX_AMOUNTS else "unspecified"
     graphics = [
         dict(g, segment=lines.replaced.get(str(g.get("segment") or "").strip().upper(), g.get("segment"))) if isinstance(g, dict) else g
         for g in raw.get("graphics") or []

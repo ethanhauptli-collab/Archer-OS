@@ -241,6 +241,14 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     /// Pictures of the look wanted for the graphics (`--graphics-ref`): at most `ReferenceImages.maxCount`, shown to
     /// the graphics designer only. Remembered by path; the ones that have gone aren't restored.
     public var graphicsReferences: [URL] = []
+    /// Sound effects for accents (`--sfx`): folders or single sounds. Remembered, like a library you use every time.
+    public var sfx: [URL] = []
+    /// Venture Studio collections (or kits) to take sound effects from, by name. Remembered, and filled in by a preset.
+    public var sfxFrom: [String] = []
+    /// The names in `sfxFrom` typed into the form in this session. Only these are sent as `--sfx-from`, which stops the build
+    /// when Venture Studio has no such collection; the others (remembered, or a preset's) go as `--preset-sfx-from`, a warning
+    /// in the paper edit, so a collection renamed in Studio doesn't block every build. Not remembered.
+    public var sfxFromTyped: [String] = []
 
     public init() {}
 
@@ -248,7 +256,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         case sources, outputFolder, projectName, brief, targetLength, format, provider, model, visionModel
         case style = "pacing"
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
-        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn, graphicsReferences
+        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn, graphicsReferences, sfx, sfxFrom
     }
 
     /// How apps from before Auto pacing saved it.
@@ -299,6 +307,8 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         graphicsLook = value(.graphicsLook, d.graphicsLook)
         punchIn = value(.punchIn, d.punchIn)
         graphicsReferences = ReferenceImages.restoring(value(.graphicsReferences, d.graphicsReferences))
+        sfx = value(.sfx, d.sfx)
+        sfxFrom = value(.sfxFrom, d.sfxFrom)
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -400,6 +410,12 @@ public struct BuildOptions: Codable, Equatable, Sendable {
             args.append("--language=\(language.trimmed)")
         }
         args += music.map { "--music=\($0.path)" }
+        // Read only, and never checked here: a folder on a network share that's asleep would hang the form.
+        args += sfx.map { "--sfx=\($0.path)" }
+        let typed = Set(sfxFromTyped.map(\.trimmed))
+        for name in sfxFrom.map(\.trimmed) where !name.isEmpty {
+            args.append(typed.contains(name) ? "--sfx-from=\(name)" : "--preset-sfx-from=\(name)")
+        }
         if dialogueLevel != .standard {
             args.append("--dialogue-level=\(dialogueLevel.rawValue)")
         }
@@ -429,6 +445,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         copy.brief = ""
         copy.targetLength = ""
         copy.music = []
+        copy.sfxFromTyped = []
         return copy
     }
 }

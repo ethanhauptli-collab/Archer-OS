@@ -33,6 +33,14 @@ def parse_silencedetect(stderr: str, duration: float) -> list[tuple[float, float
 DEFAULT_NOISE_DB = -35.0
 
 
+def loudest_window(peaks: list[float], window: float = 0.05) -> float | None:
+    """Seconds into a sound where its loudest `window` (of `window_peaks`) starts: the first one, on a tie."""
+    if not peaks:
+        return None
+    best = max(range(len(peaks)), key=lambda i: (peaks[i], -i))
+    return round(best * window, 3)
+
+
 def window_peaks(path: Path, window: float = 0.05) -> list[float]:
     """Peak level (dBFS) of each 50 ms of the first audio track; [] if it can't be read."""
     af = (
@@ -74,7 +82,7 @@ def noise_threshold(peaks: list[float], default: float = DEFAULT_NOISE_DB) -> tu
 LOUDNESS_STEP = 0.1  # seconds between loudness blocks (BS.1770's 75% overlap of 400 ms)
 
 
-def loudness_blocks(path: Path) -> dict | None:
+def loudness_blocks(path: Path, pad: float = 0.0) -> dict | None:
     """Momentary loudness (LUFS, 400 ms window) and sample peak (dBFS) every 100 ms.
 
     One pass of ffmpeg's ebur128 over the first audio track. Mono is measured
@@ -82,10 +90,15 @@ def loudness_blocks(path: Path) -> dict | None:
     over any part of the clip is the gated energy mean of these blocks
     (`gated_loudness`), so speech-only loudness needs no second pass.
     None if the audio can't be read.
+
+    `pad`: seconds of silence before and after the sound, so a file shorter than
+    the 400 ms window (a pop, a click) still fills one and gets a reading. The
+    silence falls under the absolute gate, so it doesn't lower the result.
     """
     n = int(48000 * LOUDNESS_STEP)
+    padding = f"adelay={round(pad * 1000)}:all=1,apad=pad_dur={pad:g}," if pad > 0 else ""
     af = (
-        f"aresample=48000,asetnsamples=n={n}:p=0,"
+        f"{padding}aresample=48000,asetnsamples=n={n}:p=0,"
         "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=Peak_level,"
         "ebur128=metadata=1:dualmono=1,ametadata=mode=print:file=-"
     )

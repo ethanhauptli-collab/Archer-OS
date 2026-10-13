@@ -91,6 +91,26 @@ final class RevisionTests: XCTestCase {
         XCTAssertEqual(plain, untouched)
     }
 
+    func testPresetSoundEffectsFillTheFormOnlyWhenItHasThem() throws {
+        let json = #"[{"name": "venture-oc", "brief": "Promo brief", "graphics": true, "sfx": [], "sfx_from": []}, {"name": "promos", "brief": "Mine", "sfx": ["/Volumes/Media/SFX"], "sfx_from": ["Whooshes"]}, {"name": "older"}]"#
+        let presets = try XCTUnwrap(JSONLines.presets(from: json))
+        XCTAssertEqual(presets[1].sfx, ["/Volumes/Media/SFX"])
+        XCTAssertEqual(presets[1].sfxFrom, ["Whooshes"])
+        XCTAssertNil(presets[2].sfx)  // from a CLI before sound effects
+        var o = options()
+        o.sfx = [URL(fileURLWithPath: "/Users/you/SFX")]
+        presets[0].apply(to: &o)  // a built-in preset has none: yours stay
+        XCTAssertEqual(o.sfx, [URL(fileURLWithPath: "/Users/you/SFX")])
+        presets[1].apply(to: &o)
+        XCTAssertEqual(o.sfx, [URL(fileURLWithPath: "/Volumes/Media/SFX")])
+        XCTAssertEqual(o.sfxFrom, ["Whooshes"])
+        // A preset's Studio names are a preset's to send: one Studio has lost is a warning in the paper edit, never a stop.
+        XCTAssertTrue(o.arguments().contains("--preset-sfx-from=Whooshes"))
+        XCTAssertFalse(o.arguments().contains("--sfx-from=Whooshes"))
+        presets[2].apply(to: &o)
+        XCTAssertEqual(o.sfxFrom, ["Whooshes"])
+    }
+
     func testReviseOfACutMadeWithoutAIUsesTheChosenPlanner() throws {
         // A "None: just cut the silence" cut has no planner to reuse: the CLI fell back to the API key,
         // which a Claude-plan user doesn't have, and stopped with "No Claude API key is set".

@@ -29,13 +29,15 @@ take you use becomes that alternate's chosen one. Spellings you leave out still 
 notes say is wrong, return it with "correct" the same as "heard", and write that name in graphics' text as \
 heard. Earlier notes still apply. Return the complete revised plan in the same format, and in cut_notes say \
 briefly what you changed for these notes.
-For this revision, read pacing, punch_ins and graphics_asked only from <editor_notes>, never from the brief \
+For this revision, read pacing, punch_ins, graphics_asked and sfx only from <editor_notes>, never from the brief \
 or <earlier_notes>: <cut_settings> is the editor's current choice, including any re-cut since the brief or the \
 earlier notes. pacing: the pacing these notes ask for, read against <cut_settings>, so from medium "make it \
 looser", "too tight" or "let him finish his thoughts" is loose, and "it drags", "speed it up" or "tighter \
 overall" is tight; a note about one moment ("a tighter hook") isn't about pacing. punch_ins: on when they ask \
-for punch-ins at the jump cuts, off when they ask to remove them. Return unspecified for either unless these \
-notes ask to change it. graphics_asked: whether these notes ask for on-screen graphics, titles, names or text.
+for punch-ins at the jump cuts, off when they ask to remove them. sfx: none when they ask to lose the sound \
+effects ("lose the whooshes", "no sound effects"), soft or full when they ask for fewer and subtler or for more of \
+them. Return unspecified for any of these unless these notes ask to change it. graphics_asked: whether these notes \
+ask for on-screen graphics, titles, names or text.
 Return each graphic's direction exactly as <previous_plan> gives it unless these notes change it: a changed \
 direction (or text) designs that graphic again. redesign_graphics: yes only when these notes ask to change how \
 the graphics look or move (style, colour, font, size, position, speed, "make them bolder", "like this"), which \
@@ -103,15 +105,20 @@ def revision_request(
     preset_brief: str = "",
     style: str = "medium",
     punch_in: bool = False,
+    sfx: str | None = None,
 ) -> str:
     """The one non-cached part of a revision request (the media part is the build's, byte for byte).
-    `style`, `punch_in`: the cut's settings, which notes like "make it looser" are read against."""
+    `style`, `punch_in`, `sfx` (the accents' amount; None: the cut has no sound effects to use): the cut's settings,
+    which notes like "make it looser" are read against."""
     brief = render_brief(context, target_seconds, script, graphics=graphics, graphics_style=graphics_style, preset_brief=preset_brief)
     brief = brief.removesuffix("Build the rough cut plan.").rstrip()
+    accents = (
+        f"sound-effect accents {sfx} (none, soft or full)" if sfx is not None else "no sound effects to place (none were given)"
+    )
     settings = (
         f"This cut is at {style} pacing (tight, medium or loose: how hard pauses are trimmed), with punch-ins "
-        f"{'on' if punch_in else 'off'} and motion graphics {'on' if graphics else 'off'}. This is the editor's current "
-        "choice: return pacing and punch_ins as unspecified unless these notes ask to change it."
+        f"{'on' if punch_in else 'off'}, motion graphics {'on' if graphics else 'off'} and {accents}. This is the editor's current "
+        "choice: return pacing, punch_ins and sfx as unspecified unless these notes ask to change it."
     )
     parts = [brief, "<cut_settings>\n" + settings + "\n</cut_settings>", "<previous_plan>\n" + render_previous_plan(previous, analysis) + "\n</previous_plan>"]
     if earlier_notes:
