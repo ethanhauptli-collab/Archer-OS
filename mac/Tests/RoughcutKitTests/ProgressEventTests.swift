@@ -78,4 +78,28 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertFalse(bad.anthropicKeyWorks)
         XCTAssertEqual(bad.anthropicKeyMessage, "Anthropic rejected the key.")
     }
+
+    func testDoctorReportVentureStudio() throws {
+        // An older CLI has no venture_studio key: still decodes, no row.
+        let older = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "ffmpeg": null, "ffprobe": null, "transcriber": null, "anthropic_key": false, "openai_key": false, "openai_installed": false}"#
+        XCTAssertNil(try XCTUnwrap(JSONLines.doctor(from: older)).ventureStudio)
+
+        // As `roughcut doctor --json --offline` prints it.
+        let line = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "ffmpeg": "/opt/homebrew/bin/ffmpeg", "ffprobe": "/opt/homebrew/bin/ffprobe", "transcriber": "mlx", "anthropic_key": false, "anthropic_key_status": "missing", "anthropic_key_message": "No key.", "anthropic_key_source": null, "openai_key": false, "openai_installed": false, "claude_code": null, "claude_code_auth": null, "graphics": "not checked", "venture_studio": {"installed": true, "available": true, "reason": null, "folder": "/Users/you/Library/Application Support/com.hauptli.venturestudio", "snapshot": {"id": "1700000500-1-2", "name": "Before catalog restore", "created_at": 1700000500, "when": "12 Oct 21:43", "age_hours": 5.0, "before_restore": true, "imported": false, "copy": "/Users/you/Library/Caches/roughcut/venture-studio/1700000500-1-2.sqlite"}, "items": 2, "records": 2, "libraries": [{"name": "Studio Library", "path": "/Volumes/Shared/Studio Library", "online": null}], "notes": ["The newest catalog snapshot is the copy Studio saved just before a catalog restore."], "settings": {"automatic_updates": true, "daily_backups": true}, "summary": "catalog snapshot from 12 Oct 21:43 (5 h old), 2 items, 1 folder (not checked); it's the copy from before a catalog restore", "offline": true}}"#
+        let studio = try XCTUnwrap(JSONLines.doctor(from: line)?.ventureStudio)
+        XCTAssertTrue(studio.isInstalled)
+        XCTAssertFalse(studio.isReady)  // a note to read
+        XCTAssertEqual(studio.detail, "catalog snapshot from 12 Oct 21:43 (5 h old), 2 items, 1 folder (not checked); it's the copy from before a catalog restore (1 note: roughcut studio status)")
+
+        let absent = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "anthropic_key": false, "openai_key": false, "openai_installed": false, "venture_studio": {"installed": false, "available": false, "reason": "not installed", "folder": "/Users/you/Library/Application Support/com.hauptli.venturestudio", "snapshot": null, "items": null, "records": null, "libraries": [], "notes": [], "settings": null, "summary": "not installed", "offline": false}}"#
+        let notInstalled = try XCTUnwrap(JSONLines.doctor(from: absent)?.ventureStudio)
+        XCTAssertFalse(notInstalled.isInstalled)
+        XCTAssertFalse(notInstalled.isReady)
+        XCTAssertEqual(notInstalled.detail, "Not installed (optional)")
+
+        let noSnapshot = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "anthropic_key": false, "openai_key": false, "openai_installed": false, "venture_studio": {"installed": true, "available": false, "reason": "Venture Studio has no catalog snapshot yet (in Studio, click Back up catalog now)", "libraries": [], "notes": []}}"#
+        let waiting = try XCTUnwrap(JSONLines.doctor(from: noSnapshot)?.ventureStudio)
+        XCTAssertFalse(waiting.isReady)
+        XCTAssertEqual(waiting.detail, "Venture Studio has no catalog snapshot yet (in Studio, click Back up catalog now)")
+    }
 }

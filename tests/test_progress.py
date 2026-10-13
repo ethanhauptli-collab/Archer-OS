@@ -90,9 +90,13 @@ def test_doctor_json(capsys, monkeypatch):
     assert main(["doctor", "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
     for key in ("version", "python", "executable", "ffmpeg", "ffprobe", "transcriber", "anthropic_key", "anthropic_key_status",
-                "anthropic_key_message", "openai_key", "openai_installed"):
+                "anthropic_key_message", "openai_key", "openai_installed", "venture_studio"):
         assert key in report
     assert report["anthropic_key_status"] == "missing" and "console.anthropic.com" in report["anthropic_key_message"]
+    # What the app's Settings row decodes (StudioStatus): no Studio on this machine, so no row.
+    studio = report["venture_studio"]
+    assert studio["installed"] is False and studio["available"] is False and studio["reason"] == "not installed"
+    assert isinstance(studio["summary"], str) and studio["notes"] == []
 
 
 def test_doctor_offline_does_not_call_anthropic(capsys, monkeypatch):

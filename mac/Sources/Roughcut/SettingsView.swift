@@ -45,6 +45,9 @@ struct GeneralSettings: View {
                     CheckRow(ok: doctor.transcriber != nil, title: "Transcription", detail: doctor.transcriber ?? "pip install -e '.[mac]'")
                     CheckRow(ok: doctor.anthropicKeyWorks, title: "Claude API key", detail: keyDetail(doctor))
                     CheckRow(ok: doctor.openaiKey && doctor.openaiInstalled, title: "OpenAI (optional)", detail: doctor.openaiInstalled ? (doctor.openaiKey ? "Ready" : "No key") : "Not installed")
+                    if let studio = doctor.ventureStudio, studio.isInstalled {
+                        CheckRow(ok: studio.isReady, title: "Venture Studio", detail: studio.detail)
+                    }
                 } else {
                     Text(model.doctorError ?? "Checking…")
                         .foregroundStyle(.secondary)

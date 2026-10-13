@@ -187,10 +187,35 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
     public var claudeCodeAuth: String?
     /// Why motion graphics can't render here (nil = ready, or an older CLI).
     public var graphics: String?
+    /// What Roughcut can read from Venture Studio (nil from older CLIs).
+    public var ventureStudio: StudioStatus?
 
     public var hasFFmpeg: Bool { ffmpeg != nil && ffprobe != nil }
     public var claudeCodeUsesSubscription: Bool { claudeCodeAuth.map { $0 != "api_key" } ?? false }
     public var anthropicKeyWorks: Bool { anthropicKeyStatus.map { $0 == "ok" || $0 == "not checked" } ?? anthropicKey }
+}
+
+/// `venture_studio` in `roughcut doctor --json`: the catalog snapshot Roughcut reads (read only), or why it can't.
+public struct StudioStatus: Decodable, Equatable, Sendable {
+    public var installed: Bool?
+    public var available: Bool?
+    /// Why Studio can't be read ("not installed", no snapshot yet, a newer catalog format...).
+    public var reason: String?
+    /// One line: the snapshot's date and age, item count, folders and whether they're online.
+    public var summary: String?
+    /// Things to know even when it works (a snapshot from before a catalog restore, an old one...).
+    public var notes: [String]?
+
+    public var isInstalled: Bool { installed ?? false }
+    public var isReady: Bool { (available ?? false) && (notes ?? []).isEmpty }
+    /// The Settings row's text.
+    public var detail: String {
+        guard isInstalled else { return "Not installed (optional)" }
+        guard available == true else { return reason ?? "Not available" }
+        let count = notes?.count ?? 0
+        let text = summary ?? "Ready"
+        return count == 0 ? text : text + " (\(count) note\(count == 1 ? "" : "s"): roughcut studio status)"
+    }
 }
 
 public enum JSONLines {
