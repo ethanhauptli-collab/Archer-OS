@@ -25,7 +25,7 @@ The build is signed ad hoc, so after each rebuild macOS may ask again to allow K
 
 1. The app looks for the CLI in this order: the path set in Settings, the repo it was built from, `~/Archer-OS/.venv/bin/roughcut` and a few other usual spots. If it can't find it, the banner at the top of the window says so. Point to it in **Settings → General**.
 2. Choose who plans the edit. **Claude (your Pro/Max plan, via Claude Code)** needs Claude Code installed and signed in (`claude`, then `/login`). **Claude (API key)** needs a key in **Settings → API Keys** (or click **Use keys from Terminal** to import `ANTHROPIC_API_KEY` from your `~/.zshrc`). Apps opened from the Dock don't see shell variables, so keys are stored in the macOS Keychain and passed to the CLI only while it runs.
-3. **Settings → General → Setup check** confirms ffmpeg, transcription, the graphics renderer, Claude Code and keys (this runs `roughcut doctor`).
+3. **Settings → General → Setup check** confirms ffmpeg, transcription, the graphics renderer, Claude Code and keys (this runs `roughcut doctor`). When Venture Studio is on this Mac, a Venture Studio row says what Roughcut can read from it (the catalog snapshot's date, items, folders) or why not; it never blocks a build, and there's no row without Studio. A build of footage inside a Studio library doesn't ask anything in the app: the paper edit's warnings say the output folder is inside the library (in Terminal, `roughcut build` offers a folder outside it).
 
 ## What's in the window
 
@@ -52,7 +52,7 @@ If a run stops after the plan was saved, the error offers **Finish without AI**.
 
 | | |
 |---|---|
-| `Sources/RoughcutKit/` | Foundation-only core: `BuildOptions` (form → CLI arguments; saved settings that survive app updates), `Revisions.swift` (`Preset`, `ReviseOptions`, reading the `resume` command), `RunState` (where the window goes when a run ends), `ProgressEvent`/`RunResult` (JSON-lines decoding, run summary), `CLIProcess` (runs the CLI and streams its output, never dropping the final `done` event), `CLILocator` (finds the CLI, fixes PATH for Homebrew). Unit-tested. |
+| `Sources/RoughcutKit/` | Foundation-only core: `BuildOptions` (form → CLI arguments; saved settings that survive app updates), `Revisions.swift` (`Preset`, `ReviseOptions`, reading the `resume` command), `RunState` (where the window goes when a run ends), `ProgressEvent`/`RunResult` (JSON-lines decoding, run summary; `DoctorReport` with its optional `StudioStatus`), `CLIProcess` (runs the CLI and streams its output, never dropping the final `done` event), `CLILocator` (finds the CLI, fixes PATH for Homebrew). Unit-tested. |
 | `Sources/Roughcut/` | The SwiftUI app: `AppModel` (state machine: form → running → finished/failed; build, re-cut and revise; presets; recent runs; keep-awake and notifications; update), `ContentView` (form, drop zone, music and logo pickers), `RunView` (stage checklist and log), `ResultView` (open in FCP, Finder, paper edit, re-cut, revise), `SettingsView`, `Keychain`. |
 | `Tests/RoughcutKitTests/Fixtures/progress-sample.jsonl` | Real CLI output. `tests/test_progress.py` in the Python suite fails if the CLI's output drifts from it. |
 | `scripts/build-app.sh` | Packages the SwiftPM executable as a signed (ad-hoc) `.app` with an icon. It also records this repo's CLI path in `Info.plist`. |

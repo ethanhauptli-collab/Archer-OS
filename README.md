@@ -29,7 +29,7 @@ Then choose how the AI steps are paid for:
 - **Your Claude Pro/Max plan** (no API key): install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude` once and type `/login`. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
 - **An API key** from [console.anthropic.com](https://console.anthropic.com) → API Keys: `roughcut key set` (or the app's Settings → API Keys) saves it in the macOS Keychain.
 
-`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key.
+`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)).
 
 **Updating:** `roughcut update` from any folder, or **Roughcut → Update Roughcut…** in the app. It pulls the latest code, reinstalls only when the dependencies changed, and lists what's new. If the Mac app changed, it prints the one command that rebuilds it. A copy too old to have `roughcut update` (it says "invalid choice: 'update'") updates once with:
 
@@ -88,7 +88,7 @@ Paths with spaces need quotes, or drag the folder from Finder into the Terminal 
 
 ## What you get
 
-Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherever `-o` says).
+Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherever `-o` says; footage inside a Venture Studio library gets [a warning or an offer](#venture-studio) first).
 
 | File | What it is |
 |---|---|
@@ -149,7 +149,7 @@ Every later run with that preset shows those designs to the designer, which matc
 |---|---|---|
 | `--dialogue-level LUFS` | -16 | Every clip's speech is matched to this loudness (-14 is louder, for phones). `off` keeps clips as recorded |
 | `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue |
-| `--music FILE` | | A song to lay under the cut (repeatable). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame |
+| `--music FILE` | | A song to lay under the cut (repeatable; when Claude doesn't pick one, or without AI, the first one given plays). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame |
 | `--fades on/off` | on | Short de-click fades at audio edits and soft fades on B-roll sound (never over a word) |
 
 A boost stops before the peaks clip, and the paper edit's Levels table says when a clip couldn't reach the dialogue level or brings a noisy background up with it (Voice Isolation or a limiter in Final Cut finishes the job).
@@ -170,6 +170,15 @@ Graphics are never turned on by the brief alone, since they add model calls and 
 - **A design that hangs** is stopped after a time limit and left out with a note naming the file to fix; the rest of the cut is delivered.
 
 Rendering took about 11 seconds for one 4-second 1080p graphic on the 4-core test machine, and several render at once, so eight took about 37 seconds (an M-series Mac is usually quicker). Designing takes a minute or two for a promo's worth of graphics.
+
+## Venture Studio
+
+If you keep your assets in Venture Studio, `roughcut studio status` says what Roughcut can see of it: the date and age of Studio's newest catalog snapshot, how many items Studio lists, each library folder and whether it's online (all checked within 3 seconds; `--offline` skips it), and anything worth knowing, such as a snapshot Studio saved just before a catalog restore, one days old, or a newer catalog format this Roughcut doesn't read yet. `--json` prints the same for scripts, and `--where FOLDER` says whether a folder is inside a Studio library and where a build of it would write. `roughcut doctor` and the app's Setup check have a Venture Studio row; it never fails the check, and on a Mac without Studio doctor only says "not installed" and the app shows no row.
+
+Roughcut only ever reads, and only a verified copy of Studio's own daily catalog snapshot (checked against the snapshot's size and checksum, kept in Roughcut's cache under `venture-studio/`) or a kit you export from Studio. It never opens Studio's live catalog or anything else in Studio's folder with a database, never writes there or in a library, and a problem with Studio never stops a run. Studio makes a snapshot about once a day while it's open, so what Roughcut sees can be a day old; Back up catalog now in Studio refreshes it.
+
+- **Output folder guard**: when your footage sits inside a Studio library, the default output folder (`<footage folder>_roughcut`, next to it) would be inside it too, and Studio would catalog the FCPXML, graphics and history copies Roughcut writes there. A Terminal build asks first and offers `~/Movies/Roughcut/<library name>/<path below the library>_roughcut` instead. With `-o`, a folder that already holds a project, or from the app, Roughcut writes where it was told and warns in the log and at the top of the paper edit; `render` and `revise` warn too.
+- **Project names** in the FCPXML have no control characters and stay within 200 characters (a long name is shortened before " - Rough Cut vN (...)"), so Studio's Project history can review the file.
 
 ## Useful options
 
