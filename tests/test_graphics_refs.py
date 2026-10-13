@@ -20,7 +20,7 @@ from roughcut.cli import main, summary_lines
 from roughcut.graphics import PlacedGraphic
 from roughcut.pipeline import Options
 from roughcut.plan import GraphicSpec, normalize
-from roughcut.providers import ImagePart, TextPart
+from roughcut.providers import ImagePart, ProviderAuthError, ProviderError, ProviderLimitError, TextPart
 from roughcut.timeline import STYLES, build_timeline
 
 GRAPHIC = {"kind": "title_card", "segment": "V01.S003", "words": "heading up the mountain", "text": "Heading Out", "subtext": "", "seconds": 2.5, "direction": ""}
@@ -325,6 +325,87 @@ def test_a_model_that_cannot_look_at_images_is_told_once_and_sent_none(tmp_path)
     assert len([c for c in provider.calls if c["schema_name"] == "graphics"]) == 2
     assert not any(isinstance(p, ImagePart) for c in provider.calls for p in c["parts"])
     assert refs.sent is False and refs.warned is True
+
+
+class FailsWithPictures(FakeProvider):
+    """A model whose design requests fail with `error` while they carry the reference pictures: the first `times` of them
+    (None: every one); a request without them is answered."""
+
+    def __init__(self, error: Exception, times: int | None = None):
+        super().__init__()
+        self.error, self.left = error, times
+
+    def complete_json(self, system, parts, schema, *, schema_name, **kw):
+        pictured = any(getattr(p, "text", "").startswith("The editor attached") for p in parts)
+        if schema_name == "graphics" and pictured and self.left != 0:
+            self.calls.append({"system": system, "parts": parts, "schema_name": schema_name, "purpose": kw.get("purpose")})
+            if self.left is not None:
+                self.left -= 1
+            raise self.error
+        return super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+
+
+def pictured(provider) -> list[bool]:
+    """For each design request the provider got: did it carry the reference pictures?"""
+    return [any(getattr(p, "text", "").startswith("The editor attached") for p in c["parts"]) for c in provider.calls if c["schema_name"] == "graphics"]
+
+
+def design_with(provider, refs, tmp_path) -> tuple[dict, list[str]]:
+    a, tl, placed = six_graphics()
+    warnings: list[str] = []
+    html = graphics.design(provider, placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings, references=refs)
+    return html, warnings
+
+
+@pytest.mark.parametrize("error", ["overloaded", "Anthropic API error 529: overloaded_error", "Could not reach the Anthropic API: timed out", "Anthropic API error 500: internal"])
+def test_a_request_that_fails_for_a_reason_other_than_the_pictures_is_sent_again_with_them(error, tmp_path):
+    refs = reference_set(tmp_path)
+    provider = FailsWithPictures(ProviderError(error), times=1)
+    html, warnings = design_with(provider, refs, tmp_path)
+    assert len(html) == 6  # every graphic was designed
+    assert pictured(provider) == [True, True, True]  # the first batch twice, then the other batch: never without them
+    assert refs.sent is True and refs.dropped is False
+    assert warnings == []  # nothing was lost, so nothing to say
+
+
+def test_a_request_that_keeps_failing_with_the_pictures_is_sent_without_them_and_says_the_request_failed(tmp_path):
+    refs = reference_set(tmp_path)
+    provider = FailsWithPictures(ProviderError("Anthropic API error 529: overloaded_error"))
+    html, warnings = design_with(provider, refs, tmp_path)
+    assert len(html) == 6
+    assert pictured(provider) == [True, True, False, True, True, False]  # each batch: with, with again, then without
+    assert refs.dropped is True and refs.sent is False
+    (warning,) = warnings
+    assert warning.startswith("The design request for G01-G04 (Anthropic API error 529: overloaded_error); G05-G06 (Anthropic API error 529: overloaded_error) failed twice with the reference images")
+    assert "turned down" not in warning  # it isn't said to be the pictures' fault
+    assert "sent again without them: those graphics were designed without seeing the look you attached" in warning
+
+
+@pytest.mark.parametrize("error", ["the image could not be processed", "messages.0.content.1.image.source.base64: Image does not match the provided media type", "Unsupported picture format"])
+def test_a_request_the_model_turns_down_for_the_pictures_is_not_sent_with_them_again(error, tmp_path):
+    refs = reference_set(tmp_path)
+    provider = FailsWithPictures(ProviderError(error))
+    html, warnings = design_with(provider, refs, tmp_path)
+    assert len(html) == 6
+    assert pictured(provider) == [True, False, True, False]  # an answer about the pictures is not asked for twice
+    assert refs.dropped is True
+    (warning,) = warnings
+    assert warning.startswith("The model turned down the design request for G01-G04 (") and "with the reference images" in warning
+
+
+@pytest.mark.parametrize("error", [ProviderAuthError("The API key was rejected."), ProviderLimitError("You've hit your usage limit.")])
+def test_a_rejected_key_or_a_used_up_plan_is_never_sent_again(error, tmp_path):
+    refs = reference_set(tmp_path)
+    provider = FailsWithPictures(error)
+    if isinstance(error, ProviderAuthError):
+        with pytest.raises(ProviderAuthError):
+            design_with(provider, refs, tmp_path)
+        assert pictured(provider) == [True]
+    else:
+        html, warnings = design_with(pipeline.StopAtLimit(provider), refs, tmp_path)  # as a run asks: after the limit, nothing more is sent
+        assert html == {} and pictured(provider) == [True]
+        assert any("graphics design failed" in w and "usage limit" in w for w in warnings)
+    assert refs.dropped is False  # and no request went without the pictures
 
 
 def test_a_revisions_notes_reach_the_designer_as_the_editors_direction():

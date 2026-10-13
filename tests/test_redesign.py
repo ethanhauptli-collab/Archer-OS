@@ -445,7 +445,7 @@ def test_a_request_the_model_turns_down_with_the_pictures_is_sent_again_without_
     assert warning.startswith("The model turned down the design request for G01-G02 (the image could not be processed) with the reference images")
     assert "designed without seeing the look you attached" in warning and warning in (out / "edit_report.md").read_text()
     assert provider.result.summary["references"] == {"stored": 2, "used": 0, "unseen": False, "dropped": True}
-    assert "(the model turned down a request with them; see Warnings)" in "\n".join(summary_lines(provider.result.summary))
+    assert "(a request with them failed and was sent again without them; see Warnings)" in "\n".join(summary_lines(provider.result.summary))
 
 
 def test_a_failed_request_without_pictures_is_not_sent_twice(footage, tmp_path, monkeypatch, shared_cache, clear_mov):

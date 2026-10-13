@@ -755,8 +755,9 @@ def design(
     `house_style` is a design system already established for this video (a revision's new
     graphics match it); the one in use at the end goes into found["house_style"].
     `references`: the editor's reference images, which every request carries before its text when the model
-    can look at images (said once when it can't); a request the provider turns down with them is sent once more without them,
-    and said. `editor_notes`: see _design_request.
+    can look at images (said once when it can't); a request the provider turns down for them is sent once more without them, and
+    one that fails some other way (a busy model, a timeout) is sent once more with them first, then without if it fails again; both
+    are said. `editor_notes`: see _design_request.
     `restyle`: `house_style` is the look the graphics have now, which the notes change in part: the first batch is held to it
     only as far as the notes allow, and the look it comes back with is the one the other batches (and found) take.
     """
@@ -777,7 +778,10 @@ def design(
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()
     tried = 0
-    unused: list[str] = []  # batches designed without the reference images, after the provider turned the request down with them
+    # Batches designed without the reference images, after the provider turned the request down with them (they were the
+    # trouble) or after it kept failing with them (it may not have been).
+    turned_down: list[str] = []
+    failed: list[str] = []
     log(f"designing {len(placed)} graphics in {len(groups)} request(s)" + (f", with a frame of the shot under {len(pictures)}" if pictures else ""))
     progress.stage("graphics", f"Designing {len(placed)} graphics", current=0, total=len(placed))
 
@@ -807,10 +811,25 @@ def design(
             except ProviderError as e:
                 if not references:
                     raise
-                # A picture the provider won't take fails the whole request: once more without them, so the graphic is made.
-                raw = send(False)
-                references.dropped = True
-                unused.append(f"{_ids(group)} ({str(e).strip().splitlines()[0][:160] if str(e).strip() else 'no reason given'})")
+                error = e
+                if not _about_pictures(e):
+                    # A busy model, a timeout or a dropped connection says nothing about the pictures: the same request once
+                    # more with them, so one transient error doesn't cost the batch the look the editor attached.
+                    log(f"graphics: the request for {_ids(group)} failed ({_why(e)}); sent again with the reference images")
+                    try:
+                        raw = send(True)
+                        references.sent = True
+                        error = None
+                    except (ProviderAuthError, ProviderLimitError):
+                        raise
+                    except ProviderError as again:
+                        error = again
+                if error is not None:
+                    # A picture the provider won't take fails the whole request, and so does anything that keeps failing
+                    # with them: once more without them, so the graphic is made.
+                    raw = send(False)
+                    references.dropped = True
+                    (turned_down if _about_pictures(error) else failed).append(f"{_ids(group)} ({_why(error)})")
         except ProviderAuthError:
             raise
         except ProviderError as e:
@@ -854,12 +873,13 @@ def design(
             break
     for answer in _in_background(lambda group: ask(group, house, reference), pending, workers):
         take(*answer)
-    if unused:
-        warnings.append(
-            f"The model turned down the design request for {'; '.join(unused)} with the reference images, so {'it was' if len(unused) == 1 else 'they were'} "
-            "sent again without them: those graphics were designed without seeing the look you attached"
-        )
-        log("graphics: a request with the reference images failed and was sent again without them")
+    for batches, said in ((turned_down, "The model turned down the design request for {} with"), (failed, "The design request for {} failed twice with")):
+        if batches:
+            warnings.append(
+                f"{said.format('; '.join(batches))} the reference images, so {'it was' if len(batches) == 1 else 'they were'} "
+                "sent again without them: those graphics were designed without seeing the look you attached"
+            )
+            log("graphics: a request with the reference images failed and was sent again without them")
     log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
     if found is not None and (house or looked):
         found["house_style"] = house
@@ -868,6 +888,21 @@ def design(
 
 def _ids(group: list[PlacedGraphic]) -> str:
     return group[0].id if len(group) == 1 else f"{group[0].id}-{group[-1].id}"
+
+
+_ABOUT_PICTURES = re.compile(r"image|picture|photo|jpe?g|\bpng\b|webp|base64|media[ _]type", re.I)
+
+
+def _about_pictures(error: Exception) -> bool:
+    """Does the provider's error answer for the reference pictures (one it can't take, one that is too large), rather than
+    say a busy model, a timeout or a dropped connection, which tell nothing about them?"""
+    return bool(_ABOUT_PICTURES.search(str(error)))
+
+
+def _why(error: Exception) -> str:
+    """The first line of what the provider said, short enough for a warning."""
+    said = str(error).strip()
+    return said.splitlines()[0][:160] if said else "no reason given"
 
 
 def _in_background(fn, items: list, workers: int):

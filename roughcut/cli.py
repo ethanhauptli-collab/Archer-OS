@@ -957,7 +957,7 @@ def summary_lines(summary: dict) -> list[str]:
         if refs.get("unseen"):
             left.append(f"{pictures} for the graphics (the model can't look at images)")
         elif refs.get("dropped"):
-            left.append(f"{pictures} for the graphics (the model turned down a request with them; see Warnings)")
+            left.append(f"{pictures} for the graphics (a request with them failed and was sent again without them; see Warnings)")
         elif refs.get("used"):
             made.append(f"{pictures} shown to the graphics designer")
         else:
