@@ -72,6 +72,10 @@ class Options:
     sfx_named: tuple[str, ...] = ()  # the --sfx-from names typed for this build: one Studio doesn't have stops it before its folder is made
     sfx_off: bool = False  # --no-sfx: no accents (and the pool isn't read)
     sfx_amount: str | None = None  # none / soft / full; None: as the planner reads the brief (soft when it says nothing)
+    music_library: dict = field(default_factory=dict)  # Venture Studio songs among them (path -> what Studio says about it)
+    music_from: str | None = None  # --music-from: a Studio collection or kit whose songs join --music as candidates
+    music_max: int = 4  # --music-max: at most this many of them
+    studio_kit: str | None = None  # a kit file --music-from read: the paper edit checks against it when Studio's catalog can't be read
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -637,13 +641,149 @@ def style_for(opts: Options) -> Style:
 
 
 def music_problem(song: Path | str) -> str | None:
-    """What's wrong with a --music file, or None: one that isn't there is told apart from one roughcut can't read."""
+    """What's wrong with a --music file, or None: one that isn't there is told apart from one roughcut can't read.
+    Looked at with a deadline (studio.FILE_SECONDS): a song on a network share that stopped answering can't hang the run."""
+    from .studio import FILE_SECONDS
+    from .textio import Stalled, bounded
+
     path = Path(song).expanduser()
-    if not path.exists():
+    try:
+        exists, is_file = bounded(lambda: (path.exists(), path.is_file()), seconds=FILE_SECONDS, what="its folder")
+    except Stalled:
+        return f"--music {song}: its folder didn't answer in {FILE_SECONDS:g} s (a network share that stopped answering?)"
+    if not exists:
         return f"--music {song}: can't find that file (moved, renamed, or a typo in the path?)"
-    if not path.is_file() or path.suffix.lower() not in AUDIO_EXTS:
+    if not is_file or path.suffix.lower() not in AUDIO_EXTS:
         return f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})"
     return None
+
+
+def studio_song_problem(song: Path | str) -> str | None:
+    """music_problem for a Venture Studio song, given a deadline: its library folder may be a share that stopped answering."""
+    from .studio import reachable
+
+    path = Path(song)
+    if path.suffix.lower() not in AUDIO_EXTS:
+        return f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})"
+    why = reachable(str(path))
+    return f"--music {song}: {why}" if why else None
+
+
+def _still_there(clip) -> bool | None:
+    """Whether a clip's file is where it was read; None when its network folder (a Studio song's) doesn't answer in time."""
+    if not clip.library:
+        return Path(clip.media.path).exists()
+    from .studio import FILE_SECONDS
+    from .textio import Stalled, bounded
+
+    try:
+        return bool(bounded(Path(clip.media.path).exists, seconds=FILE_SECONDS))
+    except Stalled:
+        return None
+
+
+MUSIC_PROBES = 6  # --music-from songs whose length Studio hasn't measured: at most this many are measured here
+MUSIC_PROBE_SECONDS = 15.0  # each, with this deadline (a network share can stop answering)
+
+
+def studio_music(opts: Options) -> tuple[Options, list[str]]:
+    """--music-from: up to `music_max` Venture Studio songs from a collection or kit join --music as candidates the
+    planner can cue, after every --music typed (which keeps its place first, so it plays when the plan cues none).
+
+    Ranked favorites first, then by the tags and name words the brief also uses, then by name. Songs only: a length
+    Studio knows of 45 s or more, else measured here (with a deadline, for at most a few, skipping names that sound
+    like sound effects). Returns the options and the warnings for the paper edit. Never stops the run: an
+    unavailable Studio, snapshot, collection or share is a warning, and the cut is built without its songs.
+    """
+    source = (opts.music_from or "").strip()
+    if not source or opts.music_max <= 0:
+        return opts, []
+    from . import studio
+    from .analyze import probe_cached
+    from .textio import Stalled, bounded
+
+    def without(why: str) -> tuple[Options, list[str]]:
+        line = f"--music-from {source}: {why}; this cut is built without its songs."
+        log(line)
+        return opts, [line]
+
+    try:
+        collection, kit = studio.music_source(source, cache_dir=opts.cache_dir)
+        listing = studio.music_listing(collection=collection, kit=kit, cache_dir=opts.cache_dir)
+    except studio.StudioUnavailable as e:
+        return without("Venture Studio isn't installed on this Mac" if e.silent else e.reason)
+    except Exception as e:  # noqa: BLE001 - Studio never stops a run
+        return without(f"couldn't read Venture Studio: {e}")
+    for note in listing.notes:
+        log(note)
+    have = {str(Path(p)) for p in opts.music}
+    cache = Cache(opts.cache_dir or default_cache_dir())
+    picked: list[tuple[str, dict]] = []
+    probes, stalled = 0, None
+    unreachable: list[tuple[str, str]] = []  # (file, why) for songs whose file isn't there
+    for row in studio.rank_songs([r for r in listing.rows if r["usable"]], opts.context):
+        if len(picked) >= opts.music_max:
+            break
+        path = str(Path(row["path"]))
+        if path in have:
+            continue
+        seconds = row["seconds"]
+        if seconds is not None and seconds < studio.MUSIC_SECONDS:
+            continue  # a sound effect or a sting, by the length Studio measured
+        if seconds is None and (probes >= MUSIC_PROBES or studio.music_guess(f"{row['name']} {row['file']}", None, row["tags"]) == "sfx"):
+            continue
+        why = studio.reachable(path)
+        if why:
+            if "didn't answer" in why:
+                stalled = why
+                break  # the share stopped answering: the rest are on it too
+            log(f"--music-from {source}: {row['file']} left out: {why}")
+            unreachable.append((row["file"], why))
+            continue
+        if seconds is None:
+            probes += 1
+            try:
+                seconds = float(bounded(probe_cached, Path(path), cache, seconds=MUSIC_PROBE_SECONDS, what=f"reading {row['file']}").duration)
+            except Stalled:
+                stalled = f"its network folder didn't answer in {MUSIC_PROBE_SECONDS:g} s"
+                break
+            except Exception as e:  # noqa: BLE001 - an unreadable file is skipped
+                log(f"--music-from {source}: {row['file']} left out: {e}")
+                continue
+            if seconds < studio.MUSIC_SECONDS:
+                continue
+        info = {
+            "studio_id": row["id"], "title": row["name"], "provider": row["provider"], "license": row["license"], "tags": row["tags"],
+            "notes": row["notes"], "favorite": row["favorite"], "from": f"--music-from {source}",
+        }
+        picked.append((path, info))
+    warnings = []
+    if stalled:
+        warnings.append(f"--music-from {source}: stopped adding Studio songs: {stalled}.")
+        log(warnings[-1])
+    if not picked:
+        if not warnings and unreachable:
+            # The collection has songs; their files aren't reachable: say that, not that it has none.
+            file, why = unreachable[0]
+            n = len(unreachable)
+            warnings.append(
+                f"--music-from {source}: {n} of its songs couldn't be reached ({file}: {why}); this cut is built without them."
+                if n > 1 else f"--music-from {source}: its song couldn't be reached ({file}: {why}); this cut is built without it."
+            )
+            log(warnings[-1])
+        elif not warnings:
+            warnings.append(f"--music-from {source}: no songs found in {listing.source} (Studio audio of 45 s or more that Roughcut reads).")
+            log(warnings[-1])
+        return opts, warnings
+    log(
+        f"--music-from {source}: {len(picked)} Studio song{'s' if len(picked) != 1 else ''} the plan can cue, from {listing.source}: "
+        + ", ".join(info["title"] for _, info in picked)
+    )
+    opts = replace(
+        opts, music=list(opts.music) + [Path(p) for p, _ in picked], music_library={**opts.music_library, **dict(picked)},
+        studio_kit=str(listing.kit_file) if listing.kit_file else opts.studio_kit,
+    )
+    return opts, warnings
 
 
 SFX_CHECK_SECONDS = 3.0  # is a sound effect still there: a network share gets this long to answer
@@ -659,13 +799,17 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool
     so their files are checked for the cut that is written).
     """
     used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
-    gone, unanswered = [], []
+    gone, unanswered, silent = [], [], []
     for c in analysis.clips:
         if c.id not in used:
             continue
         if c.role != "sfx":
-            if footage and not Path(c.media.path).exists():
-                gone.append(c)
+            if footage:
+                there = _still_there(c)  # a Studio song's folder gets a deadline
+                if there is False:
+                    gone.append(c)
+                elif there is None:
+                    silent.append(c)
             continue
         if not sounds:
             continue
@@ -689,6 +833,11 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool
             f"{named}{more}. Final Cut will show {'them' if len(gone) != 1 else 'it'} as missing media: put {'them' if len(gone) != 1 else 'it'} back, "
             "or relink in Final Cut (File > Relink Files)."
         )
+    out += [
+        f"{c.media.name} (a Venture Studio song) couldn't be checked: its network folder didn't answer. If it's still offline when "
+        "you open the cut, Final Cut shows it as missing media until the share is back."
+        for c in silent
+    ]
     if unanswered:
         n = len(unanswered)
         out.append(
@@ -703,11 +852,30 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
     """Scan, probe, map silence and transcribe. `skipped` collects the names of files that couldn't be read."""
     require_tools()
     progress.stage("scan", "Finding media")
+    library = {str(Path(p)): info for p, info in (opts.music_library or {}).items()}
+    music, studio_songs, dropped, handled = [], [], [], set()
     for song in opts.music:
-        problem = music_problem(song)
-        if problem:
-            raise RoughcutError(problem)
-    files = footage_files(opts, out_dir)
+        key = str(Path(song))
+        if key in library:
+            # A Venture Studio song: left out (never a stopped run) once the run has started. Given again (as
+            # studio:ID and as its path, say), it is still one song, as an ordinary file is: the first mention counts.
+            if key in handled:
+                continue
+            handled.add(key)
+            problem = music_problem(song)
+            if problem:
+                dropped.append(f"{problem}; left out of the music bed")
+                log(dropped[-1])
+                continue
+            studio_songs.append(Path(song))
+        else:
+            problem = music_problem(song)
+            if problem:
+                raise RoughcutError(problem)
+        music.append(song)
+    files = footage_files(opts, out_dir, [m for m in music if str(Path(m)) not in library])
+    seen = {str(f) for f in files}
+    files += [p for p in studio_songs if str(p) not in seen]  # as Studio has them: never resolved, which would touch the share
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -725,11 +893,15 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         prefer_vertical = h > w
     analysis = analyze(
         files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical,
-        music=opts.music,
+        music=music, library={p: info for p, info in library.items() if Path(p) in studio_songs},
     )
+    analysis.warnings += dropped
     if skipped is not None:
-        read = {Path(c.media.path).resolve() for c in analysis.clips}
-        skipped += [f.name for f in files if Path(f).resolve() not in read]
+        def where(p) -> str:
+            return str(Path(p)) if str(Path(p)) in library else str(Path(p).resolve())
+
+        read = {where(c.media.path) for c in analysis.clips}
+        skipped += [f.name for f in files if where(f) not in read]
     return analysis
 
 
@@ -748,11 +920,12 @@ def sound_locations(opts: Options) -> list[Path]:
         return [Path(p) for p in spelled if any(_lexically_inside(p, str(Path(i).expanduser().absolute())) for i in opts.inputs)]
 
 
-def footage_files(opts: Options, out_dir: Path) -> list[Path]:
-    """The media files to analyse: the footage folders and songs, without the output folder. Sound effects are never
-    footage: a --sfx folder or file inside a footage folder (or reached through a link to it) is left out of the scan."""
+def footage_files(opts: Options, out_dir: Path, music: list | None = None) -> list[Path]:
+    """The media files to analyse: the footage folders and songs (`music`: those to scan, default every --music), without the
+    output folder. Sound effects are never footage: a --sfx folder or file inside a footage folder (or reached through a link
+    to it) is left out of the scan."""
     held = sound_locations(opts)
-    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir] + held)
+    files = scan(list(opts.inputs) + list(opts.music if music is None else music), exclude=[out_dir] + held)
     if held:
         files = [f for f in files if not any(f == h or h in f.parents for h in held)]
     return files
@@ -834,6 +1007,8 @@ def write_outputs(
     command: str = "build",
     entry: dict | None = None,
     quiet: bool = False,
+    cache_dir: Path | None = None,
+    studio_kit=None,
 ) -> tuple[Path, Path]:
     """Write version `version`: the FCPXML, plan.json and the paper edit.
 
@@ -849,7 +1024,10 @@ def write_outputs(
     event = event_name(name)
     xml = build_fcpxml(timelines, analysis, event_name=event, alternates=plan.alternates)
     subtitles = captions_srt(rough, analysis, plan.spellings)
-    report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
+    sources, studio_lines = studio_sources(xml, out_dir, record.get("studio_sources"), cache_dir=cache_dir, kit=studio_kit)
+    if sources is not None:
+        record = {**record, "studio_sources": sources}
+    report = build_report(plan, rough, analysis, stringout=stringout, studio=studio_lines, **report_kwargs)
     page = report_page(report, title=f"{plan.title} - paper edit", subtitle=f"{rough.name} · event {event}")
     out_dir.mkdir(parents=True, exist_ok=True)
     versions.snapshot(out_dir, before=version)
@@ -883,6 +1061,7 @@ def write_outputs(
             "stringout_project": stringout.name if stringout is not None and stringout.spine else None,
             "event": event,
             "rough_seconds": round(rough.seconds, 3),
+            "accents": len(rough.accents),  # sound-effect accents: what the next version's list of changes compares with
             "planned_by": plan.source,
             **(entry or {}),
             **({"partial": True} if quiet else {}),
@@ -890,6 +1069,34 @@ def write_outputs(
     )
     versions.finish(out_dir, version, prune=not quiet)
     return fcpxml_path, report_path
+
+
+def studio_sources(xml: str, out_dir: Path, saved, *, cache_dir: Path | None = None, kit=None) -> tuple[dict | None, list[str]]:
+    """(record, section): what Venture Studio's Project history review would match in this version's FCPXML, kept in
+    plan.json as `studio_sources`, and the paper edit's "Venture Studio" section.
+
+    Checked again whenever Studio can be read; otherwise the record an earlier version saved is used (a file this
+    version adds that it lacks reads "not checked"). Never touches a media file, never stops a run.
+    """
+    from . import studio
+    from .report import studio_section
+
+    projects, refused = studio.cut_projects(xml)
+    try:
+        kit = studio.load_kit(kit) if isinstance(kit, (str, Path)) and str(kit) else None
+    except studio.StudioUnavailable:
+        kit = None
+    try:
+        fresh, unavailable = studio.match_media(xml, out_dir=out_dir, cache_dir=cache_dir, kit=kit), None
+    except studio.StudioUnavailable as e:
+        fresh, unavailable = None, (None if e.silent else e.reason)
+    except Exception as e:  # noqa: BLE001 - Studio never stops a run
+        fresh, unavailable = None, f"couldn't read Venture Studio: {e}"
+    if fresh is not None:
+        return fresh, studio_section(fresh, projects, refused=refused, out_dir=out_dir)
+    if isinstance(saved, dict) and isinstance(saved.get("files"), dict):
+        return saved, studio_section(saved, projects, refused=refused, unavailable=unavailable, earlier=True, out_dir=out_dir)
+    return None, studio_section(None, projects, unavailable=unavailable)
 
 
 def event_name(name: str) -> str:
@@ -1002,13 +1209,14 @@ def build(opts: Options) -> Result:
         if problem:
             raise RoughcutError(problem)
 
+    opts, music_notes = studio_music(opts)  # --music-from: Studio songs as candidates (never stops the run)
     skipped_files: list[str] = []
     analysis = run_analysis(opts, out_dir, skipped=skipped_files)
     timings["analysis"] = time.monotonic() - t_start
     visual_log = None
 
     usage = []
-    extra_warnings: list[str] = [studio_warning] if studio_warning else []
+    extra_warnings: list[str] = ([studio_warning] if studio_warning else []) + music_notes
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision
@@ -1129,7 +1337,7 @@ def _finish_build(
             ]
             interim = write_outputs(
                 out_dir, name, record, plan, with_sfx, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + sound_warnings + pending, **extra),
-                version=version, command=command, entry=entry, quiet=True,
+                version=version, command=command, entry=entry, quiet=True, cache_dir=opts.cache_dir, studio_kit=opts.studio_kit,
             )
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
             save_result(Result(
@@ -1199,6 +1407,8 @@ def _finish_build(
         version=version,
         command=command,
         entry=entry,
+        cache_dir=opts.cache_dir,
+        studio_kit=opts.studio_kit,
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
     base = summary_base or {}
@@ -1375,14 +1585,18 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     # What this re-cut changed from the version before, measured on the two cuts (and the graphics clips the new one needs to render).
     changes, report_changes = None, []
     if prev_entry.get("n"):
-        from .revise import changes_lines, changes_record, new_graphics, recut_items
+        from .revise import accents_before, changes_lines, changes_record, new_graphics, recut_items
 
         made = {c.media.name for c in with_graphics.clips if c.role == "graphic"}
         known = prev_entry.get("graphics")
         added, again = new_graphics(made, [str(n) for n in known]) if isinstance(known, list) else (None, None)
+        before["accents"] = accents_before(prev_entry, settings)
         items, unchanged = recut_items(
             settings, {f: getattr(opts, f) for f in RENDER_FIELDS}, prev_entry["n"], before=before,
-            after={"seconds": rough.seconds, "edits": len(rough.spine), "broll": sum(1 for c in rough.connected if c.kind == "broll")},
+            after={
+                "seconds": rough.seconds, "edits": len(rough.spine), "broll": sum(1 for c in rough.connected if c.kind == "broll"),
+                "accents": len(rough.accents),
+            },
             rerendered=again, added=added,
         )
         changes = changes_record(items, unchanged, prev_entry["n"])
@@ -1396,7 +1610,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
             **({"revision": report_changes} if report_changes else {}),
             **({"sfx": sfx_report} if sfx_report else {}),
         },
-        version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
+        version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)}, cache_dir=opts.cache_dir,
     )
     warnings = plan.warnings + rough.warnings + graphics_warnings
     summary = run_summary(
@@ -1428,7 +1642,7 @@ def _direction_notes(settings: dict) -> list[str]:
 def _previous_cut(out_dir: Path, entry: dict) -> dict:
     """Seconds, edits and B-roll shots of the version that is current in the folder, as it was written (what a re-cut is
     compared with). From versions.json and the result.json beside it; whatever an older folder doesn't have is left out."""
-    facts: dict = {"seconds": entry.get("rough_seconds")}
+    facts: dict = {"seconds": entry.get("rough_seconds"), "accents": entry.get("accents")}
     try:
         saved = json.loads((out_dir / "result.json").read_text())
     except (OSError, ValueError):
@@ -1820,8 +2034,8 @@ def revise(
     graphic again, with the notes as the editor's direction for the designer.
     """
     from .revise import (
-        avoided_lines, change_items, changes_lines, changes_record, enforce, recover_brief, report_block, revision_request, split_ids,
-        standing_avoids, wide_lifts,
+        accents_before, avoided_lines, change_items, changes_lines, changes_record, enforce, recover_brief, report_block, revision_request,
+        split_ids, standing_avoids, wide_lifts,
     )
 
     t_start = time.monotonic()
@@ -2018,6 +2232,8 @@ def revise(
     if direction[-GRAPHICS_DIRECTION_KEPT:] or "graphics_direction" in settings:
         new_settings["graphics_direction"] = direction[-GRAPHICS_DIRECTION_KEPT:]  # the notes that changed the look, for the next one and for --design-missing
     record = plan_record(name, plan, raw, analysis, new_settings)
+    if isinstance(saved.get("studio_sources"), dict):
+        record["studio_sources"] = saved["studio_sources"]  # what Studio matched, for when it can't be read this time
     record["notes_history"] = revisions + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
         record["revision_of"] = prev_n
@@ -2037,6 +2253,7 @@ def revise(
             previous, plan, analysis, before_seconds=before_seconds, after_seconds=rough.seconds, previous_version=prev_n,
             graphics_on=opts.graphics, redesigned=bool(again), settings_notes=settings_notes, was=settings,
             now={**{f: getattr(opts, f) for f in RENDER_FIELDS}, "stringout": new_settings["stringout"]}, outcome=outcome,
+            accents=(accents_before(prev_entry, settings), len(rough.accents)),
         )
         block = report_block(notes, [h["notes"] for h in history], changes_lines(items, prev_n, skip=settings_notes), enforced.missing_keeps, settings_notes)
         return {"revision": block, "changes": changes_record(items, unchanged, prev_n)}

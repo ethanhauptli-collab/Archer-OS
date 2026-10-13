@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -126,8 +127,17 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--preset-sfx-from", action="append", default=[], help=argparse.SUPPRESS)  # a preset's --sfx-from: never stops the build
     b.add_argument(
         "--music", action="append", default=[], metavar="FILE",
-        help="a song to lay under the cut (from anywhere, e.g. Downloads): not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more",
+        help="a song to lay under the cut (from anywhere, e.g. Downloads, or studio:ID for a Venture Studio song from `roughcut studio music`): "
+        "not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more; the first plays when the plan picks none",
     )
+    b.add_argument(
+        "--music-from", metavar="NAME",
+        help="also offer the planner up to --music-max songs from this Venture Studio collection or kit (collection:NAME or kit:NAME when "
+        "both have the name, or an exported kit .json): favorites first, then the ones whose tags the brief mentions. Any --music you "
+        "give stays first. If Studio, the collection or its folder isn't available, the cut is built without them",
+    )
+    b.add_argument("--no-music-from", dest="music_from", action="store_const", const="", help="no Studio songs, even if the preset names a collection")
+    b.add_argument("--music-max", type=_positive, default=4, metavar="N", help="at most this many --music-from songs (default 4)")
     gfx = b.add_argument_group("motion graphics")
     gfx.add_argument("--graphics", action="store_true", help="have Claude design animated graphics (lower thirds, stats, kinetic captions...) from the transcript, rendered to ProRes 4444 above the footage")
     gfx.add_argument("--no-graphics", dest="graphics", action="store_false", help="no motion graphics, even if the preset has them")
@@ -188,6 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     sts.add_argument("--where", metavar="DIR", help="also say whether DIR is inside a Venture Studio library, and where a build of it would write")
     sts.add_argument("--offline", action="store_true", help="don't check whether the library folders are online")
     sts.add_argument("--cache-dir", help="where Roughcut keeps its copy of Studio's catalog snapshot (default: Roughcut's cache, as for build)")
+    stm = st_sub.add_parser(
+        "music", help="Studio audio a music bed can use, from its catalog snapshot (read only; no file on a library folder is touched)",
+    )
+    stm.add_argument("words", nargs="*", help="search words, as Studio searches: names, folders, tags, notes, providers, collections")
+    stm.add_argument("--collection", metavar="NAME", help="only this Studio collection")
+    stm.add_argument("--kit", metavar="NAME|FILE", help="only this Studio kit, by name or an exported kit .json")
+    stm.add_argument("--favorites", action="store_true", help="only favorites")
+    stm.add_argument("--json", action="store_true", help="print a JSON array, one object per file")
+    stm.add_argument("--cache-dir", help="where Roughcut keeps its copy of Studio's catalog snapshot (default: Roughcut's cache)")
 
     k = sub.add_parser("key", help="save, check or remove your API key (stored in the macOS Keychain, shared with the Mac app)")
     k.add_argument("action", choices=["set", "status", "remove"])
@@ -268,6 +287,71 @@ def _resolve_paths(args, argv: list[str]) -> str | None:
     except PathInputError as e:
         return str(e)
     return None
+
+
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("can't be negative")
+    return value
+
+
+STUDIO_SONG = re.compile(r"studio:(\d+)\Z", re.I)
+
+
+def _studio_songs(args) -> str | None:
+    """--music studio:ID: the Venture Studio song's file, checked (with a deadline: its folder may be a network share)
+    before the output folder is made. Any problem stops the run: this song was asked for by name."""
+    args.music_library = {}
+    if args.command != "build":
+        return None
+    from . import studio
+    from .pipeline import studio_song_problem
+
+    cache = Path(args.cache_dir).expanduser() if args.cache_dir else None
+    for i, song in enumerate(args.music):
+        m = STUDIO_SONG.match(str(song).strip())
+        if not m or Path(song).exists():
+            continue
+        try:
+            copy = studio.newest_copy(cache_dir=cache)
+            with studio.catalog(copy) as con:
+                found = studio.song(con, int(m.group(1)))
+        except studio.StudioUnavailable as e:
+            return f"--music {song}: " + ("Venture Studio isn't installed on this Mac" if e.silent else e.reason)
+        problem = studio_song_problem(found.path)
+        if problem:
+            return problem.replace(f"--music {found.path}", f"--music {song} ({found.path})") + (
+                f". Studio's catalog is as of {copy.snapshot.when()}: in Studio, Back up catalog now refreshes it" if "isn't there" in problem else ""
+            )
+        path = str(Path(found.path))
+        args.music[i] = path
+        args.music_library[path] = _library_info(found, f"--music {song}")
+    # A song given by its path (the app's picks from Studio) that is a Studio item: the same deadlines, and the planner sees its tags.
+    plain = {os.path.abspath(os.path.expanduser(str(s))): s for s in args.music if not STUDIO_SONG.match(str(s).strip())}
+    plain = {p: s for p, s in plain.items() if p not in args.music_library}
+    if plain and studio.installed():
+        try:
+            copy = studio.newest_copy(cache_dir=cache)
+            with studio.catalog(copy) as con:
+                found_at = studio.songs_at(con, list(plain))
+        except studio.StudioUnavailable:
+            found_at = {}  # a song given by its path never needs Studio
+        for path, asset in found_at.items():
+            args.music = [path if s == plain[path] else s for s in args.music]
+            args.music_library[path] = _library_info(asset, f"--music {plain[path]}")
+    return None
+
+
+def _library_info(asset, given: str) -> dict:
+    """What a run keeps about a Venture Studio song (Clip.library)."""
+    return {
+        "studio_id": asset.id, "title": asset.title, "provider": asset.provider, "license": asset.license,
+        "tags": list(asset.tags), "notes": asset.notes, "favorite": asset.favorite, "from": given,
+    }
 
 
 def _music_problem(args) -> str | None:
@@ -578,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("build", "render", "revise"):
         # Before anything runs or any folder is created.
         args, problem = _apply_preset(args, argv) if args.command != "revise" else (args, None)
-        problem = problem or _resolve_paths(args, argv) or _music_problem(args)
+        problem = problem or _resolve_paths(args, argv) or _studio_songs(args) or _music_problem(args)
         if problem:
             progress.enable(bool(args.progress_json))
             print(f"roughcut: {problem}", file=sys.stderr)
@@ -661,7 +745,29 @@ def _where_lines(w: dict) -> list[str]:
     return lines
 
 
+def _studio_music(args) -> int:
+    """`roughcut studio music`: plain lines, or a JSON array (never an object, so the app's event reader can't mistake it)."""
+    from . import studio
+
+    try:
+        listing = studio.music_listing(
+            args.words, collection=args.collection, kit=args.kit, favorites=args.favorites,
+            cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
+        )
+    except studio.StudioUnavailable as e:
+        print(f"roughcut: {'Venture Studio is not installed on this Mac (looked in ' + str(studio.studio_dir()) + ')' if e.silent else e.reason}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([{**row, "as_of": listing.source} for row in listing.rows]))
+        return 0
+    for line in studio.listing_lines(listing):
+        print(line)
+    return 0
+
+
 def _studio_command(args) -> int:
+    if args.studio_command == "music":
+        return _studio_music(args)
     report = studio_report(offline=args.offline, cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None)
     if args.where:
         report["where"] = where_report(args.where, report)
@@ -864,6 +970,9 @@ def _run(args, json_mode: bool) -> int:
                 graphics_refs=tuple(args.graphics_ref),
                 music=[Path(p).expanduser() for p in args.music],
                 sfx_named=_sfx_names(args.sfx_from or []),  # typed (or sent by the app): one Studio doesn't have stops the build
+                music_library=dict(getattr(args, "music_library", {}) or {}),
+                music_from=args.music_from or None,
+                music_max=args.music_max,
                 **common,
             )
             result = build(opts)

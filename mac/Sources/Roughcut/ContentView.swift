@@ -390,15 +390,25 @@ struct RecentRunRow: View {
     }
 }
 
-/// Songs to lay under the cut (`--music`).
+/// Songs to lay under the cut (`--music`): chosen, dropped, pasted, or picked from Venture Studio.
 struct MusicPicker: View {
     @Environment(AppModel.self) private var model
+    @State private var showStudio = false
+    @State private var isTargeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Music bed")
                 Spacer()
+                if model.studioInstalled {
+                    Button("From Venture Studio…") { showStudio = true }
+                        .help("Songs from Venture Studio's catalog snapshot, added here as plain files")
+                }
+                PasteButton(supportedContentTypes: [.fileURL, .plainText]) { providers in
+                    paste(providers)
+                }
+                .help("Paste a song copied in Finder or Studio, or its full path")
                 Button(model.options.music.isEmpty ? "Choose a song…" : "Add another…") {
                     let panel = NSOpenPanel()
                     panel.canChooseFiles = true
@@ -407,9 +417,7 @@ struct MusicPicker: View {
                     panel.allowedContentTypes = [.audio]
                     panel.message = "A song to lay under the cut. It ducks under speech and is timed to end with the cut."
                     if panel.runModal() == .OK {
-                        for url in panel.urls where !model.options.music.contains(url) {
-                            model.options.music.append(url)
-                        }
+                        model.addMusic(panel.urls)
                     }
                 }
             }
@@ -428,10 +436,51 @@ struct MusicPicker: View {
                     .help("Remove")
                 }
             }
+            if let note = model.musicNote {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(Color.orange)
+            }
             if model.options.music.isEmpty {
-                Text("Optional. Without one, the AI uses music from your footage folder if there is any.")
+                Text("Optional. Drop or paste songs here. Without one, the AI uses music from your footage folder if there is any.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+        }
+        .padding(4)
+        .background {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isTargeted ? Color.accentColor : Color.clear, lineWidth: 1.5)
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            model.addMusic(urls)
+        } isTargeted: { targeted in
+            isTargeted = targeted
+        }
+        .sheet(isPresented: $showStudio) {
+            StudioMusicSheet()
+        }
+    }
+
+    /// File URLs from the pasteboard (Finder's or Studio's Copy), or one absolute path as text (a copied file path).
+    private func paste(_ providers: [NSItemProvider]) {
+        let model = self.model
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in model.addMusic([url]) }
+                }
+            } else if provider.canLoadObject(ofClass: String.self) {
+                _ = provider.loadObject(ofClass: String.self) { text, _ in
+                    Task { @MainActor in
+                        if let text, let url = MusicFiles.url(fromPastedText: text) {
+                            model.addMusic([url])
+                        } else {
+                            model.musicNote = "Paste a song file copied in Finder or Studio, or its full path (/Volumes/…)."
+                        }
+                    }
+                }
             }
         }
     }
@@ -491,7 +540,7 @@ struct SoundEffectsPicker: View {
                     .help("Remove")
                 }
             }
-            if model.doctor?.ventureStudio?.isInstalled == true {
+            if model.studioInstalled {
                 HStack {
                     TextField("Venture Studio collection", text: $collection, prompt: Text("A collection's name, e.g. Whooshes"))
                         .onSubmit(addCollection)

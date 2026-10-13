@@ -99,6 +99,7 @@ class Preset:
     # Sound effects for accents (--sfx, --sfx-from). Only your presets have them: the built-in ones run on Macs without them.
     sfx: tuple[str, ...] = ()  # files or folders
     sfx_from: tuple[str, ...] = ()  # Venture Studio collections or kits by name
+    music_from: str | None = None  # a Venture Studio collection or kit whose songs a build offers (yours only; never a built-in's)
     source: str = field(default="built in", compare=False)  # built in / saved / saved over built in
 
     def to_json(self) -> dict:
@@ -127,6 +128,8 @@ class Preset:
             bits.append(f"approved look ({len(self.look)} design{'s' if len(self.look) != 1 else ''})")
         if self.sfx or self.sfx_from:
             bits.append("sound effects")
+        if self.music_from:
+            bits.append(f"music from Studio {self.music_from!r}")
         return ", ".join(bits)
 
 
@@ -182,7 +185,9 @@ def _file(name: str) -> Path:
     return presets_dir() / f"{_clean_name(name)}.json"
 
 
-FIELDS = ("description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo", "look", "sfx", "sfx_from")
+FIELDS = (
+    "description", "brief", "target", "style", "format", "graphics", "graphics_style", "logo", "look", "sfx", "sfx_from", "music_from",
+)
 TEXT_FIELDS = ("description", "brief", "graphics_style")  # "" when unset; the others are None
 
 
@@ -463,6 +468,8 @@ def flags(preset: Preset, command: str) -> list[str]:
             out.append(f"--sfx={path}")
         for name in preset.sfx_from:
             out.append(f"--preset-sfx-from={name}")  # one Studio doesn't have (any more) is a warning, never a stop
+        if preset.music_from:
+            out.append(f"--music-from={preset.music_from}")  # soft: without Studio, the build goes on without its songs
     return out
 
 
@@ -506,6 +513,12 @@ def add_commands(sub) -> None:
     fx.add_argument("--sfx", action="append", metavar="PATH", help="sound effects for accents: a file or folder (repeat for more; replaces the preset's)")
     fx.add_argument("--no-sfx", action="store_true", help="drop the sound effects (files, folders and Studio collections)")
     s.add_argument("--sfx-from", action="append", metavar="NAME", help="sound effects from a Venture Studio collection or kit by name (repeat for more; replaces the preset's)")
+    mf = s.add_mutually_exclusive_group()
+    mf.add_argument(
+        "--music-from", metavar="NAME",
+        help="a Venture Studio collection or kit whose songs builds offer the planner (as build --music-from; if Studio isn't there, builds go on without)",
+    )
+    mf.add_argument("--no-music-from", action="store_true", help="no Studio songs")
     rm = actions.add_parser("remove", help="delete a saved preset (a built-in one comes back as it was)")
     rm.add_argument("name")
 
@@ -520,6 +533,7 @@ def _print(preset: Preset) -> None:
     print(f"  logo      {preset.logo or 'none'}")
     print(f"  approved  {', '.join(Path(p).name for p in preset.look) or 'none'}")
     print(f"  sound fx  {', '.join([*preset.sfx, *(f'Venture Studio: {n}' for n in preset.sfx_from)]) or 'none'}")
+    print(f"  music     {'from Venture Studio ' + repr(preset.music_from) if preset.music_from else 'none from Venture Studio'}")
     print("  brief")
     for line in preset.brief.splitlines() or ["(none)"]:
         print(f"    {line}")
@@ -609,6 +623,10 @@ def _command(args: argparse.Namespace) -> int:
         if not Path(folder).expanduser().is_dir():
             raise PresetError(f"can't find the folder {folder} (put a path with spaces in quotes, or drag the folder into Terminal).")
         preset.look = approved_from_run(Path(folder), ids)
+    if args.no_music_from:
+        preset.music_from = None
+    elif args.music_from is not None:
+        preset.music_from = args.music_from.strip() or None
     if args.no_logo:
         preset.logo = None
     elif args.logo:

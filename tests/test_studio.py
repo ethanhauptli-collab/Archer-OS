@@ -37,7 +37,8 @@ CREATE TABLE assets (
     display_name TEXT NOT NULL DEFAULT '', extension TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'file',
     category TEXT NOT NULL DEFAULT 'other', provider TEXT NOT NULL DEFAULT '', license TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', duration REAL, favorite INTEGER NOT NULL DEFAULT 0,
-    missing INTEGER NOT NULL DEFAULT 0, browse_visible INTEGER NOT NULL DEFAULT 1, package_id INTEGER
+    missing INTEGER NOT NULL DEFAULT 0, browse_visible INTEGER NOT NULL DEFAULT 1, template_resource INTEGER NOT NULL DEFAULT 0,
+    package_id INTEGER
 );
 CREATE TABLE collections (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 CREATE TABLE collection_assets (collection_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, PRIMARY KEY (collection_id, asset_id));
@@ -60,7 +61,8 @@ class FakeStudio:
         self.libraries: list[tuple[str, str]] = []
 
     def snapshot(self, sid: str, created: int, *, name: str = "Catalog snapshot", assets=(), collections=None, kits=None,
-                 schema: int = 3, user_version: int = 3, drop_column: str | None = None, libraries=None) -> Path:
+                 schema: int = 3, user_version: int = 3, drop_column: str | None = None, libraries=None, after: str = "") -> Path:
+        """`after`: more SQL, run once the rows are in (Project history tables, a search index...)."""
         db = self.staging / f"{sid}.sqlite"
         con = sqlite3.connect(db)
         sql = re.sub(rf"\b{drop_column} [^,\n]*,\s*", "", CATALOG_SQL) if drop_column else CATALOG_SQL
@@ -76,6 +78,8 @@ class FakeStudio:
         for kid, (kname, ids) in enumerate((kits or {}).items(), 1):
             con.execute("INSERT INTO project_kits (id, name) VALUES (?, ?)", (kid, kname))
             con.executemany("INSERT INTO project_kit_assets VALUES (?, ?)", [(kid, i) for i in ids])
+        if after:
+            con.executescript(after)
         con.execute(f"PRAGMA user_version = {user_version}")
         con.commit()
         con.close()
@@ -754,7 +758,10 @@ def test_a_library_row_with_no_path_never_turns_the_offer_back_into_the_library(
     out = tmp_path / "outside"
     assert main(["build", str(folder), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", cache]) == 0
     printed = capsys.readouterr()
-    assert "Venture Studio" not in printed.out + printed.err + (out / "edit_report.md").read_text()
+    report = (out / "edit_report.md").read_text()
+    assert "Venture Studio" not in printed.out + printed.err and GUARD not in report
+    # The footage is inside the library, though: the paper edit says Studio's next scan should list it.
+    assert "**Not in this snapshot yet**" in report and "`talk.mov`" in report
 
 
 def test_movies_linked_into_the_library_gets_no_offer_and_nothing_written_through_it(shoot, library, tmp_path, monkeypatch):

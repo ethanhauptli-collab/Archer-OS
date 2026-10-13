@@ -89,9 +89,11 @@ class _Resources:
         if m.has_audio:
             attrs.update(hasAudio="1", audioSources="1", audioChannels=str(m.audio_channels or 2), audioRate=str(m.audio_rate or 48000))
         asset = ET.SubElement(self.el, "asset", attrs)
-        # A sound effect's path was made absolute when its pool was read, and may sit on a network share
-        # that's asleep now: resolving it again could wait on the share for good.
-        src = Path(m.path) if clip.role == "sfx" and Path(m.path).is_absolute() else Path(m.path).resolve()
+        # A sound effect's path was made absolute when its pool was read, and a Venture Studio file is named as Studio has it (its
+        # library root is canonical, and Studio refuses links): neither is resolved again. Either may sit on a network share that's
+        # asleep now, and resolving would wait on the share for good.
+        keep = (clip.role == "sfx" or bool(clip.library)) and Path(m.path).is_absolute()
+        src = Path(m.path) if keep else Path(m.path).resolve()
         ET.SubElement(asset, "media-rep", {"kind": "original-media", "src": src.as_uri()})
         self.assets[clip.id] = rid
         return rid

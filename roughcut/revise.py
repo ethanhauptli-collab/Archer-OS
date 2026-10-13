@@ -10,6 +10,7 @@ and the paper edit lists exactly what changed.
 
 from __future__ import annotations
 
+import os
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -355,12 +356,24 @@ def enforce(plan: Plan, analysis: Analysis, *, keep: list[str], avoid: list[str]
 
 
 LISTED = 10  # lines or shots named one by one; the rest are counted
-CHANGE_NOTES = ("Pacing:", "Punch-ins:", "Redesigning the graphics")  # settings notes that say something changed (the rest only explain)
+CHANGE_NOTES = ("Pacing:", "Punch-ins:", "Sound effects:", "Redesigning the graphics")  # settings notes that say something changed (the rest only explain)
 
 
 def _refs(plan: Plan) -> list[str]:
     """Every storyline item: segment IDs and visual ranges like V07@12.5-16."""
     return [i.ref for s in plan.sections for i in s.items]
+
+
+def played_songs(plan: Plan, analysis: Analysis) -> list[str]:
+    """The songs a plan's cut plays, in cue order: its music cues, or the --music song that runs under the whole cut when it cues none."""
+    from .timeline import _music_cues
+
+    names = []
+    for cue in _music_cues(plan, analysis, True, []):
+        clip = analysis.clip(cue.clip_id)
+        if clip is not None and clip.media.name not in names:
+            names.append(clip.media.name)
+    return names
 
 
 def _length_item(before: float, after: float, *, tenths: bool = False) -> str:
@@ -508,6 +521,41 @@ def _on_off(value) -> str:
     return "on" if value else "off"
 
 
+SOUND_KEYS = ("sfx", "sfx_from", "sfx_off", "sfx_amount")
+
+
+def sound_state(settings: dict) -> str:
+    """What a cut's settings make of sound effects: "no sounds" (none were given to use), "off" (--no-sfx), or the amount
+    the brief or notes asked for: "none", "soft" or "full" (soft when nothing said)."""
+    if not (settings.get("sfx") or settings.get("sfx_from")):
+        return "no sounds"
+    if settings.get("sfx_off"):
+        return "off"
+    amount = settings.get("sfx_amount")
+    return amount if amount in ("none", "soft", "full") else "soft"
+
+
+def _sound_sources(settings: dict) -> list[str]:
+    """Where a cut's sound effects come from, as short names: folders and files by their own name, Studio collections by name."""
+    names = [os.path.basename(str(p).rstrip("/")) or str(p) for p in settings.get("sfx") or []]
+    return names + [f"Venture Studio {n}" for n in settings.get("sfx_from") or []]
+
+
+def accents_before(entry: dict, settings: dict) -> int | None:
+    """How many accents the version before had: as written in versions.json, else none when its settings had no sounds to
+    use (or they were off or asked for none); otherwise not known (a version from before they were counted)."""
+    if isinstance(entry.get("accents"), int):
+        return entry["accents"]
+    return 0 if sound_state(settings) in ("no sounds", "off", "none") else None
+
+
+def accent_item(before: int | None, after: int | None) -> str | None:
+    """'Sound effects: 4 → 7 accents' when the count changed (and both are known)."""
+    if before is None or after is None or before == after:
+        return None
+    return f"Sound effects: {before} → {after} accent{'s' if after != 1 else ''}"
+
+
 def setting_deltas(was: dict, now: dict, skip: set[str] | frozenset = frozenset()) -> list[str]:
     """What a cut setting changed from the version before (`skip`: ones a note already says): pacing, punch-ins,
     format, fillers, and the render settings that change how it sounds or what it covers (levels, fades, picture
@@ -536,12 +584,21 @@ def setting_deltas(was: dict, now: dict, skip: set[str] | frozenset = frozenset(
     for key, label in (("fades", "Fades"), ("fill", "Picture over bare narration"), ("stringout", "Stringout project")):
         if key in was and key in now and bool(was[key]) != bool(now[key]):
             out.append(f"{label}: {_on_off(was[key])} → {_on_off(now[key])}")
+    if any(k in now for k in SOUND_KEYS):  # sound effects: other sounds to use, or more or fewer (an earlier version without them had none)
+        before, after = _sound_sources(was), _sound_sources(now)
+        if sorted(before) != sorted(after):
+            out.append(f"Sound effects from: {', '.join(before) or 'none'} → {', '.join(after) or 'none'}")
+        a, b = sound_state(was), sound_state(now)
+        if "sfx_amount" not in skip and a != b and "no sounds" not in (a, b):
+            out.append(f"Sound effects: {a} → {b}")
     return out
 
 
 def _noted(notes: list[str]) -> set[str]:
     """The cut settings a settings note already says."""
-    return {key for key, lead in (("style", "Pacing:"), ("punch_in", "Punch-ins:")) if any(n.startswith(lead) for n in notes)}
+    return {
+        key for key, lead in (("style", "Pacing:"), ("punch_in", "Punch-ins:"), ("sfx_amount", "Sound effects:")) if any(n.startswith(lead) for n in notes)
+    }
 
 
 def change_items(
@@ -558,11 +615,13 @@ def change_items(
     was: dict | None = None,
     now: dict | None = None,
     outcome: dict | None = None,
+    accents: tuple[int | None, int | None] = (None, None),
 ) -> tuple[list[str], bool]:
     """What a revision changed, as plain sentences, and whether it changed nothing a viewer would see: (items, unchanged).
 
     The paper edit's revision block and the app's list of changes are both these. `settings_notes`: what the notes did to the
     cut's settings (settings_from_notes), listed too; `was`/`now` (setting_deltas) add settings a flag changed.
+    `accents`: how many sound-effect accents the version before had and this one has (None: not known).
     `outcome`: once the graphics are made, {"in_cut": plan indexes that made it into the cut, "fell_back": plan indexes whose
     new design never came back and that kept the earlier one, "placed": plan indexes the cut had room for} (_graphic_changes),
     so the list never claims a graphic that isn't there, and never calls one that had no room a failure.
@@ -609,9 +668,9 @@ def change_items(
         plan_changes.append(
             f"B-roll: {len(shots(previous) - shots(revised))} of {b_new} shots changed (other footage, other lines or words, or another part of the footage)"
         )
-    songs = lambda plan: [analysis.clip(c.clip_id).media.name if analysis.clip(c.clip_id) else c.clip_id for c in plan.music]  # noqa: E731
-    if songs(previous) != songs(revised):
-        plan_changes.append("Music: " + (", ".join(songs(previous)) or "none") + " → " + (", ".join(songs(revised)) or "none"))
+    songs_before, songs_after = played_songs(previous, analysis), played_songs(revised, analysis)
+    if songs_before != songs_after:
+        plan_changes.append("Music: " + (", ".join(songs_before) or "none") + " → " + (", ".join(songs_after) or "none"))
     elif [(c.first_section, c.last_section) for c in previous.music] != [(c.first_section, c.last_section) for c in revised.music]:
         plan_changes.append("Music runs under other sections")
     else:
@@ -634,6 +693,7 @@ def change_items(
 
     skip = _noted(notes)
     deltas = setting_deltas(was or {}, now or {}, skip) if was is not None and now is not None else []
+    deltas += [item for item in [accent_item(*accents)] if item]
     said_changes = [n for n in notes if n.startswith(CHANGE_NOTES)]
     advice = [n for n in notes if not n.startswith(CHANGE_NOTES)]
     unchanged = not (plan_changes or deltas or said_changes)
@@ -722,6 +782,7 @@ def recut_items(
     for key, label in (("edits", "Edits"), ("broll", "B-roll shots")):
         if before.get(key) is not None and before[key] != after[key]:
             numbers.append(f"{label}: {before[key]} → {after[key]}")
+    numbers += [item for item in [accent_item(before.get("accents"), after.get("accents"))] if item]
     if added:
         numbers.append(f"Graphics: {added} added to the cut")
     if rerendered:
@@ -738,6 +799,8 @@ def recut_items(
             why.append("punch-ins only change the framing")
         if any(d.startswith(("Dialogue level", "B-roll sound", "Music level", "Fades")) for d in deltas):
             why.append("levels and fades only change how it sounds")
+        if any(d.startswith("Sound effects") for d in deltas):
+            why.append("sound effects only add to how it sounds")
         numbers.append("Length, edits and B-roll came out the same" + (f" ({'; '.join(why)})" if why else ""))
     return deltas + numbers, False
 

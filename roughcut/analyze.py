@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
+from .textio import Stalled, bounded
 from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions
 from .transcribe import Transcriber, TranscriptionError, Transcript, find_sidecar, load_sidecar
 
@@ -110,6 +111,9 @@ class Clip:
     sound_end: float | None = None  # seconds: where the last sound fades out
     music_bed: bool = False  # given with --music: not transcribed, always the cut's music
     music_order: int | None = None  # its place among the --music files (0: the first given), which plays when the plan cues none
+    # A Venture Studio song: what Studio says about it (id, title, provider, license, tags, notes, favorite). Its file may be
+    # on a network share, so every touch of it is given a deadline. Not part of analysis_digest.
+    library: dict | None = None
 
     @property
     def hidden(self) -> bool:
@@ -153,6 +157,7 @@ class Clip:
             "sound_end": self.sound_end,
             "music_bed": self.music_bed,
             "music_order": self.music_order,
+            **({"library": self.library} if self.library else {}),
         }
 
     @classmethod
@@ -182,6 +187,7 @@ class Clip:
             sound_end=d.get("sound_end"),
             music_bed=bool(d.get("music_bed", False)),
             music_order=d.get("music_order") if isinstance(d.get("music_order"), int) else None,
+            library=d.get("library") if isinstance(d.get("library"), dict) else None,
         )
 
 
@@ -221,19 +227,27 @@ class Analysis:
         return cls.from_json(json.loads(path.read_text()))
 
 
-def _sort_key(info: MediaInfo) -> tuple[str, str]:
+# A Venture Studio song sits on a library folder, often a network share that can stop answering mid-run: each
+# step that reads it gets a deadline, and a song whose share stalls is left out with a warning.
+SHARE_STAT_SECONDS = 5.0
+SHARE_PROBE_SECONDS = 30.0
+SHARE_MEASURE_SECONDS = 180.0  # its silence map and loudness: three reads of the whole file
+
+
+def _sort_key(info: MediaInfo, remote: frozenset[str] = frozenset()) -> tuple[str, str]:
     stamp = info.creation_time
     if not stamp:
         try:
-            stamp = datetime.fromtimestamp(Path(info.path).stat().st_mtime, tz=timezone.utc).isoformat()
-        except OSError:
+            st = bounded(Path(info.path).stat, seconds=SHARE_STAT_SECONDS) if info.path in remote else Path(info.path).stat()
+            stamp = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        except (OSError, Stalled):
             stamp = ""
     return (stamp, info.path)
 
 
-def assign_ids(infos: list[MediaInfo]) -> list[tuple[str, MediaInfo]]:
+def assign_ids(infos: list[MediaInfo], remote: frozenset[str] = frozenset()) -> list[tuple[str, MediaInfo]]:
     prefix = {"video": "V", "audio": "A", "image": "I"}
-    ordered = sorted(infos, key=_sort_key)
+    ordered = sorted(infos, key=lambda i: _sort_key(i, remote))
     counts = {k: sum(1 for i in infos if i.kind == k) for k in prefix}
     seen = {k: 0 for k in prefix}
     out = []
@@ -260,6 +274,19 @@ def pause_warning(clip: Clip) -> str | None:
 
 
 LOUDNESS_CACHE = "loudness-v1.json"
+
+
+def probe_cached(path: Path, cache: Cache) -> MediaInfo:
+    """ffprobe's reading of a file, cached by its fingerprint (path, size, modification time)."""
+    from .media import fingerprint
+
+    fp = fingerprint(path)
+    cached = cache.get(fp, "probe.json")
+    if cached:
+        return MediaInfo.from_json(cached)
+    info = probe(path)
+    cache.put(fp, "probe.json", info.to_json())
+    return info
 
 
 def _loudness_blocks(m: MediaInfo, cache: Cache) -> dict | None:
@@ -387,33 +414,48 @@ def analyze(
     noise_db: float | None = None,
     prefer_vertical: bool = False,
     music: list[Path] | None = None,
+    library: dict[str, dict] | None = None,
 ) -> Analysis:
-    """`music`: files given with --music. They aren't transcribed and become the cut's music bed."""
+    """`music`: files given with --music. They aren't transcribed and become the cut's music bed.
+
+    `library`: the Venture Studio songs among them (their path as Studio has it -> what Studio says about each, kept as
+    Clip.library). Their files may be on a network share: every read of one has a deadline (SHARE_*_SECONDS), and a
+    song whose share stops answering is left out with a warning instead of holding up the run.
+    """
     t0 = time.monotonic()
     warnings: list[str] = []
+    library = {str(Path(k)): v for k, v in (library or {}).items()}
+    remote = frozenset(library)
+
+    def key(p) -> str:  # a Studio path is used as Studio has it: resolving it would touch the share
+        return str(p) if str(p) in remote else str(Path(p).expanduser().resolve())
+
     music_paths: dict[str, int] = {}  # each --music file and its place in the order given (the first time it's given)
     for i, p in enumerate(music or []):
-        music_paths.setdefault(str(Path(p).expanduser().resolve()), i)
+        music_paths.setdefault(key(p), i)
     progress.stage("probe", f"Reading {len(paths)} files")
 
     def _probe(p: Path) -> MediaInfo | None:
-        from .media import fingerprint
-
+        if str(p) in remote:
+            try:
+                return bounded(probe_cached, p, cache, seconds=SHARE_PROBE_SECONDS, what=f"reading {p.name}")
+            except Stalled:
+                warnings.append(f"{p.name}: left out: its network folder didn't answer in {SHARE_PROBE_SECONDS:g} s (a Venture Studio song)")
+                return None
+            except OSError as e:
+                warnings.append(f"{p.name}: {e}")
+                return None
+            except MediaError as e:
+                warnings.append(str(e))
+                return None
         try:
-            fp = fingerprint(p)
+            return probe_cached(p, cache)
         except OSError as e:
             warnings.append(f"{p.name}: {e}")
             return None
-        cached = cache.get(fp, "probe.json")
-        if cached:
-            return MediaInfo.from_json(cached)
-        try:
-            info = probe(p)
         except MediaError as e:
             warnings.append(str(e))
             return None
-        cache.put(fp, "probe.json", info.to_json())
-        return info
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         infos = [i for i in pool.map(_probe, paths) if i is not None]
@@ -422,13 +464,14 @@ def analyze(
             warnings.append(f"{info.name}: {w}")
     log(f"probed {len(infos)} files in {time.monotonic() - t0:.1f}s")
 
-    clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos)]
+    clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos, remote)]
     for clip in clips:
-        order = music_paths.get(str(Path(clip.media.path).resolve()))
+        order = music_paths.get(key(clip.media.path))
         if order is not None:
             if clip.media.kind == "audio":
                 clip.music_bed = True
                 clip.music_order = order
+                clip.library = library.get(clip.media.path)
             else:
                 warnings.append(f"{clip.media.name}: --music takes an audio file; this one has pictures, so it's used as an ordinary clip")
 
@@ -461,15 +504,28 @@ def analyze(
         if clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB:
             default_maps[clip.id] = _silence_at(m, ffmpeg_ops.DEFAULT_NOISE_DB)
 
-    def _sound(clip: Clip) -> None:
+    def _measure(clip: Clip) -> None:
         _silence(clip)
         if clip.media.has_audio:
             _loudness_blocks(clip.media, cache)  # measured now; summarized once roles are known
+
+    stalled: set[str] = set()
+
+    def _sound(clip: Clip) -> None:
+        if clip.media.path not in remote:
+            _measure(clip)
+            return
+        try:
+            bounded(_measure, clip, seconds=SHARE_MEASURE_SECONDS, what=f"reading {clip.media.name}")
+        except Stalled:
+            stalled.add(clip.id)
+            warnings.append(f"{clip.media.name}: left out: its network folder stopped answering while it was read (a Venture Studio song)")
 
     t1 = time.monotonic()
     progress.stage("silence", "Finding the pauses")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(_sound, clips))
+    clips = [c for c in clips if c.id not in stalled]
     log(f"mapped silence and loudness in {time.monotonic() - t1:.1f}s")
 
     t2 = time.monotonic()

@@ -330,7 +330,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if graphics && provider == .none {
             list.append("Motion graphics are designed by the AI: choose a provider other than None.")
         }
-        if let missing = music.first(where: { !FileManager.default.fileExists(atPath: $0.path) }) {
+        // Not a song on another volume (a network share can take minutes to answer, and this runs on every
+        // keystroke): the CLI checks those with a deadline when the build starts.
+        if let missing = music.first(where: { !Self.onAnotherVolume($0.path) && !FileManager.default.fileExists(atPath: $0.path) }) {
             list.append("The music file \(missing.lastPathComponent) isn't there any more: remove it or pick it again.")
         }
         if graphics && provider != .none {
@@ -348,6 +350,11 @@ public struct BuildOptions: Codable, Equatable, Sendable {
 
     static func fileExists(_ path: String) -> Bool {
         FileManager.default.fileExists(atPath: NSString(string: path).expandingTildeInPath)
+    }
+
+    /// Under /Volumes: an external drive or a network share, which the app never waits on.
+    public static func onAnotherVolume(_ path: String) -> Bool {
+        path.hasPrefix("/Volumes/")
     }
 
     /// Arguments for the `roughcut` executable. Free-text values use the
