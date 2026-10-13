@@ -618,6 +618,7 @@ def studio_music(opts: Options) -> tuple[Options, list[str]]:
     cache = Cache(opts.cache_dir or default_cache_dir())
     picked: list[tuple[str, dict]] = []
     probes, stalled = 0, None
+    unreachable: list[tuple[str, str]] = []  # (file, why) for songs whose file isn't there
     for row in studio.rank_songs([r for r in listing.rows if r["usable"]], opts.context):
         if len(picked) >= opts.music_max:
             break
@@ -635,6 +636,7 @@ def studio_music(opts: Options) -> tuple[Options, list[str]]:
                 stalled = why
                 break  # the share stopped answering: the rest are on it too
             log(f"--music-from {source}: {row['file']} left out: {why}")
+            unreachable.append((row["file"], why))
             continue
         if seconds is None:
             probes += 1
@@ -658,7 +660,16 @@ def studio_music(opts: Options) -> tuple[Options, list[str]]:
         warnings.append(f"--music-from {source}: stopped adding Studio songs: {stalled}.")
         log(warnings[-1])
     if not picked:
-        if not warnings:
+        if not warnings and unreachable:
+            # The collection has songs; their files aren't reachable: say that, not that it has none.
+            file, why = unreachable[0]
+            n = len(unreachable)
+            warnings.append(
+                f"--music-from {source}: {n} of its songs couldn't be reached ({file}: {why}); this cut is built without them."
+                if n > 1 else f"--music-from {source}: its song couldn't be reached ({file}: {why}); this cut is built without it."
+            )
+            log(warnings[-1])
+        elif not warnings:
             warnings.append(f"--music-from {source}: no songs found in {listing.source} (Studio audio of 45 s or more that Roughcut reads).")
             log(warnings[-1])
         return opts, warnings
@@ -704,10 +715,15 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
     require_tools()
     progress.stage("scan", "Finding media")
     library = {str(Path(p)): info for p, info in (opts.music_library or {}).items()}
-    music, studio_songs, dropped = [], [], []
+    music, studio_songs, dropped, handled = [], [], [], set()
     for song in opts.music:
-        if str(Path(song)) in library:
-            # A Venture Studio song: left out (never a stopped run) once the run has started.
+        key = str(Path(song))
+        if key in library:
+            # A Venture Studio song: left out (never a stopped run) once the run has started. Given again (as
+            # studio:ID and as its path, say), it is still one song, as an ordinary file is: the first mention counts.
+            if key in handled:
+                continue
+            handled.add(key)
             problem = music_problem(song)
             if problem:
                 dropped.append(f"{problem}; left out of the music bed")

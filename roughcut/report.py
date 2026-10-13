@@ -113,9 +113,16 @@ def studio_section(
     files = record.get("files") if isinstance(record.get("files"), dict) else {}
     refused = refused or record.get("refused")
 
+    own = str(out_dir).rstrip("/") + "/" if out_dir is not None else None
+
     def info(path: str) -> dict:
         found = files.get(path)
-        return found if isinstance(found, dict) else {"status": "not_checked", "assets": [], "why": ""}
+        if isinstance(found, dict):
+            return found
+        if own is not None and path.startswith(own):
+            # A graphic's render a re-cut wrote under a new name: Roughcut's own file, which needs no Studio to know.
+            return {"status": "render", "assets": [], "why": "", "studio_path": None}
+        return {"status": "not_checked", "assets": [], "why": ""}
 
     every = list(dict.fromkeys(p for project in projects for p, _ in project.paths()))
     if refused and not every:

@@ -270,6 +270,20 @@ def test_render_and_revise_rebuild_the_section_without_studio(shoot_in_library, 
     assert json.loads((out / "plan.json").read_text())["studio_sources"]["files"]
 
 
+def test_a_render_a_recut_names_anew_is_ours_not_unchecked():
+    """Studio can't be read, and a re-cut renamed a graphic's render: that file is Roughcut's own, which needs no Studio to know."""
+    sunrise, fresh = f"{ROOT}/Music/Sunrise.m4a", f"{ROOT}/Music/New.m4a"
+    saved = {"checked_at": NOW, "snapshot": {"id": "1700000500-1-1", "name": "Catalog snapshot", "created_at": NOW - 3600}, "kit": None, "refused": None,
+             "files": {sunrise: {"status": "matched", "assets": [{"id": 1, "name": "Sunrise.m4a", "provider": "Vendor A", "license": "Standard"}],
+                                 "why": "", "studio_path": None}}}
+    xml = fcpxml([(sunrise, {}), (f"{OUT}/graphics/G01-lower-third-fe857e.mov", {}), (fresh, {})])
+    projects, refused = studio.cut_projects(xml)
+    text = "\n".join(studio_section(saved, projects, refused=refused, unavailable="not installed", earlier=True, out_dir=Path(OUT), now=NOW))
+    assert "(1 of its 3 files, 1 not checked)" in text  # only New.m4a is unknown
+    assert "Roughcut's own renders, which Studio has no record of: 1 file" in text
+    assert "**Not checked** (new in this version, after the check against Studio): `New.m4a`" in text and "G01" not in text.split("Not checked")[1]
+
+
 def test_installed_but_unavailable_is_one_line(footage, fake, tmp_path):
     out = tmp_path / "out"
     pipeline.build(Options(inputs=[footage], out=out, provider="none", transcriber="none", cache_dir=tmp_path / "cache"))

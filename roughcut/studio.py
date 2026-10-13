@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+from .textio import Stalled, bounded
+
 STUDIO_ENV = "ROUGHCUT_STUDIO_DIR"  # Studio's data folder, for tests or a second Mac account
 BUNDLE_ID = "com.hauptli.venturestudio"
 CACHE_FOLDER = "venture-studio"  # inside Roughcut's cache: our copies of Studio's snapshots
@@ -669,12 +671,10 @@ def standalone_audio(
     if any(str(w).strip() for w in words) and not tokens:
         return []
     if tokens:
-        found = _fts_ids(con, tokens)
-        if found is not None:
-            if not found:
-                return []
-            where.append(f"a.id IN ({', '.join('?' * len(found))})")
-            args += sorted(found)
+        query = _fts_query(con, tokens)
+        if query is not None:
+            where.append("a.id IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)")  # one parameter, however many items match
+            args.append(query)
         else:
             fields = ("a.name", "a.display_name", "a.relative_path", "a.tags", "a.notes", "a.provider", "a.license")
             for token in tokens:
@@ -688,13 +688,15 @@ def standalone_audio(
     return _select(con, where, args, joins)
 
 
-def _fts_ids(con: sqlite3.Connection, tokens: list[str]) -> set[int] | None:
-    """The ids Studio's own full-text index finds for these words, or None when the copy has none this Python can read."""
+def _fts_query(con: sqlite3.Connection, tokens: list[str]) -> str | None:
+    """The MATCH expression for Studio's own full-text index (every word a word start), or None when the copy has
+    none this Python's SQLite can read."""
     try:
         if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets_fts'").fetchone():
             return None
         query = " AND ".join(f'"{t}"*' for t in tokens)
-        return {int(r[0]) for r in con.execute("SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?", (query,)).fetchall()}
+        con.execute("SELECT rowid FROM assets_fts WHERE assets_fts MATCH ? LIMIT 1", (query,)).fetchall()  # readable, and the query parses
+        return query
     except sqlite3.Error:  # no FTS5 in this Python's SQLite, or an index it can't read
         return None
 
@@ -771,7 +773,15 @@ def clock(seconds: float | None) -> str:
 
 
 def is_kit_file(name: str) -> bool:
-    return name.lower().endswith(".json") and Path(name).expanduser().is_file()
+    """Whether `name` is a .json file that exists (a kit the owner exported). Looked at with a deadline: it may be on a
+    network share, and a share that stopped answering would otherwise hold up the whole run."""
+    if not name.lower().endswith(".json"):
+        return False
+    path = Path(name).expanduser()
+    try:
+        return bool(bounded(path.is_file, seconds=FILE_SECONDS, what=f"{path.name}'s folder"))
+    except Stalled:
+        raise StudioUnavailable(_kit_stalled(path)) from None
 
 
 def song(con: sqlite3.Connection, asset_id: int) -> Asset:
@@ -900,7 +910,11 @@ def listing_lines(listing: Listing) -> list[str]:
     n = len(listing.rows)
     first = next((r for r in listing.rows if r["usable"] and r["id"] is not None), None)
     lines.append(f"{n} file{'s' if n != 1 else ''}; * = favorite; length ? = Studio hasn't measured it yet.")
-    if first is not None:
+    if first is not None and listing.kit_file is not None:
+        # A kit's ids are the catalog's, which this listing didn't read (and may not be there): the file's own path always works.
+        lines.append(f"Use one under a cut: roughcut build FOLDER --music {shlex.quote(first['path'])}")
+        lines.append(f"Or offer them all to the planner: roughcut build FOLDER --music-from {shlex.quote(str(listing.kit_file))}")
+    elif first is not None:
         lines.append(f"Use one under a cut: roughcut build FOLDER --music studio:{first['id']}")
     return lines
 
@@ -977,20 +991,35 @@ def _plain_absolute(path) -> bool:
     return all(part not in ("", ".", "..") for part in path.split("/")[1:])
 
 
+def _kit_stalled(path: Path) -> str:
+    return f"{path.name}'s folder didn't answer in {FILE_SECONDS:g} s (a network share that stopped answering?)"
+
+
+def _kit_bytes(path: Path) -> bytes:
+    """The whole kit file: opened, checked and read in one go, so a call that is left behind closes its own descriptor."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))  # the file you chose: a link to it is fine
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise StudioUnavailable(f"{path.name} isn't a file")
+        if st.st_size > KIT_MAX:
+            raise StudioUnavailable(f"{path.name} is larger than a Venture Studio kit can be (32 MB)")
+        return b"".join(iter(lambda: os.read(fd, 1 << 20), b""))
+    finally:
+        os.close(fd)
+
+
 def load_kit(file: Path | str) -> Kit:
-    """Read a kit export: format 1 of Studio's project manifest, items under `project.assets`."""
+    """Read a kit export: format 1 of Studio's project manifest, items under `project.assets`.
+
+    The file may sit on a network share, so it is read with a deadline (FILE_SECONDS): a share that stops answering
+    is a StudioUnavailable, and never holds up a run.
+    """
     path = Path(file).expanduser()
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))  # the file you chose: a link to it is fine
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                raise StudioUnavailable(f"{path.name} isn't a file")
-            if st.st_size > KIT_MAX:
-                raise StudioUnavailable(f"{path.name} is larger than a Venture Studio kit can be (32 MB)")
-            raw = b"".join(iter(lambda: os.read(fd, 1 << 20), b""))
-        finally:
-            os.close(fd)
+        raw = bounded(_kit_bytes, path, seconds=FILE_SECONDS, what=f"reading {path.name}")
+    except Stalled:
+        raise StudioUnavailable(_kit_stalled(path)) from None
     except OSError as e:
         raise StudioUnavailable(_os_reason(e, path.name)) from e
     if len(raw) > KIT_MAX:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -188,7 +189,7 @@ def songs(library, fake, audio) -> dict[str, Path]:
         _asset(4, "Sound Effects/whoosh_soft_01.m4a", kind="audio"),  # sounds like an effect: never measured
         _asset(5, "Titles/Glitch/Loop.m4a", kind="audio", package_id=9, template_resource=1),
         _asset(6, "Music/Not Here.m4a", kind="audio"),
-    ], collections={"Promo Music": [1, 2, 3, 4, 5, 6], "Twin": [1]}, kits={"Twin": [2]})
+    ], collections={"Promo Music": [1, 2, 3, 4, 5, 6], "Twin": [1], "Effects": [3, 4]}, kits={"Twin": [2]})
     return files
 
 
@@ -323,7 +324,9 @@ def test_music_from_without_studio_or_its_files(footage, songs, tmp_path, monkey
         path.unlink()  # the share isn't connected
     out = tmp_path / "out"
     assert main(_build(footage, out, "--music-from", "Promo Music")) == 0
-    assert _music(out) == [] and "no songs found" in (out / "edit_report.md").read_text()
+    report = (out / "edit_report.md").read_text()
+    assert _music(out) == [] and "no songs found" not in report  # the folder isn't there; the collection isn't empty
+    assert "--music-from Promo Music: 3 of its songs couldn't be reached" in report and "network folder isn't connected" in report
     monkeypatch.setenv(studio.STUDIO_ENV, str(tmp_path / "nowhere"))
     out2 = tmp_path / "out2"
     assert main(_build(footage, out2, "--music-from", "Promo Music")) == 0
@@ -431,3 +434,102 @@ def test_only_your_presets_name_a_studio_collection(tmp_path, monkeypatch, capsy
                                 ["build", "x", "--preset", "mine", "--no-music-from"])
     assert args.music_from == ""
     assert main(["preset", "save", "mine", "--no-music-from"]) == 0 and presets.load("mine").music_from is None
+
+
+# ---------------------------------------------------------------- found by review
+
+KIT = {"format_version": 1, "kind": studio.KIT_KIND, "exported_at": NOW, "project": {"name": "Promo kit", "assets": [
+    {"asset_id": 1, "name": "Sunrise", "kind": "audio", "extension": "m4a", "original_reference": "/Volumes/Media/Studio Library/Music/Sunrise.m4a"},
+]}}
+
+
+def test_a_song_given_more_than_once_is_one_clip(footage, songs, tmp_path):
+    out = tmp_path / "out"
+    assert main(_build(footage, out, "--music", "studio:1", "--music", "studio:1", "--music", str(songs["sunrise"]),
+                       "--music-from", "Promo Music", "--music-max", "2")) == 0
+    assert [name for name, _ in _music(out)] == ["Sunrise.m4a", "Old Ballad.m4a"]  # --music-from skips the one already given
+    fcpxml = next(out.glob("*.fcpxml")).read_text()
+    assert fcpxml.count(songs["sunrise"].as_uri()) == 1
+    assert "found 3 media files" in (out / "roughcut.log").read_text()  # the talk, and two songs
+    out2 = tmp_path / "out2"  # an ordinary song given twice has always been one clip
+    typed = footage / "music" / "music.m4a"
+    assert main(_build(footage, out2, "--music", str(typed), "--music", str(typed))) == 0
+    assert [name for name, _ in _music(out2)] == ["music.m4a"]
+
+
+def test_music_from_with_nothing_to_offer_still_says_no_songs(footage, songs, tmp_path):
+    out = tmp_path / "out"
+    assert main(_build(footage, out, "--music-from", "collection:Effects")) == 0  # a sting too short, a sound effect by name
+    assert _music(out) == [] and "no songs found" in (out / "edit_report.md").read_text()
+
+
+def test_a_kit_file_on_a_stalled_share_does_not_hang_music_from(footage, songs, tmp_path, monkeypatch):
+    kit = tmp_path / "promo-kit.json"
+    kit.write_text(json.dumps(KIT))
+    release = threading.Event()
+    real_is_file, real_open = Path.is_file, os.open
+
+    def hung_is_file(self, *a, **k):
+        if self == kit:
+            release.wait(30)
+        return real_is_file(self, *a, **k)
+
+    def hung_open(path, *a, **k):
+        if str(path) == str(kit):
+            release.wait(30)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(Path, "is_file", hung_is_file)
+    monkeypatch.setattr(studio.os, "open", hung_open)
+    monkeypatch.setattr(studio, "FILE_SECONDS", 0.3)
+    out = tmp_path / "out"
+    t0 = time.monotonic()
+    code = main(_build(footage, out, "--music-from", str(kit)))
+    elapsed = time.monotonic() - t0
+    assert code == 0 and elapsed < 20
+    assert _music(out) == [] and "didn't answer in 0.3 s" in (out / "edit_report.md").read_text()
+    t0 = time.monotonic()
+    assert main(["studio", "music", "--kit", str(kit)]) == 1  # the listing gives up too
+    assert time.monotonic() - t0 < 20
+    release.set()
+
+
+def test_a_kit_file_whose_open_stalls_is_given_up_on(tmp_path, monkeypatch):
+    kit = tmp_path / "promo-kit.json"
+    kit.write_text(json.dumps(KIT))
+    release = threading.Event()
+    real_open = os.open
+
+    def hung_open(path, *a, **k):
+        if str(path) == str(kit):
+            release.wait(30)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(studio.os, "open", hung_open)
+    monkeypatch.setattr(studio, "FILE_SECONDS", 0.3)
+    with pytest.raises(studio.StudioUnavailable, match="promo-kit.json.*didn't answer in 0.3 s"):
+        studio.load_kit(kit)
+    release.set()
+    assert studio.load_kit(kit).name == "Promo kit"  # the same file on a healthy share reads fine
+
+
+def test_the_kit_listing_points_at_the_song_not_at_a_studio_id(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(studio.STUDIO_ENV, str(tmp_path / "nowhere"))
+    kit = tmp_path / "venture-project-promo.json"
+    kit.write_text(json.dumps(KIT))
+    assert main(["studio", "music", "--kit", str(kit)]) == 0
+    text = capsys.readouterr().out
+    assert "studio:" not in text  # studio:ID needs the catalog snapshot, which isn't here
+    assert "--music '/Volumes/Media/Studio Library/Music/Sunrise.m4a'" in text and f"--music-from {kit}" in text
+
+
+def test_a_search_that_finds_many_items_binds_none_of_them(fake, library):
+    if not hasattr(sqlite3.Connection, "setlimit"):
+        pytest.skip("this Python can't lower SQLite's variable limit")
+    many = [_asset(i, f"Library/file {i}.wav", kind="audio") for i in range(1, 301)]
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=many, after=FTS)
+    copy = studio.newest_copy()
+    with studio.catalog(copy) as con:
+        con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 50)
+        found = studio.standalone_audio(con, words=["file"])
+        assert len(found) == 300 and studio.standalone_audio(con, words=["file", "nothing"]) == []
