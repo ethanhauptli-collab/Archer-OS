@@ -85,6 +85,7 @@ class ReferenceSet:
     images: list[bytes] = field(default_factory=list)
     sent: bool = False  # a design request carried them
     warned: bool = False  # the designer can't look at pictures: said once
+    dropped: bool = False  # a request the model turned down with them was sent again without
 
     def __bool__(self) -> bool:
         return bool(self.images)

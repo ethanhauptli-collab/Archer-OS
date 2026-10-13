@@ -367,33 +367,59 @@ def _quoted(text: str) -> str:
     return '"' + _snippet(text, 50) + '"'
 
 
-def _graphic_changes(previous: list, revised: list, *, redesigned: bool) -> tuple[list[str], list[str]]:
+RETIME = 0.3  # seconds: a graphic held this much longer or shorter than before is re-timed (its design is kept)
+
+
+def _held(spec) -> float:
+    """How long a graphic holds, as the plan asks (a plan that left it out holds its kind's usual time)."""
+    from .plan import DEFAULT_SECONDS
+
+    return float(spec.seconds) if spec.seconds and spec.seconds > 0 else DEFAULT_SECONDS.get(spec.kind, 4.0)
+
+
+def _graphic_changes(
+    previous: list, revised: list, *, redesigned: bool, in_cut: set[int] | None = None, fell_back: set[int] | frozenset[int] = frozenset(),
+) -> tuple[list[str], list[str]]:
     """(what changed, what stayed) about the graphics: kept / redesigned / new / removed, with a changed text or direction in words.
 
     `redesigned`: every graphic is designed again (new references, notes asking for another look, --redesign-graphics).
-    A graphic is "kept" when everything its design is made from is the same (plan.spec_key): the earlier design is reused.
-    What stayed is only said (as one line) when nothing about the graphics changed.
+    A graphic is "kept" when everything its design is made from is the same (plan.spec_key): the earlier design is reused,
+    and one held for another time is re-timed (RETIME). What stayed is only said (as one line) when nothing about the graphics changed.
+
+    What the run did, once its graphics are made: `in_cut` holds the plan indexes that made it into the cut (None before that:
+    every graphic is taken to), and `fell_back` the ones whose new design never came back and that kept their earlier one.
+    A graphic this version meant to make or change that isn't in the cut isn't counted as made.
     """
     from .plan import spec_key
 
     left = list(previous)
-    found: list[tuple] = []  # (revised spec, the earlier one it continues or None, the design's inputs are the same)
-    for r in revised:
+    found: list[list] = []  # [index in the revised plan, revised spec, the earlier one it continues or None, the design's inputs are the same]
+    for n, r in enumerate(revised):
         i = next((i for i, p in enumerate(left) if spec_key(p) == spec_key(r)), None)
-        found.append((r, left.pop(i) if i is not None else None, i is not None))
-    for n, (r, was, _) in enumerate(found):  # then: the same moment (kind, line, words) with its text or direction changed
-        if was is None:
+        found.append([n, r, left.pop(i) if i is not None else None, i is not None])
+    for entry in found:  # then: the same moment (kind, line, words) with its text or direction changed
+        if entry[2] is None:
+            r = entry[1]
             i = next((i for i, p in enumerate(left) if (p.kind, p.segment, p.words.lower().split()) == (r.kind, r.segment, r.words.lower().split())), None)
             if i is not None:
-                found[n] = (r, left.pop(i), False)
-    same = sum(1 for _, was, same in found if was is not None and same)
-    changed = sum(1 for _, was, same in found if was is not None and not same)
-    new = sum(1 for _, was, _ in found if was is None)
+                entry[2], entry[3] = left.pop(i), False
+    same = changed = new = retimed = 0
+    stale = {"kept": 0, "left out": 0}  # meant to be made or redesigned, and wasn't
     detail: list[str] = []
-    for r, was, is_same in found:
-        if was is None:
+    for n, r, was, is_same in found:
+        meant = redesigned or was is None or not is_same
+        why = "kept" if n in fell_back else "left out" if in_cut is not None and n not in in_cut and meant else ""
+        if why:
+            stale[why] += 1
+            detail.append(
+                f"Graphic {_quoted(r.text)}: no new design came back, so it keeps its earlier one" if why == "kept"
+                else f"Graphic {_quoted(r.text)}: could not be made, so it is not in this version"
+            )
+        elif was is None:
+            new += 1
             detail.append(f"New graphic: {_quoted(r.text)} ({r.kind.replace('_', ' ')})")
         elif not is_same:
+            changed += 1
             said = []
             if was.text.strip() != r.text.strip():
                 said.append(f"text now {_quoted(r.text)}")
@@ -402,22 +428,39 @@ def _graphic_changes(previous: list, revised: list, *, redesigned: bool) -> tupl
             if " ".join(was.direction.lower().split()) != " ".join(r.direction.lower().split()):
                 said.append(f"direction now {_quoted(r.direction)}" if r.direction.strip() else "direction removed")
             detail.append(f"Graphic {_quoted(was.text)}: {'; '.join(said) or 'changed'}; designed again")
+        elif not redesigned and abs(_held(r) - _held(was)) >= RETIME:
+            retimed += 1
+            detail.append(f"Graphic {_quoted(r.text)}: now holds {_held(r):g} s (was {_held(was):g} s); design kept")
+        else:
+            same += 1
     detail += [f"Removed graphic: {_quoted(was.text)}" for was in left]
-    if not (changed or new or left or (redesigned and same)):
+    unmade = sum(stale.values())
+    if not (changed or new or left or retimed or unmade or (redesigned and same)):
         return [], ([f"Graphics: {same} kept as they were"] if same else [])
     parts = []
     if redesigned:
-        parts.append(f"{same + changed} redesigned")
+        if same + changed:
+            parts.append(f"{same + changed} redesigned")
     else:
         if same:
             parts.append(f"{same} kept as they were")
+        if retimed:
+            parts.append(f"{retimed} kept with another length")
         if changed:
             parts.append(f"{changed} changed and designed again")
     if new:
         parts.append(f"{new} new")
+    if stale["kept"]:
+        parts.append(f"{stale['kept']} got no new design and {'keeps its' if stale['kept'] == 1 else 'keep their'} earlier one")
+    if stale["left out"]:
+        parts.append(f"{stale['left out']} could not be made and {'is' if stale['left out'] == 1 else 'are'} not in this version")
     if left:
         parts.append(f"{len(left)} removed")
-    summary = "Graphics: " + ", ".join(parts) + (" (every graphic is designed again)" if redesigned and same + changed else "")
+    summary = "Graphics: " + ", ".join(parts)
+    if unmade:
+        summary += " (see Warnings)"
+    elif redesigned and same + changed:
+        summary += " (every graphic is designed again)"
     more = [f"…and {len(detail) - LISTED} more graphic changes"] if len(detail) > LISTED else []
     return [summary] + detail[:LISTED] + more, []
 
@@ -441,11 +484,21 @@ def _spelling_changes(previous: Plan, revised: Plan) -> list[str]:
     return out
 
 
+def _level_text(value, unit: str) -> str:
+    return "as recorded" if value is None else f"{value:g} {unit}"
+
+
+def _on_off(value) -> str:
+    return "on" if value else "off"
+
+
 def setting_deltas(was: dict, now: dict, skip: set[str] | frozenset = frozenset()) -> list[str]:
-    """What a cut setting changed from the version before: pacing, punch-ins, format and fillers (`skip`: ones a note already says).
+    """What a cut setting changed from the version before (`skip`: ones a note already says): pacing, punch-ins,
+    format, fillers, and the render settings that change how it sounds or what it covers (levels, fades, picture
+    over narration, the stringout project).
 
     `was`: the earlier version's saved settings (plan.json); a setting it doesn't have is unknown, not different.
-    `now`: style, punch_in, format and keep_fillers as this version has them.
+    `now`: the same settings as this version has them (pipeline.RENDER_FIELDS; a setting `now` leaves out isn't compared).
     """
     out = []
     old, new = was.get("style"), now.get("style")
@@ -457,6 +510,16 @@ def setting_deltas(was: dict, now: dict, skip: set[str] | frozenset = frozenset(
         out.append(f"Format: {was.get('format') or 'from the footage'} → {now.get('format') or 'from the footage'}")
     if "keep_fillers" in was and bool(was.get("keep_fillers")) != bool(now.get("keep_fillers")):
         out.append("Fillers (um, uh): " + ("cut → kept" if now.get("keep_fillers") else "kept → cut"))
+
+    def differs(key: str) -> bool:
+        return key in was and key in now and was[key] != now[key]
+
+    for key, label, unit in (("dialogue_level", "Dialogue level", "LUFS"), ("broll_db", "B-roll sound", "dB"), ("music_db", "Music level", "dB")):
+        if differs(key):
+            out.append(f"{label}: {_level_text(was[key], unit)} → {_level_text(now[key], unit)}")
+    for key, label in (("fades", "Fades"), ("fill", "Picture over bare narration"), ("stringout", "Stringout project")):
+        if key in was and key in now and bool(was[key]) != bool(now[key]):
+            out.append(f"{label}: {_on_off(was[key])} → {_on_off(now[key])}")
     return out
 
 
@@ -478,11 +541,14 @@ def change_items(
     settings_notes: list[str] | None = None,
     was: dict | None = None,
     now: dict | None = None,
+    outcome: dict | None = None,
 ) -> tuple[list[str], bool]:
     """What a revision changed, as plain sentences, and whether it changed nothing a viewer would see: (items, unchanged).
 
     The paper edit's revision block and the app's list of changes are both these. `settings_notes`: what the notes did to the
     cut's settings (settings_from_notes), listed too; `was`/`now` (setting_deltas) add settings a flag changed.
+    `outcome`: once the graphics are made, {"in_cut": plan indexes that made it into the cut, "fell_back": plan indexes whose
+    new design never came back and that kept the earlier one} (_graphic_changes), so the list never claims a graphic that isn't there.
     """
     notes = list(settings_notes or [])
     plan_changes: list[str] = []
@@ -511,18 +577,40 @@ def change_items(
         plan_changes.append("Sections added: " + ", ".join(f'"{n}"' for n in came))
     b_old = sum(len(s.broll) for s in previous.sections)
     b_new = sum(len(s.broll) for s in revised.sections)
-    shots = lambda plan: {(b.clip_id, tuple(b.over), b.words.lower()) for s in plan.sections for b in s.broll}  # noqa: E731
+
+    def start_of(clip_id: str, source_in: float) -> float:
+        """Where in its footage a shot starts: -1 when the software picks (a picture has no start)."""
+        clip = analysis.clip(clip_id)
+        return -1.0 if clip is not None and clip.media.kind == "image" else round(source_in, 1)
+
+    shots = lambda plan: {  # noqa: E731
+        (b.clip_id, tuple(b.over), " ".join(b.words.lower().split()), start_of(b.clip_id, b.source_in)) for s in plan.sections for b in s.broll
+    }
     if b_old != b_new:
         plan_changes.append(f"B-roll shots: {b_old} → {b_new}")
     elif shots(previous) != shots(revised):
-        plan_changes.append(f"B-roll: {len(shots(previous) - shots(revised))} of {b_new} shots are other footage or on other lines")
+        plan_changes.append(
+            f"B-roll: {len(shots(previous) - shots(revised))} of {b_new} shots changed (other footage, other lines or words, or another part of the footage)"
+        )
     songs = lambda plan: [analysis.clip(c.clip_id).media.name if analysis.clip(c.clip_id) else c.clip_id for c in plan.music]  # noqa: E731
     if songs(previous) != songs(revised):
         plan_changes.append("Music: " + (", ".join(songs(previous)) or "none") + " → " + (", ".join(songs(revised)) or "none"))
     elif [(c.first_section, c.last_section) for c in previous.music] != [(c.first_section, c.last_section) for c in revised.music]:
         plan_changes.append("Music runs under other sections")
+    else:
+        # Where in the song it starts, for a cue that ends before the cut does (the one that runs to the end is back-timed
+        # from the song's ending, whatever it says).
+        starts = lambda plan: [round(c.source_in, 1) if c.last_section < len(plan.sections) - 1 else None for c in plan.music]  # noqa: E731
+        if starts(previous) != starts(revised):
+            plan_changes.append("Music starts at another point in the song")
     plan_changes += _spelling_changes(previous, revised)
-    gfx_changes, gfx_same = _graphic_changes(previous.graphics, revised.graphics, redesigned=redesigned) if graphics_on else ([], [])
+    gfx_changes, gfx_same = (
+        _graphic_changes(
+            previous.graphics, revised.graphics, redesigned=redesigned,
+            in_cut=(outcome or {}).get("in_cut"), fell_back=(outcome or {}).get("fell_back") or frozenset(),
+        )
+        if graphics_on else ([], [])
+    )
     if not graphics_on and previous.graphics:
         gfx_changes = [f"Motion graphics are off: the {len(previous.graphics)} graphics of {'v' + str(previous_version) if previous_version else 'the previous cut'} are not in this version"]
     plan_changes += gfx_changes
@@ -538,14 +626,18 @@ def change_items(
             tail = "Motion graphics are off for this cut: turn them on to add or change them."
             body = f"This version plays the same lines and B-roll as {version}. "
         elif previous.graphics or revised.graphics:
-            tail = "If you meant how the graphics look, attach reference images or tick Redesign graphics."
+            tail = (
+                "If you meant how the graphics look, attach reference images or turn on Redesign the graphics "
+                "(Terminal: --graphics-ref IMAGE or --redesign-graphics)."
+            )
             body = f"This version plays the same lines, B-roll and graphics as {version}. "
         else:
             told = any("no graphics" in n for n in advice)  # the notes already say it
             tail = "" if told else "This cut has no graphics: ask for them in your notes, for example a lower third when someone is named."
             body = f"This version plays the same lines and B-roll as {version}." + ("" if told else " ")
-        return advice + [body + tail], True
-    items = [_length_item(before_seconds, after_seconds)] if before_seconds is not None else []
+        return [body + tail] + advice, True  # what to try comes first: it is the line the app highlights
+    longer = before_seconds is not None and abs(after_seconds - before_seconds) >= 0.05
+    items = [_length_item(before_seconds, after_seconds)] if longer else []
     return items + notes + deltas + plan_changes + ([] if gfx_changes else gfx_same), False
 
 
@@ -598,7 +690,12 @@ def recut_items(
             "To change it, pick another pacing, format or punch-in setting, or revise it with notes."
         ], True
     if deltas and not numbers:
-        numbers.append("Length, edits and B-roll came out the same" + (" (punch-ins only change the framing)" if any(d.startswith("Punch-ins") for d in deltas) else ""))
+        why = []
+        if any(d.startswith("Punch-ins") for d in deltas):
+            why.append("punch-ins only change the framing")
+        if any(d.startswith(("Dialogue level", "B-roll sound", "Music level", "Fades")) for d in deltas):
+            why.append("levels and fades only change how it sounds")
+        numbers.append("Length, edits and B-roll came out the same" + (f" ({'; '.join(why)})" if why else ""))
     return deltas + numbers, False
 
 

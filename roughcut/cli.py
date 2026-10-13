@@ -921,10 +921,7 @@ def change_lines(changes: dict | None) -> list[str]:
     was = f"v{changes['from_version']}" if changes.get("from_version") else "the previous cut"
     items = [str(i) for i in changes.get("items") or []]
     if changes.get("unchanged"):
-        lines = ["Nothing visible changed from " + was + ":"] + [f"  {i}" for i in items]
-        if any("attach reference images" in i for i in items):
-            lines.append("  In Terminal: --graphics-ref IMAGE (repeatable) or --redesign-graphics on `roughcut revise`.")
-        return lines
+        return ["Nothing visible changed from " + was + ":"] + [f"  {i}" for i in items]
     return [f"Changed from {was}:"] + [f"  - {i}" for i in items]
 
 
@@ -959,6 +956,8 @@ def summary_lines(summary: dict) -> list[str]:
         pictures = f"{n} reference image{'s' if n != 1 else ''}"
         if refs.get("unseen"):
             left.append(f"{pictures} for the graphics (the model can't look at images)")
+        elif refs.get("dropped"):
+            left.append(f"{pictures} for the graphics (the model turned down a request with them; see Warnings)")
         elif refs.get("used"):
             made.append(f"{pictures} shown to the graphics designer")
         else:

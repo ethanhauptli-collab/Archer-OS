@@ -82,6 +82,7 @@ BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BU
 PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
 REFERENCE_CHARS = 40_000  # longest finished design sent along as the reference for the other batches
 EDITOR_NOTES_CHARS = 4_000  # longest revision note sent to the designer as the editor's direction
+EDITOR_NOTES_KEPT = 6  # how many revisions' notes (the latest) go along when several asked for another look
 PICTURE_WIDTH = 512  # frame of the shot under each graphic, shown to the designer
 
 # On a vertical (9:16) video, Reels, TikTok and Shorts cover these strips of the frame with their
@@ -671,11 +672,13 @@ def _pictures(placed: list[PlacedGraphic], analysis: Analysis, workers: int = 4)
 def _design_request(
     placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     house_style: str = "", reference: tuple[str, str, str] | None = None, keep_out: dict[str, float] | None = None,
-    spellings: list[dict] | None = None, editor_notes: str = "",
+    spellings: list[dict] | None = None, editor_notes: str | list[str] = "", current_look: str = "",
 ) -> str:
     """The design request for `placed`. Names in what's said and in the words a kinetic caption reveals are spelled as
     the brief spells them (`spellings`, as the text already is); the timing note keeps the transcript's words.
-    `editor_notes`: a revision's notes, when its graphics are all designed again: the editor's direction for them."""
+    `editor_notes`: a revision's notes (a list: those of every revision that asked for another look, oldest first), when its
+    graphics are all designed again: the editor's direction for them. `current_look`: the look those graphics have now, which
+    the notes change in part (in place of `house_style`, which holds the new ones to a look exactly)."""
     items = []
     for g in placed:
         seg = analysis.segment(g.spec.segment)
@@ -700,10 +703,12 @@ def _design_request(
         "<brief>\n" + (brief.strip() or "No brief given.") + "\n</brief>",
         "<style_direction>\n" + (style.strip() or "None given: use the default look.") + "\n</style_direction>",
     ]
-    if editor_notes.strip():
+    if direction := _direction_block(editor_notes):
+        parts.append(direction)
+    if current_look:
         parts.append(
-            "<editor_direction>\nThe editor's notes for this revision, written about the whole cut. Follow what concerns how the "
-            "graphics look or move, and ignore the rest:\n" + editor_notes.strip()[:EDITOR_NOTES_CHARS] + "\n</editor_direction>"
+            "<current_look>\nHow these graphics look now. The editor's notes ask for a different look: change what they ask for "
+            "and keep the rest of it:\n" + current_look + "\n</current_look>"
         )
     if house_style:
         parts.append("<design_system>\nAlready established for this video; match it exactly:\n" + house_style + "\n</design_system>")
@@ -719,11 +724,29 @@ def _design_request(
     return "\n\n".join(parts)
 
 
+def _direction_block(editor_notes: str | list[str]) -> str:
+    """The editor's notes as a block of the design request ("" for none): one revision's, or several, oldest first."""
+    notes = [editor_notes] if isinstance(editor_notes, str) else list(editor_notes or [])
+    notes = [n.strip()[:EDITOR_NOTES_CHARS] for n in notes if isinstance(n, str) and n.strip()][-EDITOR_NOTES_KEPT:]
+    if not notes:
+        return ""
+    if len(notes) == 1:
+        return (
+            "<editor_direction>\nThe editor's notes for this revision, written about the whole cut. Follow what concerns how the "
+            "graphics look or move, and ignore the rest:\n" + notes[0] + "\n</editor_direction>"
+        )
+    return (
+        "<editor_direction>\nThe editor's notes about the graphics from several revisions, oldest first; a later note wins where it "
+        "disagrees with an earlier one. They were written about the whole cut: follow what concerns how the graphics look or move, "
+        "and ignore the rest:\n" + "\n".join(f"{n}. {note}" for n, note in enumerate(notes, 1)) + "\n</editor_direction>"
+    )
+
+
 def design(
     provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     warnings: list[str], batch: int = 4, workers: int = 3, keep_out: dict[str, float] | None = None,
     house_style: str = "", found: dict | None = None, spellings: list[dict] | None = None,
-    references: ReferenceSet | None = None, editor_notes: str = "",
+    references: ReferenceSet | None = None, editor_notes: str | list[str] = "", restyle: bool = False,
 ) -> dict[str, str]:
     """HTML for each graphic, by ID.
 
@@ -732,9 +755,12 @@ def design(
     `house_style` is a design system already established for this video (a revision's new
     graphics match it); the one in use at the end goes into found["house_style"].
     `references`: the editor's reference images, which every request carries before its text when the model
-    can look at images (said once when it can't). `editor_notes`: see _design_request.
+    can look at images (said once when it can't); a request the provider turns down with them is sent once more without them,
+    and said. `editor_notes`: see _design_request.
+    `restyle`: `house_style` is the look the graphics have now, which the notes change in part: the first batch is held to it
+    only as far as the notes allow, and the look it comes back with is the one the other batches (and found) take.
     """
-    from .providers import ImagePart, ProviderAuthError, ProviderError, TextPart
+    from .providers import ImagePart, ProviderAuthError, ProviderError, ProviderLimitError, TextPart
 
     html: dict[str, str] = {}
     if not placed:
@@ -751,24 +777,40 @@ def design(
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()
     tried = 0
+    unused: list[str] = []  # batches designed without the reference images, after the provider turned the request down with them
     log(f"designing {len(placed)} graphics in {len(groups)} request(s)" + (f", with a frame of the shot under {len(pictures)}" if pictures else ""))
     progress.stage("graphics", f"Designing {len(placed)} graphics", current=0, total=len(placed))
 
-    def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None):
+    def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None, current: str = ""):
         request = _design_request(
             group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference, keep_out=keep_out,
-            spellings=spellings, editor_notes=editor_notes,
+            spellings=spellings, editor_notes=editor_notes, current_look=current,
         )
-        parts: list = []
-        if references:  # the look the editor wants, before anything else in the request
-            parts += [TextPart(references.intro()), *(ImagePart(data, "image/jpeg") for data in references.images)]
-            references.sent = True
-        for g in group:  # the shot under each graphic, then the request
-            if g.id in pictures:
-                parts += [TextPart(f"{g.id} sits over {g.over}"), ImagePart(pictures[g.id], "image/jpeg")]
+
+        def send(with_references: bool):
+            parts: list = []
+            if with_references and references:  # the look the editor wants, before anything else in the request
+                parts += [TextPart(references.intro()), *(ImagePart(data, "image/jpeg") for data in references.images)]
+            for g in group:  # the shot under each graphic, then the request
+                if g.id in pictures:
+                    parts += [TextPart(f"{g.id} sits over {g.over}"), ImagePart(pictures[g.id], "image/jpeg")]
+            return provider.complete_json(DESIGN_SYSTEM, [*parts, TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
+
         t0 = time.monotonic()
         try:
-            raw = provider.complete_json(DESIGN_SYSTEM, [*parts, TextPart(request)], DESIGN_SCHEMA, schema_name="graphics", purpose="graphics design", max_tokens=64000)
+            try:
+                raw = send(True)
+                if references:
+                    references.sent = True
+            except (ProviderAuthError, ProviderLimitError):
+                raise
+            except ProviderError as e:
+                if not references:
+                    raise
+                # A picture the provider won't take fails the whole request: once more without them, so the graphic is made.
+                raw = send(False)
+                references.dropped = True
+                unused.append(f"{_ids(group)} ({str(e).strip().splitlines()[0][:160] if str(e).strip() else 'no reason given'})")
         except ProviderAuthError:
             raise
         except ProviderError as e:
@@ -798,20 +840,28 @@ def design(
 
     # The look is set by the first batch that comes back; then the rest go out together.
     house, reference = house_style, None
+    looked = False  # a restyle's first batch came back: its look replaces the one the notes change
     pending = list(groups)
     while pending:
         group = pending.pop(0)
-        answer = ask(group, house_style, None)
+        answer = ask(group, "" if restyle else house_style, None, house_style if restyle else "")
         got = take(*answer)
         if got:
-            house = house_style or str(answer[1].get("style") or "")
+            house = str(answer[1].get("style") or "") if restyle else house_style or str(answer[1].get("style") or "")
+            looked = restyle
             first = next((g for g in group if g.id in got and g.spec.kind != "title_card"), None) or next(g for g in group if g.id in got)
             reference = (first.id, first.spec.kind, got[first.id])
             break
     for answer in _in_background(lambda group: ask(group, house, reference), pending, workers):
         take(*answer)
+    if unused:
+        warnings.append(
+            f"The model turned down the design request for {'; '.join(unused)} with the reference images, so {'it was' if len(unused) == 1 else 'they were'} "
+            "sent again without them: those graphics were designed without seeing the look you attached"
+        )
+        log("graphics: a request with the reference images failed and was sent again without them")
     log(f"designed {len(html)} of {len(placed)} graphics in {_took(time.monotonic() - t_all)}")
-    if found is not None and house:
+    if found is not None and (house or looked):
         found["house_style"] = house
     return html
 
@@ -1557,7 +1607,7 @@ def make(
     provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
     house_style: str = "", planned: list[GraphicSpec] | None = None, spellings: list[dict] | None = None,
-    references: ReferenceSet | None = None, editor_notes: str = "",
+    references: ReferenceSet | None = None, editor_notes: str | list[str] = "",
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 

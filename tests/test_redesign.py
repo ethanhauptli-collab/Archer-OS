@@ -12,12 +12,13 @@ from test_end_to_end import check_invariants, validate_dtd
 from test_graphics_refs import GRAPHIC, STAT, make_pictures
 
 from roughcut import graphics, pipeline
-from roughcut.cli import main
+from roughcut.cli import main, summary_lines
 from roughcut.pipeline import Options
+from roughcut.providers import ImagePart, ProviderError, ProviderLimitError
 
 UNCHANGED = (
-    "This version plays the same lines, B-roll and graphics as v1. "
-    "If you meant how the graphics look, attach reference images or tick Redesign graphics."
+    "This version plays the same lines, B-roll and graphics as v1. If you meant how the graphics look, attach reference images "
+    "or turn on Redesign the graphics (Terminal: --graphics-ref IMAGE or --redesign-graphics)."
 )
 
 
@@ -46,6 +47,28 @@ class Restyles(FakeProvider):
         return reply
 
 
+class Fails(Restyles):
+    """A designer that can be made to fail, or to run out of plan, after the build: set `fail` to the error it raises."""
+
+    fail: Exception | None = None
+
+    def complete_json(self, system, parts, schema, *, schema_name, **kw):
+        if schema_name == "graphics" and self.fail is not None:
+            self.calls.append({"system": system, "parts": parts, "schema_name": schema_name, "purpose": kw.get("purpose")})
+            raise self.fail
+        return super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+
+
+class RejectsPictures(Restyles):
+    """A model that turns down any design request carrying the editor's reference images (as a provider does for a picture it won't take)."""
+
+    def complete_json(self, system, parts, schema, *, schema_name, **kw):
+        if schema_name == "graphics" and any(getattr(p, "text", "").startswith("The editor attached") for p in parts):
+            self.calls.append({"system": system, "parts": parts, "schema_name": schema_name, "purpose": kw.get("purpose")})
+            raise ProviderError("the image could not be processed")
+        return super().complete_json(system, parts, schema, schema_name=schema_name, **kw)
+
+
 def plan_of(*specs, **more) -> dict:
     plan = json.loads(json.dumps(CANNED_PLAN))
     plan["graphics"] = [dict(s) for s in (specs or (GRAPHIC, STAT))]
@@ -53,8 +76,8 @@ def plan_of(*specs, **more) -> dict:
     return plan
 
 
-def built(footage, tmp_path, monkeypatch, cache, mov, plan=None, **opts) -> tuple[Path, FakeProvider]:
-    provider = Restyles(plan or plan_of())
+def built(footage, tmp_path, monkeypatch, cache, mov, plan=None, provider_class=Restyles, **opts) -> tuple[Path, FakeProvider]:
+    provider = provider_class(plan or plan_of())
     monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
 
     def render_one(job):
@@ -64,7 +87,7 @@ def built(footage, tmp_path, monkeypatch, cache, mov, plan=None, **opts) -> tupl
     monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
     monkeypatch.setattr(graphics, "_render_one", render_one)
     out = tmp_path / "out"
-    pipeline.build(Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=cache, graphics=True, **opts))
+    provider.result = pipeline.build(Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=cache, graphics=True, **opts))
     return out, provider
 
 
@@ -280,7 +303,7 @@ def test_the_command_line_redesigns_and_prints_what_changed(footage, tmp_path, m
     assert main(["revise", str(out), "Tighter hook."]) == 0
     printed = capsys.readouterr().out
     assert "Nothing visible changed from v1:" in printed and UNCHANGED in printed
-    assert "--graphics-ref IMAGE" in printed and "--redesign-graphics" in printed  # the Terminal words for the same advice
+    assert "Terminal: --graphics-ref IMAGE or --redesign-graphics" in printed  # the Terminal words are in the sentence
 
     assert main(["revise", str(out), "--redesign-graphics"]) == 0  # no notes needed
     printed = capsys.readouterr().out
@@ -305,4 +328,180 @@ def test_redesigning_a_cut_that_has_no_graphics_says_so(footage, tmp_path, monke
 
     again = pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)  # nothing else changed now
     assert again.changes["unchanged"] is True
-    assert again.changes["items"] == [note, "This version plays the same lines and B-roll as v2."]
+    assert again.changes["items"] == ["This version plays the same lines and B-roll as v2.", note]  # what changed nothing comes first
+
+
+# ------------------------------------------------------------------ what a redesign came to, and what it builds on
+
+
+def test_a_redesign_whose_designs_never_come_back_keeps_the_earlier_ones_and_says_so(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    clips, old = clips_in(out), {g["html"]: (out / g["html"]).read_text() for g in manifest_of(out)["graphics"]}
+    provider.fail = ProviderError("overloaded")
+    before = len(asked(provider))
+    result = pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)
+    assert len(asked(provider)) == before + 1  # asked once (no pictures to leave out, so no second try)
+
+    assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2 and clips_in(out) == clips  # the same two clips
+    kept = [w for w in result.warnings if "no new design came back, so it keeps its earlier design" in w]
+    assert len(kept) == 2 and any("graphics design failed" in w and "overloaded" in w for w in result.warnings)
+    assert {(out / g["html"]).read_text() for g in manifest_of(out)["graphics"]} == set(old.values())
+    assert manifest_of(out)["house_style"] == "test plate"
+    items = result.changes["items"]
+    assert "Graphics: 2 got no new design and keep their earlier one (see Warnings)" in items
+    assert not any(i.startswith("Graphics: 2 redesigned") for i in items)  # it doesn't claim what didn't happen
+    assert result.changes["unchanged"] is False and "Graphics: 2 got no new design" in result.report.read_text()
+    validate_dtd(result.fcpxml)
+    check_invariants(result.fcpxml)
+
+
+def test_a_redesigned_graphic_with_new_words_and_no_design_is_left_out_not_called_new(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    provider.fail = ProviderError("overloaded")
+    provider.plan = plan_of(GRAPHIC, {**STAT, "text": "Three Weeks"})  # the reviser rewords one of them
+    result = pipeline.revise(out, "Make the graphics bolder, and say three weeks.", Options(inputs=[]), redesign_graphics=True)
+    assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 1  # the reworded one has no design to fall back on
+    items = result.changes["items"]
+    assert "Graphics: 1 got no new design and keeps its earlier one, 1 could not be made and is not in this version (see Warnings)" in items
+    assert 'Graphic "Three Weeks": could not be made, so it is not in this version' in items
+    assert not any(i.startswith("New graphic") for i in items)
+
+
+@pytest.mark.parametrize("how", ["flag", "planner"])
+def test_a_redesign_stopped_by_the_usage_limit_is_finished_in_the_look_the_notes_asked_for(how, footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    notes = "Make the graphics orange and bold."
+    kw: dict = {}
+    if how == "flag":
+        kw["redesign_graphics"] = True
+    else:
+        provider.plan = plan_of(redesign_graphics="yes")
+    provider.fail = ProviderLimitError("You've hit your usage limit.")
+    with pytest.raises(ProviderLimitError):
+        pipeline.revise(out, notes, Options(inputs=[]), **kw)
+    # Their earlier designs don't quietly stand in for them: they are still to be made, and the version says so.
+    saved = json.loads((out / "result.json").read_text())
+    assert saved["changes"]["items"].count("Graphics: 2 could not be made and are not in this version (see Warnings)") == 1
+    assert settings_of(out)["graphics_direction"] == [notes] and pipeline.undesigned(out) == 2
+
+    provider.fail = None
+    before = len(asked(provider))
+    result = pipeline.rerender(out, Options(inputs=[]), design_missing=True)
+    (call,) = asked(provider)[before:]
+    request = call["parts"][-1].text
+    assert f"graphics look or move, and ignore the rest:\n{notes}\n</editor_direction>" in request  # the notes went with the resume
+    assert ("<current_look>" in request) == (how == "planner")  # notes alone change the look they have now; the flag starts over
+    assert "<design_system>" not in request
+    assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2
+
+
+def test_look_notes_build_on_each_other_until_something_starts_the_look_over(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov)
+    before = len(asked(provider))
+    first, second, third = "Make the graphics orange and bold.", "Now make them a bit larger.", "Like this."
+
+    pipeline.revise(out, first, Options(inputs=[]), redesign_graphics=True)
+    request = asked(provider)[before]["parts"][-1].text
+    assert f"{first}\n</editor_direction>" in request and "<current_look>" not in request  # the flag starts the look over
+    assert settings_of(out)["graphics_direction"] == [first]
+
+    provider.plan = plan_of(redesign_graphics="yes")
+    result = pipeline.revise(out, second, Options(inputs=[]))
+    request = asked(provider)[before + 1]["parts"][-1].text
+    assert f"oldest first; a later note wins where it disagrees with an earlier one." in request
+    assert f"\n1. {first}\n2. {second}\n</editor_direction>" in request  # the orange is not forgotten
+    assert "<current_look>\nHow these graphics look now. The editor's notes ask for a different look: change what they ask for and keep the rest of it:\ntest plate" in request
+    assert "<design_system>" not in request and "Match the graphics already made" not in request
+    assert settings_of(out)["graphics_direction"] == [first, second]
+    assert "Redesigning the graphics: your notes ask for a different look." in result.changes["items"]
+
+    # A revision that leaves the look alone keeps the notes and sends none.
+    provider.plan = plan_of()
+    pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
+    assert len(asked(provider)) == before + 2 and settings_of(out)["graphics_direction"] == [first, second]
+    # A re-cut keeps them too.
+    pipeline.rerender(out, Options(inputs=[]), overrides=set())
+    assert settings_of(out)["graphics_direction"] == [first, second]
+
+    # Asking again from the flag, or from new pictures, starts the list over.
+    pipeline.revise(out, third, Options(inputs=[]), redesign_graphics=True)
+    assert settings_of(out)["graphics_direction"] == [third]
+    pipeline.revise(out, "", Options(inputs=[], graphics_refs=tuple(str(p) for p in make_pictures(tmp_path / "board", 1))))
+    assert settings_of(out)["graphics_direction"] == []
+
+
+def test_a_request_the_model_turns_down_with_the_pictures_is_sent_again_without_them(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    pictures = tuple(str(p) for p in make_pictures(tmp_path / "board", 2))
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=RejectsPictures, graphics_refs=pictures)
+    calls = asked(provider)
+    assert len(calls) == 2  # with the pictures, turned down; then without
+    assert any(isinstance(p, ImagePart) for p in calls[0]["parts"][:3]) and calls[0]["parts"][0].text.startswith("The editor attached 2 reference images")
+    assert not any(getattr(p, "text", "").startswith("The editor attached") for p in calls[1]["parts"])
+    manifest = manifest_of(out)
+    assert len(manifest["graphics"]) == 2 and all(g.get("html") for g in manifest["graphics"])  # the graphics were made
+    log = (out / "roughcut.log").read_text()
+    assert "a request with the reference images failed and was sent again without them" in log
+    warning = next(w for w in provider.result.warnings if "turned down the design request" in w)
+    assert warning.startswith("The model turned down the design request for G01-G02 (the image could not be processed) with the reference images")
+    assert "designed without seeing the look you attached" in warning and warning in (out / "edit_report.md").read_text()
+    assert provider.result.summary["references"] == {"stored": 2, "used": 0, "unseen": False, "dropped": True}
+    assert "(the model turned down a request with them; see Warnings)" in "\n".join(summary_lines(provider.result.summary))
+
+
+def test_a_failed_request_without_pictures_is_not_sent_twice(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    provider.fail = ProviderError("overloaded")
+    before = len(asked(provider))
+    pipeline.revise(out, "Make them bolder.", Options(inputs=[]), redesign_graphics=True)
+    assert len(asked(provider)) == before + 1
+
+
+def test_only_pictures_or_the_switch_designs_the_graphics_again_and_the_planner_is_not_asked(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov)
+    revisions = lambda: [c for c in provider.calls if c["purpose"] == "revision"]  # noqa: E731
+    lines = lambda r: [i.ref for s in r.plan.sections for i in s.items]  # noqa: E731
+    first = pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
+    assert len(revisions()) == 1
+    before = len(asked(provider))
+
+    picture = make_pictures(tmp_path / "board", 1)[0]
+    with_picture = pipeline.revise(out, "", Options(inputs=[], graphics_refs=(str(picture),)))
+    flagged = pipeline.revise(out, "", Options(inputs=[]), redesign_graphics=True)
+    assert len(revisions()) == 1 and len(asked(provider)) == before + 2  # no model call for the cut; one design call each
+    assert lines(with_picture) == lines(first) == lines(flagged)
+    assert with_picture.changes["items"] == [
+        "Redesigning the graphics: the new reference images set the look.",
+        "Graphics: 2 redesigned (every graphic is designed again)",
+    ]  # nothing about the lines or the length: they are the same
+    assert "No model call" in (out / "prompt.md").read_text()
+    assert "no notes: the cut stays as it is" in (out / "roughcut.log").read_text()
+    # What the earlier plan read from its brief (pacing, punch-ins) isn't applied again as if these notes said it.
+    assert not any(i.startswith(("Pacing:", "Punch-ins:")) for i in flagged.changes["items"])
+
+    # With notes, or with a change to the graphics setting, the planner is asked as before.
+    pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)
+    assert len(revisions()) == 2
+
+
+def test_a_graphic_held_longer_keeps_its_design_and_is_not_called_unchanged(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov)
+    before = len(asked(provider))
+    provider.plan = plan_of({**GRAPHIC, "seconds": 5.0}, STAT)
+    result = pipeline.revise(out, "Hold the title longer.", Options(inputs=[]))
+    assert len(asked(provider)) == before  # the design is kept
+    assert result.changes["unchanged"] is False
+    assert 'Graphic "Heading Out": now holds 5 s (was 2.5 s); design kept' in result.changes["items"]
+    assert "Graphics: 1 kept as they were, 1 kept with another length" in result.changes["items"]
+
+
+def test_a_recut_does_not_lose_the_direction_an_older_graphics_json_never_saved(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, plan=plan_of({**GRAPHIC, "direction": "left"}, {**STAT, "direction": "left"}))
+    manifest = manifest_of(out)
+    for entry in manifest["graphics"]:
+        del entry["direction"]  # as an older release wrote it
+    (out / "graphics.json").write_text(json.dumps(manifest))
+    pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
+    assert [g["direction"] for g in manifest_of(out)["graphics"]] == ["left", "left"]
+    before = len(asked(provider))
+    result = pipeline.revise(out, "Keep it as it is.", Options(inputs=[]))
+    assert len(asked(provider)) == before and result.changes["unchanged"] is True

@@ -178,7 +178,10 @@ def run_summary(
         }
     return {
         "graphics": graphics,
-        "references": {"stored": len(refs), "used": len(refs) if refs.sent else 0, "unseen": refs.warned} if refs else None,
+        "references": (
+            {"stored": len(refs), "used": len(refs) if refs.sent else 0, "unseen": refs.warned, **({"dropped": True} if refs.dropped else {})}
+            if refs else None
+        ),
         "visual_log": visual_log,
         "skipped": {"files": list(skipped_files or []), "plan_refs": len(plan.warnings)},
         "usage": cost_breakdown(usage) if usage and any(u.calls for u in usage) else None,
@@ -931,11 +934,14 @@ def build(opts: Options) -> Result:
 def _finish_build(
     opts, out_dir, name, provider, analysis, plan, record, fell_back, usage, timings, extra_warnings, t_start, version,
     *, command: str = "build", carry: dict | None = None, report_extra=None, entry_extra: dict | None = None, summary_base: dict | None = None,
-    design_notes: str = "",
+    design_notes: list[str] | None = None, restyle: bool = False, fallback: dict | None = None,
 ) -> Result:
     """Cut, make graphics, write the version. `carry` (revise): earlier graphic designs to reuse.
-    `design_notes`: a revision's notes, handed to the designer as the editor's direction (when it designs all graphics again).
-    `report_extra(rough)` returns the report's keyword arguments, and may add "changes" (kept in the Result, not the report)."""
+    `design_notes`: the notes of the revisions that asked for another look, oldest first, handed to the designer as the editor's
+    direction (when it designs all graphics again); `restyle`: the look in `carry` is the current one, which they change in part;
+    `fallback`: the earlier designs (_design_pool), kept for a graphic whose new design never comes back.
+    `report_extra(rough, outcome)` returns the report's keyword arguments, and may add "changes" (kept in the Result, not the report);
+    it is called again once the graphics are made, with what they came to (revise.change_items)."""
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
     extra_warnings += missing_media(analysis, rough, stringout)
@@ -945,6 +951,7 @@ def _finish_build(
     placed, with_graphics = [], analysis
     graphics_note = None
     refs = None
+    outcome: dict = {}
     limit_hit, limit_missing = None, 0
     if opts.graphics and provider is not None and not fell_back:
         if plan.graphics:
@@ -976,7 +983,7 @@ def _finish_build(
                 if carry is not None:
                     saved_html, house = _carry_designs(
                         designer, plan.graphics, rough, analysis, carry, opts, extra_warnings, out_dir, plan.spellings,
-                        refs=refs, editor_notes=design_notes,
+                        refs=refs, editor_notes=design_notes or [], restyle=restyle, fallback=fallback, outcome=outcome,
                     )
                     g_clips, placed, g_warnings = graphics.make(
                         None, plan.graphics, rough, analysis, out_dir, brief=opts.context, style=opts.graphics_style, workers=opts.workers,
@@ -990,6 +997,11 @@ def _finish_build(
             extra_warnings += g_warnings
             with_graphics = replace(analysis, clips=analysis.clips + g_clips)
             timings["graphics"] = time.monotonic() - t
+            if report_extra is not None and carry is not None:
+                # What the list of changes says about the graphics is what came of them, not what the plan meant.
+                outcome["in_cut"] = _graphics_in_cut(out_dir)
+                extra = report_extra(rough, outcome)
+                changes = extra.pop("changes", None)
             limit_hit = designer.limit
             if limit_hit is not None:
                 limit_missing = undesigned(out_dir)
@@ -1107,6 +1119,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                 # their designs), and the plan any an older folder's graphics.json doesn't list.
                 specs, html, style = graphics.saved_designs(out_dir)
                 specs = graphics.with_planned(specs, _saved_graphics(saved))
+                _fill_directions(specs, _saved_graphics(saved))  # a graphics.json from before it saved them: re-cut, the direction stays
                 house = saved_house_style(out_dir)
             else:
                 specs, html, style, house = list(plan.graphics), {}, str(settings.get("graphics_style") or ""), ""
@@ -1122,11 +1135,15 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                     designer = StopAtLimit(_saved_provider(settings, source))
                     usage.append(designer.usage)
                     refs = references.load(out_dir, settings.get("graphics_refs"), graphics_warnings) if settings.get("graphics_refs") else None
+                    # A redesign that stopped before any new design came back: they are still to be made in the look the notes
+                    # asked for (the notes of the revisions that redesigned, saved with the run), from the look they have now.
+                    asked = _direction_notes(settings)
+                    again = bool(asked) and not html
                     with progress.doing(f"designing {len(missing)} graphics that have no design yet"):
                         html, house = _design_new(
                             designer, missing, html, rough, analysis, house, warnings=graphics_warnings, brief=str(settings.get("context") or ""),
                             style=style, logo=_saved_logo(settings, graphics_warnings), look=tuple(str(p) for p in settings.get("graphics_look") or ()),
-                            spellings=plan.spellings, refs=refs,
+                            spellings=plan.spellings, refs=refs, editor_notes=asked if again else [], restyle=again,
                         )
                     limit_hit = designer.limit
                 elif any(g.text and i not in designed for i, g in enumerate(specs)):
@@ -1178,8 +1195,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
         made = {c.media.name for c in with_graphics.clips if c.role == "graphic"}
         known = prev_entry.get("graphics")
         items, unchanged = recut_items(
-            settings, {"style": opts.style, "punch_in": bool(opts.punch_in), "format": opts.format, "keep_fillers": opts.keep_fillers},
-            prev_entry["n"], before=before,
+            settings, {f: getattr(opts, f) for f in RENDER_FIELDS}, prev_entry["n"], before=before,
             after={"seconds": rough.seconds, "edits": len(rough.spine), "broll": sum(1 for c in rough.connected if c.kind == "broll")},
             rerendered=len(made - set(known)) if isinstance(known, list) else None,
         )
@@ -1209,6 +1225,15 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
 
 
 # ------------------------------------------------------------------ revise
+
+
+GRAPHICS_DIRECTION_KEPT = 10  # notes of redesigning revisions saved with the run
+
+
+def _direction_notes(settings: dict) -> list[str]:
+    """The notes of the revisions that asked for another look for the graphics (plan.json's settings), oldest first."""
+    found = settings.get("graphics_direction")
+    return [n for n in found if isinstance(n, str) and n.strip()][-GRAPHICS_DIRECTION_KEPT:] if isinstance(found, list) else []
 
 
 def _previous_cut(out_dir: Path, entry: dict) -> dict:
@@ -1272,6 +1297,39 @@ def _saved_model_plan(saved: dict, analysis: Analysis) -> dict:
 
 
 _spec_key = spec_key  # what a design shows, and the direction it was asked for (plan.spec_key)
+
+
+def _text_key(spec) -> tuple:
+    """What a design says, whatever the direction it was asked for: a graphic's earlier design can stand in for a new one
+    that never came back only while it shows the same words."""
+    return spec_key(spec)[:5]
+
+
+def _fill_directions(specs: list, planned: list) -> None:
+    """A graphics.json from before it saved each graphic's direction has none: those graphics take the one the saved plan
+    gave the same graphic (same place in the plan, same kind, line, words and text), so the designs still match them."""
+    for i, spec in enumerate(specs):
+        if spec.direction or i >= len(planned):
+            continue
+        was = planned[i]
+        if was.direction and (was.kind, was.segment, was.words, was.text) == (spec.kind, spec.segment, spec.words, spec.text):
+            spec.direction = was.direction
+
+
+def _graphics_in_cut(out_dir: Path) -> set[int]:
+    """The plan indexes of the graphics graphics.json lists with a rendered clip in this version's cut."""
+    try:
+        entries = json.loads((out_dir / "graphics.json").read_text()).get("graphics") or []
+    except (OSError, ValueError, AttributeError):
+        return set()
+    found = set()
+    for g in entries:
+        if isinstance(g, dict) and g.get("file") and g.get("placed") is not False:
+            try:
+                found.add(int(g["index"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return found
 
 
 def saved_house_style(out_dir: Path) -> str:
@@ -1394,10 +1452,12 @@ def _saved_provider(settings: dict, source: str) -> Provider:
 def _design_new(
     provider, new: list, saved_html: dict[int, str], rough: Timeline, analysis: Analysis, house: str, *,
     warnings: list[str], brief: str, style: str, logo: str | None, look: tuple[str, ...], sample: str | None = None,
-    spellings: list[dict] | None = None, refs: references.ReferenceSet | None = None, editor_notes: str = "",
+    spellings: list[dict] | None = None, refs: references.ReferenceSet | None = None, editor_notes: str | list[str] = "",
+    restyle: bool = False,
 ) -> tuple[dict[int, str], str]:
     """Design the placed graphics `new` in the look of the ones already made. Returns (html by plan index, house style).
-    With no house style and no sample (every graphic is designed again), the references and notes set the look."""
+    With no house style and no sample (every graphic is designed again), the references and notes set the look; with
+    `restyle`, `house` is the look they have now, which the notes change in part."""
     from . import graphics
     from .presets import design_style, inline_logo
 
@@ -1412,7 +1472,7 @@ def _design_new(
     designed = graphics.design(
         provider, new, analysis, rough.frame_duration, brief=brief, style=design_style(style, logo, look),
         width=rough.width, height=rough.height, warnings=warnings, house_style=house, found=found, spellings=spellings,
-        references=refs, editor_notes=editor_notes,
+        references=refs, editor_notes=editor_notes, restyle=restyle,
     )
     for g in new:
         if g.id in designed:
@@ -1428,29 +1488,18 @@ def _design_pool(out_dir: Path, planned: list | None = None) -> dict:
     `planned`: the saved plan's graphics, which give the direction of an entry graphics.json saved without one."""
     from . import graphics
 
-    pool: dict = {"designs": {}, "paths": {}, "house_style": saved_house_style(out_dir), "notes": {}}
+    pool: dict = {"designs": {}, "paths": {}, "house_style": saved_house_style(out_dir), "notes": {}, "by_text": {}}
     try:
         manifest = json.loads((out_dir / "graphics.json").read_text())
         entries = [g for g in manifest.get("graphics") or [] if isinstance(g, dict)]
     except (OSError, ValueError, AttributeError):
         return pool
     specs, html, _ = graphics.saved_designs(out_dir)
-    asked = {}  # plan index -> the direction the plan gave (for entries saved without a "direction")
-    for g in entries:
-        try:
-            index = int(g.get("index", -1))
-        except (TypeError, ValueError):
-            continue
-        if "direction" not in g and 0 <= index < len(specs) and index < len(planned or []):
-            was = planned[index]
-            if (was.kind, was.segment, was.words, was.text) == (specs[index].kind, specs[index].segment, specs[index].words, specs[index].text):
-                asked[index] = was.direction
-    for i, spec in enumerate(specs):
-        if i in asked:
-            spec.direction = asked[i]
+    _fill_directions(specs, planned or [])
     for i, page in html.items():
         if i < len(specs) and specs[i].text:
             pool["designs"][_spec_key(specs[i])] = page
+            pool["by_text"].setdefault(_text_key(specs[i]), page)
     for g in entries:
         try:
             index = int(g.get("index", -1))
@@ -1498,13 +1547,16 @@ def _provisional_manifest(
 
 def _carry_designs(
     provider, specs, rough: Timeline, analysis: Analysis, carry: dict, opts: Options, warnings: list[str], out_dir: Path,
-    spellings: list[dict] | None = None, refs: references.ReferenceSet | None = None, editor_notes: str = "",
+    spellings: list[dict] | None = None, refs: references.ReferenceSet | None = None, editor_notes: str | list[str] = "",
+    restyle: bool = False, fallback: dict | None = None, outcome: dict | None = None,
 ) -> tuple[dict[int, str], str]:
     """HTML for each planned graphic: the earlier design when the graphic is unchanged, else a new one in the same look.
 
     `carry`: _design_pool() of the version being revised (empty when every graphic is designed again, with `editor_notes`
-    the revision's notes for the designer). Returns (html by plan index, house style).
+    the notes for the designer, and with `restyle` its house style the look they change). Returns (html by plan index, house style).
     graphics.json is rewritten with the carried designs before any model call.
+    `fallback`: the earlier version's pool, when every graphic is designed again: a graphic whose new design never comes back
+    keeps its earlier one if it says the same words (said in a warning). `outcome["fell_back"]` gets their plan indexes.
     """
     from . import graphics
 
@@ -1520,9 +1572,23 @@ def _carry_designs(
         saved_html, house = _design_new(
             provider, new, saved_html, rough, analysis, house, warnings=warnings, brief=opts.context, style=opts.graphics_style,
             logo=opts.graphics_logo, look=opts.graphics_look, sample=next(iter(designs.values()), None), spellings=spellings,
-            refs=refs, editor_notes=editor_notes,
+            refs=refs, editor_notes=editor_notes, restyle=restyle,
         )
-    log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new)} {'designed again' if editor_notes else 'new'}")
+    fell_back: set[int] = set()
+    # Not after the usage limit: those graphics are still to be designed (`roughcut render --design-missing`, after the reset),
+    # in the look the notes asked for, not quietly left in the old one.
+    for g in new if fallback and getattr(provider, "limit", None) is None else ():
+        earlier = (fallback.get("by_text") or {}).get(_text_key(g.spec))
+        if g.index not in saved_html and earlier is not None:
+            saved_html[g.index] = earlier
+            fell_back.add(g.index)
+            warnings.append(f"graphic {g.id} {g.spec.text!r}: no new design came back, so it keeps its earlier design")
+    if fell_back and not house:
+        house = str(fallback.get("house_style") or "")  # the look the earlier designs have
+    if outcome is not None:
+        outcome["fell_back"] = fell_back
+    again = bool(editor_notes) or restyle or fallback is not None
+    log(f"graphics: {len(placed) - len(new)} kept from the previous version, {len(new) - len(fell_back)} {'designed again' if again else 'new'}")
     return saved_html, house
 
 
@@ -1637,34 +1703,47 @@ def revise(
     for note in wide_lifts([a for a in made_without if a not in leave_out], keep_ids, analysis):
         log(note)
         extra_warnings.append(note)
-    request = revision_request(
-        previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
-        graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,
-        preset_brief=opts.preset_brief, style=opts.style, punch_in=bool(opts.punch_in),
+    # Only pictures or the redesign switch, nothing to say about the cut: the plan stays as it is (no model call can change it).
+    look_only = bool(
+        (given_refs or redesign_graphics) and not notes.strip() and not keep_ids and not avoid_ids and target_seconds is None
+        and (graphics is None or graphics == bool(settings.get("graphics")))
     )
     prev_entry = versions.current(out_dir) or {}
     prev_n = prev_entry.get("n")
     cut_style = style_for(opts)  # the media block shows what this cut keeps of each line (the build sent the same at its pacing)
-    t = time.monotonic()
-    progress.stage("plan", f"Revising the edit with {p.model}")
-    log(f"revising the edit with {p.name}:{p.model}: {notes.strip()[:200]}")
-    try:
-        with progress.doing(f"revising the edit with {p.model}"):
-            raw = p.complete_json(
-                PLANNER_SYSTEM, [media_part(analysis, cut_style), TextPart(request)], plan_schema(opts.graphics),
-                schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
-            )
-    except ProviderAuthError:
-        raise
-    except ProviderError as e:
-        still = f"v{prev_n} is still the latest cut." if prev_n else "the previous cut is still there."
-        if isinstance(e, ProviderLimitError):
-            raise ProviderLimitError(f"{e} Nothing changed: {still} Run the same revise again after the reset.") from e
-        raise ProviderError(f"{e} Nothing changed: {still}") from e
-    timings = {"revision": time.monotonic() - t}
+    if look_only:
+        request = "(No model call: the editor asked only for the graphics to be designed again, so the plan is the previous version's.)"
+        raw = _saved_model_plan(saved, analysis)
+        timings = {"revision": 0.0}
+        log("no notes: the cut stays as it is, and only the graphics are designed again")
+    else:
+        request = revision_request(
+            previous, analysis, notes, context=opts.context, target_seconds=opts.target_seconds, script=opts.script,
+            graphics=opts.graphics, graphics_style=opts.graphics_style, earlier_notes=[h["notes"] for h in history], keep=keep_ids, avoid=leave_out,
+            preset_brief=opts.preset_brief, style=opts.style, punch_in=bool(opts.punch_in),
+        )
+        t = time.monotonic()
+        progress.stage("plan", f"Revising the edit with {p.model}")
+        log(f"revising the edit with {p.name}:{p.model}: {notes.strip()[:200]}")
+        try:
+            with progress.doing(f"revising the edit with {p.model}"):
+                raw = p.complete_json(
+                    PLANNER_SYSTEM, [media_part(analysis, cut_style), TextPart(request)], plan_schema(opts.graphics),
+                    schema_name="edit_plan", purpose="revision", effort=opts.effort, max_tokens=128000,
+                )
+        except ProviderAuthError:
+            raise
+        except ProviderError as e:
+            still = f"v{prev_n} is still the latest cut." if prev_n else "the previous cut is still there."
+            if isinstance(e, ProviderLimitError):
+                raise ProviderLimitError(f"{e} Nothing changed: {still} Run the same revise again after the reset.") from e
+            raise ProviderError(f"{e} Nothing changed: {still}") from e
+        timings = {"revision": time.monotonic() - t}
     # Which take of a line plays: the editor's --keep and --avoid first, then a swap the notes made.
     takes = {"keep": keep_ids, "avoided": avoided_lines(leave_out, analysis), "played": {i.seg_id for s in previous.sections for i in s.items if i.seg_id}}
     plan = normalize(raw, analysis, source=f"{p.name}:{p.model}", **takes)
+    if look_only:  # what the earlier plan read from its brief or notes isn't something these (no) notes ask for
+        plan.pacing, plan.punch_ins, plan.graphics_asked, plan.redesign_graphics = "unspecified", "unspecified", False, "unspecified"
     raw = chosen_takes(raw, analysis, **takes)  # saved: re-cuts and the next revision play the same takes
     enforced = enforce(plan, analysis, keep=keep_ids, avoid=leave_out, previous=previous)
     plan.warnings += enforced.warnings
@@ -1703,11 +1782,10 @@ def revise(
     # Pacing and punch-ins as the reviser read the notes ("make it looser", "remove the punch-ins"), unless a flag says otherwise.
     opts, settings_notes = settings_from_notes(plan, opts, given, prev_n)
     if not opts.graphics and (plan.graphics_asked or plan.redesign_graphics == "yes"):
-        settings_notes.append(
-            f"Your notes ask for graphics, but motion graphics are off for this cut, so the revision has none. "
-            f"Revise with them on: `roughcut revise {shlex.quote(str(out_dir))} --graphics` and the same notes."
+        settings_notes.append("Your notes ask for graphics, but motion graphics are off for this cut, so the revision has none.")
+        extra_warnings.append(
+            f"{settings_notes[-1]} Revise with them on: `roughcut revise {shlex.quote(str(out_dir))} --graphics` and the same notes."
         )
-        extra_warnings.append(settings_notes[-1])
     # Reference images given now replace the run's saved ones (and are stored only now: a revision that failed above changed nothing).
     new_refs = False
     if given_refs:
@@ -1715,21 +1793,27 @@ def revise(
         if stored:
             opts, new_refs = replace(opts, graphics_refs=stored), True
     # Every graphic designed again: asked for (--redesign-graphics), new reference images, or notes asking for another look.
-    again = ""
+    # The first two start the look over from the pictures and these notes; notes alone change the look the graphics have now
+    # (and build on the notes of the revisions before that asked for another look).
+    again, fresh = "", False
     if not opts.graphics:
         if redesign_graphics:
             settings_notes.append("Redesign graphics was asked for, but motion graphics are off for this cut, so there is nothing to redesign.")
             extra_warnings.append(settings_notes[-1])
     elif redesign_graphics:
-        again = "Redesigning the graphics: every graphic is designed again, as asked."
+        again, fresh = "Redesigning the graphics: every graphic is designed again, as asked.", True
     elif new_refs:
-        again = "Redesigning the graphics: the new reference images set the look."
+        again, fresh = "Redesigning the graphics: the new reference images set the look.", True
     elif plan.redesign_graphics == "yes":
         again = "Redesigning the graphics: your notes ask for a different look."
+    direction = _direction_notes(settings)
+    fallback = None
     if again and plan.graphics:
         settings_notes.append(again)
         if carry is not None:
-            carry = {"designs": {}, "paths": {}, "house_style": "", "notes": {}}  # nothing carried: references and notes define the look
+            fallback = carry  # a graphic whose new design never comes back keeps its earlier one
+            carry = {"designs": {}, "paths": {}, "house_style": "" if fresh else carry.get("house_style") or "", "notes": {}}
+        direction = ([] if fresh else direction) + ([notes.strip()] if notes.strip() else [])
     elif again:
         settings_notes.append("This cut has no graphics to redesign: ask for some in your notes, for example a lower third when someone is named.")
         again = ""
@@ -1739,6 +1823,8 @@ def revise(
     version = versions.next_number(out_dir)
     versions.snapshot(out_dir, before=version)
     new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True), "vision_model": settings.get("vision_model")}
+    if direction[-GRAPHICS_DIRECTION_KEPT:] or "graphics_direction" in settings:
+        new_settings["graphics_direction"] = direction[-GRAPHICS_DIRECTION_KEPT:]  # the notes that changed the look, for the next one and for --design-missing
     record = plan_record(name, plan, raw, analysis, new_settings)
     record["notes_history"] = revisions + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
@@ -1754,11 +1840,11 @@ def revise(
     else:
         (out_dir / "graphics.json").unlink(missing_ok=True)  # this version has no graphics
 
-    def report_extra(rough: Timeline) -> dict:
+    def report_extra(rough: Timeline, outcome: dict | None = None) -> dict:
         items, unchanged = change_items(
             previous, plan, analysis, before_seconds=before_seconds, after_seconds=rough.seconds, previous_version=prev_n,
             graphics_on=opts.graphics, redesigned=bool(again), settings_notes=settings_notes, was=settings,
-            now={"style": opts.style, "punch_in": bool(opts.punch_in), "format": opts.format, "keep_fillers": opts.keep_fillers},
+            now={**{f: getattr(opts, f) for f in RENDER_FIELDS}, "stringout": new_settings["stringout"]}, outcome=outcome,
         )
         block = report_block(notes, [h["notes"] for h in history], changes_lines(items, prev_n, skip=settings_notes), enforced.missing_keeps, settings_notes)
         return {"revision": block, "changes": changes_record(items, unchanged, prev_n)}
@@ -1767,7 +1853,7 @@ def revise(
         return _finish_build(
             opts, out_dir, name, p, analysis, plan, record, False, [p.usage], timings, extra_warnings, t_start, version,
             command="revise", carry=carry, report_extra=report_extra, entry_extra={"notes": notes.strip(), "revision_of": prev_n},
-            design_notes=notes.strip() if again else "",
+            design_notes=direction if again else [], restyle=bool(again) and not fresh, fallback=fallback,
         )
     except BaseException as e:
         _mark_plan_saved(e, out_dir)
