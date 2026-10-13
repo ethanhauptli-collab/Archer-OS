@@ -111,6 +111,13 @@ def clips_in(out: Path) -> set[str]:
     return {p.name for p in (out / "graphics").glob("*.mov")}
 
 
+def clips_in_cut(out: Path) -> list[str]:
+    """The graphics clips the newest version's FCPXML uses."""
+    from roughcut import versions
+
+    return versions.graphics_in([out / versions.current(out)["fcpxml"]])
+
+
 def test_a_revision_that_changes_nothing_about_the_graphics_keeps_every_design(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
     out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov)
     before = len(asked(provider))
@@ -407,6 +414,29 @@ def test_a_redesign_stopped_by_the_usage_limit_is_finished_in_the_look_the_notes
     assert ("<current_look>" in request) == (how == "planner")  # notes alone change the look they have now; the flag starts over
     assert "<design_system>" not in request
     assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2
+
+
+def test_the_graphics_a_stopped_redesign_gets_when_it_resumes_are_added_not_rendered_again(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    provider.fail = ProviderLimitError("You've hit your usage limit.")
+    with pytest.raises(ProviderLimitError):
+        pipeline.revise(out, "Make the graphics orange.", Options(inputs=[]), redesign_graphics=True)
+    assert clips_in_cut(out) == []  # the stopped version has no graphics on its timeline
+
+    provider.fail = None
+    result = pipeline.rerender(out, Options(inputs=[]), design_missing=True)
+    assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2
+    items = result.changes["items"]
+    # They are on the timeline for the first time: nothing was rendered again, no design of theirs was edited.
+    assert "Graphics: 2 added to the cut" in items
+    assert not any("rendered again" in i for i in items)
+    assert "Graphics: 2 added to the cut" in result.report.read_text()
+
+    # A design edited by hand afterwards replaces the clip the version before had: that one is rendered again.
+    html = next((out / "graphics").glob("G*-stat.html"))
+    html.write_text(html.read_text().replace("#F26B21", "#2155F2"))
+    edited = pipeline.rerender(out, Options(inputs=[]))
+    assert edited.changes["items"] == ["Graphics: 1 was rendered again (a design you edited, or timing that moved)"]
 
 
 def test_look_notes_build_on_each_other_until_something_starts_the_look_over(footage, tmp_path, monkeypatch, shared_cache, clear_mov):

@@ -1191,14 +1191,15 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     # What this re-cut changed from the version before, measured on the two cuts (and the graphics clips the new one needs to render).
     changes, report_changes = None, []
     if prev_entry.get("n"):
-        from .revise import changes_lines, changes_record, recut_items
+        from .revise import changes_lines, changes_record, new_graphics, recut_items
 
         made = {c.media.name for c in with_graphics.clips if c.role == "graphic"}
         known = prev_entry.get("graphics")
+        added, again = new_graphics(made, [str(n) for n in known]) if isinstance(known, list) else (None, None)
         items, unchanged = recut_items(
             settings, {f: getattr(opts, f) for f in RENDER_FIELDS}, prev_entry["n"], before=before,
             after={"seconds": rough.seconds, "edits": len(rough.spine), "broll": sum(1 for c in rough.connected if c.kind == "broll")},
-            rerendered=len(made - set(known)) if isinstance(known, list) else None,
+            rerendered=again, added=added,
         )
         changes = changes_record(items, unchanged, prev_entry["n"])
         report_changes = ["## Re-cut", ""] + changes_lines(items, prev_entry["n"]) + [""]

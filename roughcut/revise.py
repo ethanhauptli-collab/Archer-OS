@@ -11,6 +11,7 @@ and the paper edit lists exactly what changed.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -673,13 +674,37 @@ def describe_changes(previous: Plan, revised: Plan, analysis: Analysis, *, befor
     return changes_lines(items, previous_version)
 
 
+_GRAPHIC_CLIP = re.compile(r"^G\d+-(.+?)(?:-[0-9a-f]{6})?\.mov$")  # G01-lower-third-1a2b3c.mov (the digest is missing from older names)
+
+
+def new_graphics(made: set[str], known: list[str]) -> tuple[int, int]:
+    """(added, rendered again): of the graphics clips a re-cut has that the version before didn't, how many are on the timeline
+    for the first time and how many take the place of a clip that version had.
+
+    A clip takes the place of one when that version had a clip of the same kind that this cut no longer uses (a design edited
+    by hand, or timing that moved: both make a new file); any other is added, as all are when the earlier version had none
+    (a redesign that stopped before its designs came back, finished later with `render --design-missing`).
+    """
+    kind = lambda name: m.group(1) if (m := _GRAPHIC_CLIP.match(name)) else name  # noqa: E731
+    gone = Counter(kind(n) for n in known if n not in made)
+    added = again = 0
+    for name in sorted(made - set(known)):
+        if gone[kind(name)] > 0:
+            gone[kind(name)] -= 1
+            again += 1
+        else:
+            added += 1
+    return added, again
+
+
 def recut_items(
-    was: dict, now: dict, previous_version: int | None, *, before: dict, after: dict, rerendered: int | None = None,
+    was: dict, now: dict, previous_version: int | None, *, before: dict, after: dict, rerendered: int | None = None, added: int | None = None,
 ) -> tuple[list[str], bool]:
     """What a re-cut at other settings changed from the version before, in numbers: (items, unchanged).
 
     `was`/`now`: the settings (setting_deltas). `before`/`after`: seconds, edits and broll of the two cuts (any may be missing
-    for a folder from before they were saved). `rerendered`: graphics clips this cut has that the earlier one didn't.
+    for a folder from before they were saved). `rerendered`: graphics clips this cut has in the place of ones the earlier one
+    had; `added`: graphics clips it has that are new to the cut (new_graphics).
     """
     deltas = setting_deltas(was, now)
     if not deltas and not was.get("style") and before.get("seconds") is None and before.get("edits") is None:
@@ -690,6 +715,8 @@ def recut_items(
     for key, label in (("edits", "Edits"), ("broll", "B-roll shots")):
         if before.get(key) is not None and before[key] != after[key]:
             numbers.append(f"{label}: {before[key]} → {after[key]}")
+    if added:
+        numbers.append(f"Graphics: {added} added to the cut")
     if rerendered:
         numbers.append(f"Graphics: {rerendered} {'was' if rerendered == 1 else 'were'} rendered again (a design you edited, or timing that moved)")
     if not (deltas or numbers):

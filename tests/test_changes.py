@@ -334,6 +334,13 @@ def test_a_recut_is_told_in_numbers_or_as_the_same_cut():
     edited = recut_items(was, was, 2, before=before, after=dict(before), rerendered=2)
     assert edited[1] is False and edited[0] == ["Graphics: 2 were rendered again (a design you edited, or timing that moved)"]
 
+    # Clips the earlier version didn't have, with nothing of theirs to replace, are new to the cut.
+    first = recut_items(was, was, 2, before=before, after=dict(before), added=2)
+    assert first == (["Graphics: 2 added to the cut"], False)
+    assert recut_items(was, was, 2, before=before, after=dict(before), added=1)[0] == ["Graphics: 1 added to the cut"]
+    both = recut_items(was, was, 2, before=before, after=dict(before), added=1, rerendered=1)
+    assert both[0] == ["Graphics: 1 added to the cut", "Graphics: 1 was rendered again (a design you edited, or timing that moved)"]
+
     # A sub-second move in the length is told in tenths.
     close = recut_items(was, {**was, "style": "loose"}, 2, before={"seconds": 30.0}, after={"seconds": 30.4, "edits": 12, "broll": 3})
     assert close[0][1] == "Length: 0:30.0 → 0:30.4 (+0:00.4)"
@@ -341,6 +348,25 @@ def test_a_recut_is_told_in_numbers_or_as_the_same_cut():
     # An older folder that saved nothing to compare with says so rather than claiming it is the same cut.
     older = recut_items({}, {"style": "tight", "punch_in": False, "format": None, "keep_fillers": False}, 1, before={"seconds": None}, after={"seconds": 20.0, "edits": 5, "broll": 0})
     assert older[1] is False and "nothing to compare" in older[0][0]
+
+
+def test_graphics_clips_new_to_a_recut_are_added_or_replace_one_the_earlier_version_had():
+    new_graphics = revise.new_graphics
+    # The earlier version had no graphics (a redesign that stopped before any came back): all are on the timeline for the first time.
+    assert new_graphics({"G01-title-card-aaaaaa.mov", "G02-stat-bbbbbb.mov"}, []) == (2, 0)
+    # An edited design (or new timing) is a new file in the place of the clip it replaces: same kind, no longer in the cut.
+    assert new_graphics({"G01-title-card-cccccc.mov", "G02-stat-bbbbbb.mov"}, ["G01-title-card-aaaaaa.mov", "G02-stat-bbbbbb.mov"]) == (0, 1)
+    # A graphic of a kind the earlier cut didn't have, or one more than it had, is added.
+    assert new_graphics({"G01-title-card-aaaaaa.mov", "G02-stat-bbbbbb.mov"}, ["G01-title-card-aaaaaa.mov"]) == (1, 0)
+    assert new_graphics(
+        {"G01-stat-aaaaaa.mov", "G02-stat-bbbbbb.mov"}, ["G01-stat-cccccc.mov"],
+    ) == (1, 1)
+    # Clips from before digests were in the names are matched the same way.
+    assert new_graphics({"G01-quote-aaaaaa.mov"}, ["G01-quote.mov"]) == (0, 1)
+    assert new_graphics({"G01-kinetic-caption-aaaaaa.mov"}, ["G01-lower-third.mov"]) == (1, 0)
+    # Nothing new, or nothing known about the earlier version: nothing to say.
+    assert new_graphics({"G01-stat-aaaaaa.mov"}, ["G01-stat-aaaaaa.mov"]) == (0, 0)
+    assert new_graphics(set(), ["G01-stat-aaaaaa.mov"]) == (0, 0)
 
 
 def test_every_render_setting_a_recut_can_change_is_compared():
