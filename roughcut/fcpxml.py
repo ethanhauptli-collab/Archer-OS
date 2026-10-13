@@ -89,7 +89,10 @@ class _Resources:
         if m.has_audio:
             attrs.update(hasAudio="1", audioSources="1", audioChannels=str(m.audio_channels or 2), audioRate=str(m.audio_rate or 48000))
         asset = ET.SubElement(self.el, "asset", attrs)
-        ET.SubElement(asset, "media-rep", {"kind": "original-media", "src": Path(m.path).resolve().as_uri()})
+        # A Venture Studio file is named as Studio has it (its library root is canonical, and Studio refuses links): never
+        # resolved, which would touch a network share that may have stopped answering.
+        src = Path(m.path).as_uri() if clip.library and Path(m.path).is_absolute() else Path(m.path).resolve().as_uri()
+        ET.SubElement(asset, "media-rep", {"kind": "original-media", "src": src})
         self.assets[clip.id] = rid
         return rid
 

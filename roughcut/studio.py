@@ -65,7 +65,7 @@ REQUIRED_COLUMNS = {
     "libraries": {"id", "path", "name"},
     "assets": {
         "id", "library_id", "relative_path", "name", "display_name", "extension", "kind", "category", "provider", "license",
-        "tags", "notes", "duration", "favorite", "missing", "browse_visible", "package_id",
+        "tags", "notes", "duration", "favorite", "missing", "browse_visible", "package_id", "template_resource",
     },
     "collections": {"id", "name"},
     "collection_assets": {"collection_id", "asset_id"},
@@ -74,6 +74,10 @@ REQUIRED_COLUMNS = {
 }
 # What Studio lists as an item (its sidebar count): present, browse-visible, and a Motion template's leader file only.
 BROWSE = "a.missing=0 AND a.browse_visible=1 AND (a.package_id IS NULL OR a.package_id=a.id)"
+# Audio Studio hands off as a file on its own (drag, copy): present, browse-visible, and no part of a Motion template.
+STANDALONE_AUDIO = "a.kind='audio' AND a.missing=0 AND a.browse_visible=1 AND a.package_id IS NULL AND a.template_resource=0"
+# Studio's Project history tables: optional (Studio makes them the first time it records a project), checked by name when there.
+HISTORY_COLUMNS = {"project_history_events": {"id", "kind"}, "project_history_items": {"event_id", "asset_id", "output_path"}}
 
 
 class StudioUnavailable(Exception):
@@ -557,6 +561,18 @@ def assets(
     where, args, joins = [], [], []
     if browse:
         where.append(BROWSE)
+    _in_group(con, where, args, joins, collection=collection, kit=kit)
+    for column, values in (("kind", kinds), ("category", categories)):
+        if values:
+            where.append(f"a.{column} IN ({', '.join('?' * len(values))})")
+            args += list(values)
+    if favorites:
+        where.append("a.favorite = 1")
+    return _select(con, where, args, joins)
+
+
+def _in_group(con: sqlite3.Connection, where: list, args: list, joins: list, *, collection: str | None, kit: str | None) -> None:
+    """Only the members of Studio's collection or kit with this name (any case)."""
     if collection is not None:
         found = _query(con, "SELECT id FROM collections WHERE name = ? COLLATE NOCASE", (collection,))
         if not found:
@@ -571,12 +587,9 @@ def assets(
         joins.append("JOIN project_kit_assets ka ON ka.asset_id = a.id")
         where.append("ka.kit_id = ?")
         args.append(found[0][0])
-    for column, values in (("kind", kinds), ("category", categories)):
-        if values:
-            where.append(f"a.{column} IN ({', '.join('?' * len(values))})")
-            args += list(values)
-    if favorites:
-        where.append("a.favorite = 1")
+
+
+def _select(con: sqlite3.Connection, where: list, args: list, joins: list) -> list[Asset]:
     sql = (
         "SELECT a.id, l.path, l.name, a.relative_path, a.name, a.display_name, a.extension, a.kind, a.category, a.provider, a.license, "
         "a.tags, a.notes, a.duration, a.favorite, a.missing FROM assets a JOIN libraries l ON l.id = a.library_id "
@@ -597,6 +610,180 @@ def assets(
             bool(fav), bool(missing),
         ))
     return out
+
+
+# ------------------------------------------------------------------ audio for the music bed
+
+MUSIC_SECONDS = 45.0  # a known length this long or longer: a song
+SFX_SECONDS = 8.0  # shorter: a sound effect
+FILE_SECONDS = 5.0  # one file's check on a library folder (a network share can stop answering)
+SEARCH_TOKENS_MAX = 64
+_SFX_WORDS = {
+    "sfx", "fx", "foley", "whoosh", "swoosh", "swish", "woosh", "impact", "impacts", "riser", "risers", "hit", "hits", "boom", "booms",
+    "stinger", "sting", "click", "clicks", "pop", "pops", "transition", "transitions", "glitch", "braam", "ding", "chime", "swipe",
+}
+_MUSIC_WORDS = {"music", "song", "songs", "track", "tracks", "score", "soundtrack", "theme", "instrumental", "bed", "ballad", "anthem", "melody"}
+
+
+def music_guess(name: str, seconds: float | None = None, words=()) -> str:
+    """'music', 'sfx' or 'unknown'. A known length decides (45 s or longer: a song; under 8 s: a sound effect);
+    otherwise the name, its folders and tags do, when they point one way only ("Big Impact Anthem" points both)."""
+    if seconds is not None:
+        if seconds >= MUSIC_SECONDS:
+            return "music"
+        if seconds < SFX_SECONDS:
+            return "sfx"
+    text = " ".join([name, *words]).lower()
+    tokens = set(re.findall(r"[^\W_]+", text))
+    sfx = bool(tokens & _SFX_WORDS) or "sound effect" in text
+    music = bool(tokens & _MUSIC_WORDS)
+    if sfx != music:
+        return "sfx" if sfx else "music"
+    return "unknown"
+
+
+def search_tokens(words) -> list[str]:
+    """Studio's search words: the letters and digits of what was typed, split at everything else."""
+    text = " ".join(str(w) for w in words)
+    return [t for t in re.split(r"[^\w]|_", text) if t][:SEARCH_TOKENS_MAX]
+
+
+def _like(token: str) -> str:
+    return "%" + token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def standalone_audio(
+    con: sqlite3.Connection, *, words=(), collection: str | None = None, kit: str | None = None, favorites: bool = False,
+) -> list[Asset]:
+    """Audio Studio hands off as a file of its own: present, browse-visible, never part of a Motion template.
+
+    By Studio's collection or kit (any case), favorites, and search words: every word, as Studio searches (its
+    full-text index of names, paths, tags, notes, providers, licenses and collections, each word a word start),
+    or, when the copy has no usable index, anywhere in those (wildcards escaped). Words with no letters or digits find nothing.
+    """
+    where, args, joins = [STANDALONE_AUDIO], [], []
+    _in_group(con, where, args, joins, collection=collection, kit=kit)
+    if favorites:
+        where.append("a.favorite = 1")
+    tokens = search_tokens(words)
+    if any(str(w).strip() for w in words) and not tokens:
+        return []
+    if tokens:
+        found = _fts_ids(con, tokens)
+        if found is not None:
+            if not found:
+                return []
+            where.append(f"a.id IN ({', '.join('?' * len(found))})")
+            args += sorted(found)
+        else:
+            fields = ("a.name", "a.display_name", "a.relative_path", "a.tags", "a.notes", "a.provider", "a.license")
+            for token in tokens:
+                pattern = _like(token)
+                where.append(
+                    "(" + " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in fields)
+                    + " OR a.id IN (SELECT xa.asset_id FROM collection_assets xa JOIN collections xc ON xc.id = xa.collection_id"
+                    " WHERE xc.name LIKE ? ESCAPE '\\'))"
+                )
+                args += [pattern] * (len(fields) + 1)
+    return _select(con, where, args, joins)
+
+
+def _fts_ids(con: sqlite3.Connection, tokens: list[str]) -> set[int] | None:
+    """The ids Studio's own full-text index finds for these words, or None when the copy has none this Python can read."""
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets_fts'").fetchone():
+            return None
+        query = " AND ".join(f'"{t}"*' for t in tokens)
+        return {int(r[0]) for r in con.execute("SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?", (query,)).fetchall()}
+    except sqlite3.Error:  # no FTS5 in this Python's SQLite, or an index it can't read
+        return None
+
+
+def audio_row(asset: Asset) -> dict:
+    """One line of `roughcut studio music`: what a music bed needs to know, from the snapshot (no file is touched)."""
+    from .media import AUDIO_EXTS
+
+    ext = ("." + asset.extension.lower().lstrip(".")) if asset.extension else PurePosixPath(asset.path).suffix.lower()
+    usable = ext in AUDIO_EXTS
+    folders = PurePosixPath(asset.relative_path).parts[:-1]
+    return {
+        "id": asset.id, "name": asset.title, "file": PurePosixPath(asset.path).name, "path": asset.path, "library": asset.library,
+        "seconds": asset.duration, "length": clock(asset.duration), "provider": asset.provider, "license": asset.license,
+        "favorite": asset.favorite, "tags": list(asset.tags), "notes": asset.notes,
+        "guess": music_guess(asset.title + " " + PurePosixPath(asset.path).stem, asset.duration, [*folders, *asset.tags]),
+        "usable": usable, "why_not": None if usable else f"{ext or 'no extension'}: not an audio type Roughcut reads",
+    }
+
+
+def kit_audio_row(item: KitItem) -> dict:
+    """A kit item as a listing row: a kit carries no length, tags or favorite."""
+    from .media import AUDIO_EXTS
+
+    ext = ("." + item.extension.lower().lstrip(".")) if item.extension else PurePosixPath(item.path).suffix.lower()
+    usable = ext in AUDIO_EXTS
+    return {
+        "id": item.asset_id, "name": item.name, "file": PurePosixPath(item.path).name, "path": item.path, "library": "",
+        "seconds": None, "length": "?", "provider": item.provider, "license": item.license, "favorite": False, "tags": [], "notes": "",
+        "guess": music_guess(item.name + " " + PurePosixPath(item.path).stem, None, PurePosixPath(item.path).parts[1:-1]),
+        "usable": usable, "why_not": None if usable else f"{ext or 'no extension'}: not an audio type Roughcut reads",
+    }
+
+
+def clock(seconds: float | None) -> str:
+    """3:04 for a known length, '?' for none (Studio measures a file only once it has previewed it)."""
+    if seconds is None or seconds < 0:
+        return "?"
+    whole = int(round(seconds))
+    return f"{whole // 3600}:{whole % 3600 // 60:02d}:{whole % 60:02d}" if whole >= 3600 else f"{whole // 60}:{whole % 60:02d}"
+
+
+def is_kit_file(name: str) -> bool:
+    return name.lower().endswith(".json") and Path(name).expanduser().is_file()
+
+
+def song(con: sqlite3.Connection, asset_id: int) -> Asset:
+    """The catalog's audio item with this id, as Studio would hand it off; a StudioUnavailable naming what's wrong otherwise."""
+    row = _query(
+        con,
+        "SELECT coalesce(nullif(a.display_name,''), a.name), a.kind, a.missing, a.browse_visible, a.package_id, a.template_resource "
+        "FROM assets a WHERE a.id = ?",
+        (asset_id,),
+    )
+    if not row:
+        raise StudioUnavailable(f"Venture Studio's catalog has no item {asset_id} (`roughcut studio music` lists its audio)")
+    name, kind, missing, visible, package, template = row[0]
+    if kind != "audio":
+        raise StudioUnavailable(f"item {asset_id} ({name}) isn't audio")
+    if package is not None or template or not visible:
+        raise StudioUnavailable(f"item {asset_id} ({name}) is part of a Motion template or its setup files, which Studio doesn't hand off on its own")
+    if missing:
+        raise StudioUnavailable(f"Studio's catalog marks item {asset_id} ({name}) missing")
+    found = _select(con, ["a.id = ?"], [asset_id], [])
+    if not found:
+        raise StudioUnavailable(f"item {asset_id} ({name}) has a path Studio refuses (not a plain path below its library)")
+    return found[0]
+
+
+def reachable(path: str, seconds: float = FILE_SECONDS) -> str | None:
+    """None when `path` is a regular file reached with no link anywhere along it (Studio's own rule for handing
+    a file off); else why not. Given at most `seconds`: a network share that stops answering can't hold it."""
+    from .textio import Stalled, bounded
+
+    def check() -> str | None:
+        try:
+            if os.path.realpath(path, strict=True) != path:
+                return "a link or alias is in its path (Studio refuses those too)"
+            st = os.stat(path)
+        except FileNotFoundError:
+            return "it isn't there (moved or renamed since the snapshot, or its network folder isn't connected)"
+        except (OSError, ValueError) as e:
+            return _os_reason(e, "it") if isinstance(e, OSError) else str(e)
+        return None if stat.S_ISREG(st.st_mode) else "it isn't a regular file"
+
+    try:
+        return bounded(check, seconds=seconds, what="its folder")
+    except Stalled:
+        return f"its network folder didn't answer in {seconds:g} s"
 
 
 def settings(folder: Path | None = None) -> dict:
@@ -980,3 +1167,460 @@ def status_lines(report: dict) -> list[str]:
     lines.append(f"Roughcut's copy: {snap['copy']}")
     lines += [f"! {note}" for note in report["notes"]]
     return lines
+
+
+# ------------------------------------------------------------------ what Studio's Project history review will match
+#
+# Studio's Project history reads an FCPXML (Final Cut's export of a finished project) and records the catalog items
+# each project in it uses. It compares paths as plain strings, exactly, and never looks at the files: the path a
+# media-rep's file URL names, decoded, against each catalog item's library root joined with its path below the root
+# (missing items too), and against the output paths of the packs Studio prepared. A path two items share is
+# ambiguous and counts for neither; items are counted once each, however many files point at them. Roughcut predicts
+# that for its own FCPXML from the snapshot copy, the same way, without touching any media file.
+
+REVIEW_MAX_BYTES = 16 << 20
+REVIEW_MAX_VISITS = 100_000
+REVIEW_MAX_DEPTH = 64
+REVIEW_MAX_PROJECTS = 100
+NAME_MAX = 200
+_PICKS = {"audio", "video", "title", "mc-clip", "ref-clip", "clip", "asset-clip", "sync-clip"}  # an audition's active pick
+_REFERS = {"asset-clip", "video", "audio", "ref-clip", "mc-clip"}
+_NOT_WALKED = {"metadata", "filter-video", "filter-audio", "adjust-transform", "timeMap"}
+_SAME_WINDOW = {"sequence", "spine", "mc-angle"}
+# Rust's str::trim: Unicode White_Space.
+_WHITE = "\t\n\x0b\x0c\r \x85\xa0                　"
+_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf|infinity|nan)\Z", re.I)
+
+
+class ReviewRefused(Exception):
+    """Studio's review would refuse the whole file (or, for a catalog problem, every file): `reason` says why."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def catalog_path(root, relative) -> str | None:
+    """The path Studio's review keys a catalog item by: its library root joined with its path below the root,
+    as Rust's Path::join does it (neither is tidied: "a//b" stays), or None for a row Studio refuses (a root
+    that isn't absolute or has "..", a path below it that is empty, absolute, or has "./" first or ".." anywhere)."""
+    if not isinstance(root, str) or not isinstance(relative, str) or not root.startswith("/") or not relative:
+        return None
+    if ".." in root.split("/"):
+        return None
+    parts = relative.split("/")
+    if relative.startswith("/") or parts[0] == "." or ".." in parts:
+        return None
+    return root + relative if root.endswith("/") else root + "/" + relative
+
+
+def _dot(segment: str) -> int:
+    """1 for a "." URL path segment, 2 for "..", 0 otherwise (percent-encoded dots count, as URL parsers read them)."""
+    s = segment.lower().replace("%2e", ".")
+    return {".": 1, "..": 2}.get(s, 0)
+
+
+def file_url_path(url: str) -> str | None:
+    """The local path Studio's review reads from a media-rep src: a file URL with no host (or localhost), its dot
+    segments resolved and each segment percent-decoded, as a URL parser and Rust's `Url::to_file_path` do; None for
+    anything else, which Studio reports as "Only exact local file URLs can match the catalog"."""
+    from urllib.parse import unquote_to_bytes
+
+    url = url.strip("".join(chr(c) for c in range(0x21))).replace("\t", "").replace("\n", "").replace("\r", "")
+    m = re.match(r"([A-Za-z][A-Za-z0-9+.-]*):(.*)\Z", url, re.S)
+    if not m or m.group(1).lower() != "file":
+        return None
+    rest = re.split(r"[?#]", m.group(2).replace("\\", "/"), maxsplit=1)[0]
+    if rest.startswith("//"):
+        host, slash, rest = rest[2:].partition("/")
+        if host.lower() not in ("", "localhost"):
+            return None
+        rest = slash + rest
+    raw = rest.lstrip("/").split("/") if rest else [""]
+    segments: list[str] = []
+    for i, seg in enumerate(raw):
+        last = i == len(raw) - 1
+        kind = _dot(seg)
+        if kind == 2:
+            if segments:
+                segments.pop()
+            if last:
+                segments.append("")
+        elif kind == 1:
+            if last:
+                segments.append("")
+        else:
+            segments.append(seg)
+    data = b"".join(b"/" + unquote_to_bytes(seg) for seg in (segments or [""]))
+    if len(data) > 2 and chr(data[-2]).isascii() and chr(data[-2]).isalpha() and data[-1:] in (b":", b"|"):
+        data += b"/"  # the url crate's Windows drive-letter rule, applied on a Mac too
+    path = data.decode("utf-8", errors="replace")
+    if not path.startswith("/") or ".." in path.split("/"):
+        return None
+    return path
+
+
+def _seconds(value) -> float | None:
+    """An FCPXML time ("1001/30000s", "5s") in seconds, as Studio reads it; None when it can't."""
+    if not isinstance(value, str) or not value.endswith("s"):
+        return None
+    a, sep, b = value[:-1].partition("/")
+    try:
+        if sep:
+            if not (_NUMBER.match(a) and _NUMBER.match(b)):
+                return None
+            x = float(a) / float(b)
+        else:
+            if not _NUMBER.match(a):
+                return None
+            x = float(a)
+    except (ZeroDivisionError, ValueError, OverflowError):
+        return None
+    return x if x == x and x not in (float("inf"), float("-inf")) else None
+
+
+def _window(start: float, duration: float, window, offset: float | None) -> tuple[float, float]:
+    if window is not None and offset is not None:
+        lo, hi = window
+        return start + max(lo - offset, 0.0), start + min(hi - offset, duration)
+    return start, start + duration
+
+
+def _intersects(node, window) -> bool:
+    if window is None:
+        return True
+    start, d = _seconds(node.get("offset")), _seconds(node.get("duration"))
+    if start is None or d is None:
+        return True
+    return start < window[1] and start + d > window[0]
+
+
+class _Walk:
+    """Studio's walk of one project's timeline: the media every clip that plays refers to."""
+
+    def __init__(self, resources: dict):
+        self.resources = resources
+        self.active: set[str] = set()
+        self.references: dict[tuple[str, str, str], None] = {}  # (resource id, src URL or "", why it can't match or ""), as met
+        self.visits = 0
+
+    def walk(self, node, window, depth: int) -> None:
+        self.visits += 1
+        if depth > REVIEW_MAX_DEPTH or self.visits > REVIEW_MAX_VISITS:
+            raise ReviewRefused("its timelines nest deeper, or refer to more clips, than Studio's review reads")
+        if not _intersects(node, window) or node.get("enabled") == "0":
+            return
+        tag = node.tag
+        if tag == "audition":  # only the active pick (the first) counts
+            pick = next((c for c in node if c.tag in _PICKS), None)
+            if pick is not None:
+                self.walk(pick, None, depth + 1)
+            return
+        rid = node.get("ref")
+        if rid is not None and tag in _REFERS:
+            resource = self.resources.get(rid)
+            if resource is None:
+                self.references[(rid, "", "Timeline reference has no resource.")] = None
+                return
+            if resource.tag == "asset":
+                srcs = [c.get("src") for c in resource if c.tag == "media-rep" and c.get("kind") == "original-media" and c.get("src") is not None]
+                if resource.get("src") is not None:
+                    srcs.append(resource.get("src"))
+                if not srcs:
+                    self.references[(rid, "", "Referenced asset has no original media URL.")] = None
+                for src in srcs:
+                    self.references[(rid, src, "")] = None
+            elif resource.tag == "media":
+                if rid in self.active:
+                    raise ReviewRefused("a compound clip in it contains itself")
+                self.active.add(rid)
+                sequence = next((c for c in resource if c.tag == "sequence"), None)
+                if any(c.tag == "timeMap" for c in node):
+                    self.references[(rid, "", "Retimed nested media needs manual usage confirmation.")] = None
+                elif sequence is not None:
+                    start = next((s for s in (_seconds(node.get("start")), _seconds(sequence.get("start"))) if s is not None), 0.0)
+                    d = _seconds(node.get("duration"))
+                    d = _seconds(sequence.get("duration")) if d is None else d
+                    self.walk(sequence, None if d is None else _window(start, d, window, _seconds(node.get("offset"))), depth + 1)
+                elif any(c.tag == "multicam" for c in resource):
+                    self.references[(rid, "", "Multicam timing and component selection need manual usage confirmation.")] = None
+                else:
+                    self.references[(rid, "", "Referenced media has no supported sequence or multicam timeline.")] = None
+                self.active.discard(rid)
+        for child in node:
+            if child.tag in _NOT_WALKED:
+                continue
+            if tag in _SAME_WINDOW:
+                inner = window
+            else:
+                start = _seconds(node.get("start"))
+                d = _seconds(node.get("duration"))
+                inner = None if d is None else _window(0.0 if start is None else start, d, window, _seconds(node.get("offset")))
+            self.walk(child, inner, depth + 1)
+
+
+def project_name_problem(name: str) -> str | None:
+    """Why Studio's review would refuse a project named this (and with it the whole file), or None."""
+    trimmed = name.strip(_WHITE)
+    if not trimmed:
+        return "a project has no name"
+    if len(trimmed) > NAME_MAX:
+        return f"a project's name is longer than {NAME_MAX} characters"
+    if any(unicodedata.category(ch) == "Cc" for ch in trimmed):
+        return "a project's name has a control character in it"
+    return None
+
+
+@dataclass
+class ReviewedProject:
+    """One project Studio's review would read: its name, and each media file its timeline uses."""
+
+    name: str
+    references: list[tuple[str, str, str]]  # (resource id, src URL or "", why Studio can't match it or "")
+
+    def paths(self) -> list[tuple[str, str]]:
+        """(path, why): the decoded local path ("" when there is none) and why it can't match ("" when it can)."""
+        out = []
+        for _, src, why in self.references:
+            if why:
+                out.append((src, why))
+                continue
+            path = file_url_path(src)
+            out.append((path, "") if path is not None else (src, "Only exact local file URLs can match the catalog."))
+        return list(dict.fromkeys(out))
+
+
+def review_references(xml) -> list[ReviewedProject]:
+    """What Studio's Project history review would read in this FCPXML: each project and the media it uses.
+    Raises ReviewRefused where Studio would refuse the whole file. Reads only the text given, never a media file."""
+    import xml.etree.ElementTree as ET
+
+    data = xml.encode("utf-8") if isinstance(xml, str) else bytes(xml)
+    if len(data) > REVIEW_MAX_BYTES:
+        raise ReviewRefused("the file is larger than the 16 MiB Studio's review reads")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ReviewRefused("the file isn't UTF-8") from None
+    safe = text.replace("<!DOCTYPE fcpxml>", "")
+    if "<!DOCTYPE" in safe or "<!ENTITY" in safe:
+        raise ReviewRefused("the file declares a DTD or entities, which Studio's review doesn't read")
+    try:
+        root = ET.fromstring(safe)
+    except ET.ParseError as e:
+        raise ReviewRefused(f"the file isn't valid XML ({e})") from None
+    if root.tag != "fcpxml":
+        raise ReviewRefused("the file isn't FCPXML")
+    resources: dict = {}
+    for group in root:
+        if group.tag != "resources":
+            continue
+        for resource in group:
+            rid = resource.get("id")
+            if rid is None:
+                continue
+            if rid in resources:
+                raise ReviewRefused("two of its resources share an ID")
+            resources[rid] = resource
+    projects: list[ReviewedProject] = []
+    for project in root.iter("project"):
+        sequence = next((c for c in project if c.tag == "sequence"), None)
+        if sequence is None:
+            continue
+        if len(projects) >= REVIEW_MAX_PROJECTS:
+            raise ReviewRefused(f"it has more than {REVIEW_MAX_PROJECTS} projects")
+        name = project.get("name", "Untitled Final Cut project")
+        problem = project_name_problem(name)
+        if problem:
+            raise ReviewRefused(problem)
+        walk = _Walk(resources)
+        walk.walk(sequence, None, 0)
+        projects.append(ReviewedProject(name.strip(_WHITE), list(walk.references)))  # in timeline order (Studio sorts them; the set is the same)
+    if not projects:
+        raise ReviewRefused("it has no project timeline")
+    return projects
+
+
+def cut_projects(xml) -> tuple[list[ReviewedProject], str | None]:
+    """(projects, refused): the projects Studio's review would read, or none and the reason it would refuse the file."""
+    try:
+        return review_references(xml), None
+    except ReviewRefused as e:
+        return [], e.reason
+
+
+def _all_media(xml) -> list[str]:
+    """Every original-media path the file's resources name: for credits when Studio's review would refuse the file."""
+    found = re.findall(r'<media-rep kind="original-media" src="([^"]*)"', xml if isinstance(xml, str) else xml.decode("utf-8", "replace"))
+    from html import unescape
+
+    return list(dict.fromkeys(p for p in (file_url_path(unescape(u)) for u in found) if p))
+
+
+def _has_table(con: sqlite3.Connection, name: str) -> bool:
+    return bool(_query(con, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+
+
+def mappings(con: sqlite3.Connection) -> tuple[dict[str, dict[int, str]], str | None]:
+    """(path -> {item id: name}, refused) as Studio's review builds it: every catalog row, missing or not, at its
+    catalog_path, and the output paths of the packs Studio prepared (when the copy has its Project history).
+    `refused`: a row whose path Studio refuses, which makes Studio's review stop on any file."""
+    paths: dict[str, dict[int, str]] = {}
+    refused = None
+    rows = _query(con, "SELECT a.id, coalesce(nullif(a.display_name,''), a.name), l.path, a.relative_path FROM assets a JOIN libraries l ON l.id = a.library_id")
+    for aid, name, root, relative in rows:
+        path = catalog_path(root, relative)
+        if path is None:
+            refused = refused or (
+                f"Studio's catalog has an item ({name}) whose path it refuses, so its Project history review stops on any file "
+                "(\"Unsafe source path in catalog history\") until that item is fixed or removed in Studio"
+            )
+            continue
+        paths.setdefault(path, {})[int(aid)] = str(name)
+    if _has_table(con, "project_history_items"):
+        for table, columns in HISTORY_COLUMNS.items():
+            have = {row[1] for row in _query(con, f'PRAGMA table_info("{table}")')}
+            if not columns <= have:
+                raise StudioUnavailable(f"Studio's Project history in the catalog changed shape (run `roughcut update`)")
+        prepared = _query(
+            con,
+            "SELECT i.asset_id, coalesce(nullif(a.display_name,''), a.name), i.output_path FROM project_history_items i "
+            "JOIN project_history_events e ON e.id = i.event_id JOIN assets a ON a.id = i.asset_id "
+            "WHERE e.kind = 'prepared' AND i.output_path <> ''",
+        )
+        for aid, name, output in prepared:
+            paths.setdefault(str(output), {})[int(aid)] = str(name)
+    return paths, refused
+
+
+def _fold_path(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _root_match(path: str, roots: list[str]) -> tuple[str | None, str]:
+    """(root, how): the library root `path` is under: "exact", "folded" (only ignoring case or Unicode form) or "mount" (through /Volumes/<name>-N)."""
+    roots = [r for r in roots if isinstance(r, str) and r.startswith("/")]
+    target = _parts(path)
+    for root in roots:
+        parts = _parts(root)
+        if len(parts) <= len(target) and target[: len(parts)] == parts:
+            return root, "exact"
+    root, mount = _library_of(path, roots)
+    if root is None:
+        return None, ""
+    return root, "mount" if mount else "folded"
+
+
+class _Index:
+    """The review's paths, and the same folded for near misses (built only when a path doesn't match)."""
+
+    def __init__(self, paths: dict[str, dict[int, str]]):
+        self.paths = paths
+        self._folded: dict[str, list[str]] | None = None
+
+    def near(self, path: str) -> list[str]:
+        if self._folded is None:
+            self._folded = {}
+            for p in self.paths:
+                self._folded.setdefault(_fold_path(p), []).append(p)
+        return [p for p in self._folded.get(_fold_path(path), []) if p != path]
+
+
+def _near_miss(path: str, index: _Index) -> tuple[str, str] | None:
+    """(Studio's path, why) for a path that matches a catalog path only ignoring case or Unicode form, or through
+    a share macOS mounted under a numbered name; None otherwise."""
+    for other in index.near(path):
+        nfc = unicodedata.normalize("NFC", other) == unicodedata.normalize("NFC", path)
+        why = "the same name in another Unicode form (how accented letters are stored)" if nfc else (
+            "only the letter case differs" if other.casefold() == path.casefold() else "the letter case and Unicode form differ"
+        )
+        return other, why
+    usual = _usual_mount(_parts(path))
+    if usual is not None:
+        moved = str(PurePosixPath(*usual))
+        mount = str(PurePosixPath(*_parts(path)[: len(_parts(VOLUMES)) + 1]))
+        for other in ([moved] if moved in index.paths else []) + index.near(moved):
+            return other, f"it's on {mount}, a second mount of the share Studio has at {PurePosixPath(*usual[: len(_parts(VOLUMES)) + 1])}"
+    return None
+
+
+def match_media(xml, *, out_dir: Path | None = None, folder: Path | None = None, cache_dir: Path | None = None, kit: Kit | None = None) -> dict:
+    """What Studio's Project history review would match for each media file this FCPXML's projects use, from the
+    snapshot copy (or, without one, a kit the owner exported). Pure string comparison: no media file is touched.
+
+    Returns the record saved in plan.json as `studio_sources`: {"snapshot", "kit", "refused", "files": {path: {"status",
+    "assets", "why", "studio_path"}}}. A status is matched / ambiguous (Studio counts neither item) / near_miss /
+    not_in_snapshot (under a library root; probably matched after Studio's next scan) / not_in_kit / outside /
+    render (Roughcut's own output) / unmatchable. Raises StudioUnavailable when there's nothing to check against.
+    """
+    projects, refused = cut_projects(xml)
+    wanted: dict[str, str] = {}
+    for project in projects:
+        for path, why in project.paths():
+            wanted.setdefault(path, why)
+    if refused:
+        for path in _all_media(xml):
+            wanted.setdefault(path, "")
+    record: dict = {"checked_at": int(time.time()), "snapshot": None, "kit": None, "refused": refused, "files": {}}
+    details: dict[int, dict] = {}
+    roots: list[str] = []
+    try:
+        copy = newest_copy(folder, cache_dir)
+    except StudioUnavailable:
+        if kit is None:
+            raise
+        copy = None
+    if copy is not None:
+        with catalog(copy) as con:
+            paths, catalog_refused = mappings(con)
+            roots = [lib.path for lib in libraries(con)]
+            index = _Index(paths)
+            ids = sorted({i for p in wanted if p in paths for i in paths[p]})
+            for n in range(0, len(ids), 500):
+                chunk = ids[n : n + 500]
+                for aid, name, provider, lic in _query(
+                    con, f"SELECT id, coalesce(nullif(display_name,''), name), provider, license FROM assets WHERE id IN ({', '.join('?' * len(chunk))})",
+                    tuple(chunk),
+                ):
+                    details[int(aid)] = {"id": int(aid), "name": str(name or ""), "provider": str(provider or ""), "license": str(lic or "")}
+        snap = copy.snapshot
+        record["snapshot"] = {"id": snap.id, "name": snap.name, "created_at": snap.created_at}
+        record["refused"] = refused or catalog_refused
+        missing = "not_in_snapshot"
+    else:
+        paths = {}
+        for n, item in enumerate(kit.items):
+            aid = item.asset_id if item.asset_id is not None else -(n + 1)
+            paths.setdefault(item.path, {})[aid] = item.name
+            details[aid] = {"id": aid, "name": item.name, "provider": item.provider, "license": item.license}
+        index = _Index(paths)
+        record["kit"] = {"name": kit.name, "file": str(kit.file), "exported_at": kit.exported_at}
+        missing = "not_in_kit"
+    own = str(out_dir).rstrip("/") + "/" if out_dir is not None else None
+    for path, why in wanted.items():
+        entry: dict = {"status": "", "assets": [], "why": "", "studio_path": None}
+        if why:
+            entry.update(status="unmatchable", why=why)
+        elif path in paths:
+            found = paths[path]
+            entry["status"] = "matched" if len(found) == 1 else "ambiguous"
+            entry["assets"] = [details.get(i) or {"id": i, "name": n, "provider": "", "license": ""} for i, n in sorted(found.items())]
+        else:
+            near = _near_miss(path, index)
+            root, how = _root_match(path, roots)
+            if near is not None:
+                entry.update(status="near_miss", studio_path=near[0], why=near[1])
+            elif own is not None and path.startswith(own):
+                entry["status"] = "render"
+            elif root is not None and how == "exact":
+                entry["status"] = missing
+            elif root is not None:
+                entry.update(
+                    status="near_miss", studio_path=None,
+                    why=f"it's on {_library_of(path, [root])[1]}, a second mount of the share Studio's library {root} is on" if how == "mount"
+                    else f"the library folder is spelled {root} in Studio (Studio compares letter case and Unicode form exactly)",
+                )
+            else:
+                entry["status"] = "outside" if copy is not None else missing
+        record["files"][path] = entry
+    return record

@@ -64,6 +64,10 @@ class Options:
     graphics_logo: str | None = None  # logo file designs may show (<img src="brand:logo">)
     graphics_look: tuple[str, ...] = ()  # approved designs (.html) new ones should match
     music: list[Path] = field(default_factory=list)  # --music: songs to lay under the cut (not transcribed)
+    music_library: dict = field(default_factory=dict)  # Venture Studio songs among them (path -> what Studio says about it)
+    music_from: str | None = None  # --music-from: a Studio collection or kit whose songs join --music as candidates
+    music_max: int = 4  # --music-max: at most this many of them
+    studio_kit: str | None = None  # a kit file --music-from read: the paper edit checks against it when Studio's catalog can't be read
     cache_dir: Path | None = None
     workers: int = 4
 
@@ -667,6 +671,8 @@ def write_outputs(
     command: str = "build",
     entry: dict | None = None,
     quiet: bool = False,
+    cache_dir: Path | None = None,
+    studio_kit=None,
 ) -> tuple[Path, Path]:
     """Write version `version`: the FCPXML, plan.json and the paper edit.
 
@@ -682,7 +688,10 @@ def write_outputs(
     event = event_name(name)
     xml = build_fcpxml(timelines, analysis, event_name=event, alternates=plan.alternates)
     subtitles = captions_srt(rough, analysis, plan.spellings)
-    report = build_report(plan, rough, analysis, stringout=stringout, **report_kwargs)
+    sources, studio_lines = studio_sources(xml, out_dir, record.get("studio_sources"), cache_dir=cache_dir, kit=studio_kit)
+    if sources is not None:
+        record = {**record, "studio_sources": sources}
+    report = build_report(plan, rough, analysis, stringout=stringout, studio=studio_lines, **report_kwargs)
     page = report_page(report, title=f"{plan.title} - paper edit", subtitle=f"{rough.name} · event {event}")
     out_dir.mkdir(parents=True, exist_ok=True)
     versions.snapshot(out_dir, before=version)
@@ -723,6 +732,34 @@ def write_outputs(
     )
     versions.finish(out_dir, version, prune=not quiet)
     return fcpxml_path, report_path
+
+
+def studio_sources(xml: str, out_dir: Path, saved, *, cache_dir: Path | None = None, kit=None) -> tuple[dict | None, list[str]]:
+    """(record, section): what Venture Studio's Project history review would match in this version's FCPXML, kept in
+    plan.json as `studio_sources`, and the paper edit's "Venture Studio" section.
+
+    Checked again whenever Studio can be read; otherwise the record an earlier version saved is used (a file this
+    version adds that it lacks reads "not checked"). Never touches a media file, never stops a run.
+    """
+    from . import studio
+    from .report import studio_section
+
+    projects, refused = studio.cut_projects(xml)
+    try:
+        kit = studio.load_kit(kit) if isinstance(kit, (str, Path)) and str(kit) else None
+    except studio.StudioUnavailable:
+        kit = None
+    try:
+        fresh, unavailable = studio.match_media(xml, out_dir=out_dir, cache_dir=cache_dir, kit=kit), None
+    except studio.StudioUnavailable as e:
+        fresh, unavailable = None, (None if e.silent else e.reason)
+    except Exception as e:  # noqa: BLE001 - Studio never stops a run
+        fresh, unavailable = None, f"couldn't read Venture Studio: {e}"
+    if fresh is not None:
+        return fresh, studio_section(fresh, projects, refused=refused, out_dir=out_dir)
+    if isinstance(saved, dict) and isinstance(saved.get("files"), dict):
+        return saved, studio_section(saved, projects, refused=refused, unavailable=unavailable, earlier=True, out_dir=out_dir)
+    return None, studio_section(None, projects, unavailable=unavailable)
 
 
 def event_name(name: str) -> str:
@@ -930,7 +967,7 @@ def _finish_build(
             ]
             interim = write_outputs(
                 out_dir, name, record, plan, analysis, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
-                version=version, command=command, entry=entry, quiet=True,
+                version=version, command=command, entry=entry, quiet=True, cache_dir=opts.cache_dir, studio_kit=opts.studio_kit,
             )
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
             save_result(Result(
@@ -983,6 +1020,8 @@ def _finish_build(
         version=version,
         command=command,
         entry=entry,
+        cache_dir=opts.cache_dir,
+        studio_kit=opts.studio_kit,
     )
     warnings = analysis.warnings + plan.warnings + rough.warnings + extra_warnings
     base = summary_base or {}
@@ -1136,7 +1175,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                 graphics_warnings.append(design_missing_hint(out_dir, undone, after_reset=limit_hit is not None))
     fcpxml_path, report_path = write_outputs(
         out_dir, name, record, plan, with_graphics, rough, stringout, {"graphics": placed, "extra_warnings": graphics_warnings, "usage": usage},
-        version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)},
+        version=version, command="render", entry={"style": opts.style, "planner": planner_label(plan.source)}, cache_dir=opts.cache_dir,
     )
     warnings = plan.warnings + rough.warnings + graphics_warnings
     summary = run_summary(
@@ -1615,6 +1654,8 @@ def revise(
     versions.snapshot(out_dir, before=version)
     new_settings = {**settings, **run_settings(opts, p), "stringout": settings.get("stringout", True), "vision_model": settings.get("vision_model")}
     record = plan_record(name, plan, raw, analysis, new_settings)
+    if isinstance(saved.get("studio_sources"), dict):
+        record["studio_sources"] = saved["studio_sources"]  # what Studio matched, for when it can't be read this time
     record["notes_history"] = revisions + [{"version": version, "notes": notes.strip(), "keep": keep_ids, "avoid": avoid_ids}]
     if prev_n:
         record["revision_of"] = prev_n

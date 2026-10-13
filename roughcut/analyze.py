@@ -109,6 +109,9 @@ class Clip:
     sound_end: float | None = None  # seconds: where the last sound fades out
     music_bed: bool = False  # given with --music: not transcribed, always the cut's music
     music_order: int | None = None  # its place among the --music files (0: the first given), which plays when the plan cues none
+    # A Venture Studio song: what Studio says about it (id, title, provider, license, tags, notes, favorite). Its file may be
+    # on a network share, so every touch of it is given a deadline. Not part of analysis_digest.
+    library: dict | None = None
 
     @property
     def hidden(self) -> bool:
@@ -152,6 +155,7 @@ class Clip:
             "sound_end": self.sound_end,
             "music_bed": self.music_bed,
             "music_order": self.music_order,
+            **({"library": self.library} if self.library else {}),
         }
 
     @classmethod
@@ -181,6 +185,7 @@ class Clip:
             sound_end=d.get("sound_end"),
             music_bed=bool(d.get("music_bed", False)),
             music_order=d.get("music_order") if isinstance(d.get("music_order"), int) else None,
+            library=d.get("library") if isinstance(d.get("library"), dict) else None,
         )
 
 
