@@ -1661,7 +1661,7 @@ def mappings(con: sqlite3.Connection) -> tuple[dict[str, dict[int, str]], str | 
         for table, columns in HISTORY_COLUMNS.items():
             have = {row[1] for row in _query(con, f'PRAGMA table_info("{table}")')}
             if not columns <= have:
-                raise StudioUnavailable(f"Studio's Project history in the catalog changed shape (run `roughcut update`)")
+                raise StudioUnavailable("Studio's Project history in the catalog changed shape (run `roughcut update`)")
         prepared = _query(
             con,
             "SELECT i.asset_id, coalesce(nullif(a.display_name,''), a.name), i.output_path FROM project_history_items i "

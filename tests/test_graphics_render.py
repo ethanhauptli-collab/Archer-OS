@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 import time
 
@@ -407,6 +408,11 @@ def test_ctrl_c_while_designing_stops_without_waiting_for_requests_in_flight():
                 release.wait(30)
             return reply
 
+    # interrupt_main does nothing unless Python handles SIGINT. A suite started in the background (`pytest &`, nohup,
+    # some CI runners) inherits SIGINT as ignored, and then this test would wait out the 30 s request and fail.
+    before = signal.getsignal(signal.SIGINT)
+    if before in (signal.SIG_IGN, signal.SIG_DFL):
+        signal.signal(signal.SIGINT, signal.default_int_handler)
     timer = threading.Timer(1.0, _thread.interrupt_main)  # Ctrl-C a second in
     t0 = time.monotonic()
     timer.start()
@@ -417,6 +423,8 @@ def test_ctrl_c_while_designing_stops_without_waiting_for_requests_in_flight():
     finally:
         timer.cancel()
         release.set()
+        if before is not None:
+            signal.signal(signal.SIGINT, before)
     assert stopped < 3
 
 
