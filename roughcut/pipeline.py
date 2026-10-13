@@ -1000,6 +1000,7 @@ def _finish_build(
             if report_extra is not None and carry is not None:
                 # What the list of changes says about the graphics is what came of them, not what the plan meant.
                 outcome["in_cut"] = _graphics_in_cut(out_dir)
+                outcome["placed"] = {g.index for g in placed}  # the ones with room; the rest never had any
                 extra = report_extra(rough, outcome)
                 changes = extra.pop("changes", None)
             limit_hit = designer.limit

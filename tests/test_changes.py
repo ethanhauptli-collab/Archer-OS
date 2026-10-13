@@ -240,6 +240,35 @@ def test_graphics_that_did_not_make_it_are_not_counted_as_made():
     assert items == ["Graphics: 2 redesigned (every graphic is designed again)"]
 
 
+def test_a_graphic_that_never_had_room_is_not_a_failure_but_one_placed_and_not_made_is():
+    a = analysis()
+    stat = box("Weeks", kind="stat", segment="V01.S005", words="The kids have been asking")
+    both = plan(a, graphics=[box(), stat])
+    # Placed, but its design or render never came back: it could not be made.
+    items, _ = items_of(both, both, a, redesigned=True, outcome={"in_cut": {0}, "placed": {0, 1}, "fell_back": set()})
+    assert items == [
+        "Graphics: 1 redesigned, 1 could not be made and is not in this version (see Warnings)",
+        'Graphic "Weeks": could not be made, so it is not in this version',
+    ]
+    # Not placed: there was no room for it in this cut, and nothing failed.
+    items, unchanged = items_of(both, both, a, redesigned=True, outcome={"in_cut": {0}, "placed": {0}, "fell_back": set()})
+    assert unchanged is False
+    assert items == [
+        "Graphics: 1 redesigned, 1 had no room in this cut (see Warnings)",
+        'Graphic "Weeks": had no room in this cut (see Warnings)',
+    ]
+    # A new graphic that has no room isn't "new" either, and the two kinds of "not in the cut" are told apart.
+    box3 = box("Third", kind="quote", segment="V01.S004", words="a long day")
+    items, _ = items_of(plan(a), plan(a, graphics=[box(), stat, box3]), a, outcome={"in_cut": {0}, "placed": {0, 1}, "fell_back": set()})
+    assert items[0] == "Graphics: 1 new, 1 could not be made and is not in this version, 1 had no room in this cut (see Warnings)"
+    assert 'Graphic "Weeks": could not be made, so it is not in this version' in items
+    assert 'Graphic "Third": had no room in this cut (see Warnings)' in items
+    assert [i for i in items if i.startswith("New graphic")] == ['New graphic: "Heading Out" (title card)']  # only the one that is in the cut
+    # An outcome that doesn't say what was placed (an older caller) is read as every graphic having been.
+    items, _ = items_of(both, both, a, redesigned=True, outcome={"in_cut": {0}, "fell_back": set()})
+    assert items[1] == 'Graphic "Weeks": could not be made, so it is not in this version'
+
+
 def test_the_sentence_that_says_nothing_changed_comes_first_whatever_else_was_said():
     a = analysis()
     advice = ["Your notes ask for graphics, but motion graphics are off for this cut, so the revision has none.", "Redesign graphics was asked for, but motion graphics are off for this cut, so there is nothing to redesign."]

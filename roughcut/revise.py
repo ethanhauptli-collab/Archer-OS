@@ -379,6 +379,7 @@ def _held(spec) -> float:
 
 def _graphic_changes(
     previous: list, revised: list, *, redesigned: bool, in_cut: set[int] | None = None, fell_back: set[int] | frozenset[int] = frozenset(),
+    placed: set[int] | None = None,
 ) -> tuple[list[str], list[str]]:
     """(what changed, what stayed) about the graphics: kept / redesigned / new / removed, with a changed text or direction in words.
 
@@ -388,7 +389,9 @@ def _graphic_changes(
 
     What the run did, once its graphics are made: `in_cut` holds the plan indexes that made it into the cut (None before that:
     every graphic is taken to), and `fell_back` the ones whose new design never came back and that kept their earlier one.
-    A graphic this version meant to make or change that isn't in the cut isn't counted as made.
+    A graphic this version meant to make or change that isn't in the cut isn't counted as made: it could not be made when it had
+    room (`placed`: the plan indexes the cut had room for; None: not known, every graphic is taken to have had), and had no room
+    when it was never placed, which is no failure.
     """
     from .plan import spec_key
 
@@ -404,15 +407,18 @@ def _graphic_changes(
             if i is not None:
                 entry[2], entry[3] = left.pop(i), False
     same = changed = new = retimed = 0
-    stale = {"kept": 0, "left out": 0}  # meant to be made or redesigned, and wasn't
+    stale = {"kept": 0, "left out": 0, "no room": 0}  # meant to be made or redesigned, and wasn't
     detail: list[str] = []
     for n, r, was, is_same in found:
         meant = redesigned or was is None or not is_same
-        why = "kept" if n in fell_back else "left out" if in_cut is not None and n not in in_cut and meant else ""
+        why = "kept" if n in fell_back else ""
+        if not why and in_cut is not None and n not in in_cut and meant:
+            why = "no room" if placed is not None and n not in placed else "left out"
         if why:
             stale[why] += 1
             detail.append(
                 f"Graphic {_quoted(r.text)}: no new design came back, so it keeps its earlier one" if why == "kept"
+                else f"Graphic {_quoted(r.text)}: had no room in this cut (see Warnings)" if why == "no room"
                 else f"Graphic {_quoted(r.text)}: could not be made, so it is not in this version"
             )
         elif was is None:
@@ -454,6 +460,8 @@ def _graphic_changes(
         parts.append(f"{stale['kept']} got no new design and {'keeps its' if stale['kept'] == 1 else 'keep their'} earlier one")
     if stale["left out"]:
         parts.append(f"{stale['left out']} could not be made and {'is' if stale['left out'] == 1 else 'are'} not in this version")
+    if stale["no room"]:
+        parts.append(f"{stale['no room']} had no room in this cut")
     if left:
         parts.append(f"{len(left)} removed")
     summary = "Graphics: " + ", ".join(parts)
@@ -548,7 +556,8 @@ def change_items(
     The paper edit's revision block and the app's list of changes are both these. `settings_notes`: what the notes did to the
     cut's settings (settings_from_notes), listed too; `was`/`now` (setting_deltas) add settings a flag changed.
     `outcome`: once the graphics are made, {"in_cut": plan indexes that made it into the cut, "fell_back": plan indexes whose
-    new design never came back and that kept the earlier one} (_graphic_changes), so the list never claims a graphic that isn't there.
+    new design never came back and that kept the earlier one, "placed": plan indexes the cut had room for} (_graphic_changes),
+    so the list never claims a graphic that isn't there, and never calls one that had no room a failure.
     """
     notes = list(settings_notes or [])
     plan_changes: list[str] = []
@@ -607,7 +616,7 @@ def change_items(
     gfx_changes, gfx_same = (
         _graphic_changes(
             previous.graphics, revised.graphics, redesigned=redesigned,
-            in_cut=(outcome or {}).get("in_cut"), fell_back=(outcome or {}).get("fell_back") or frozenset(),
+            in_cut=(outcome or {}).get("in_cut"), fell_back=(outcome or {}).get("fell_back") or frozenset(), placed=(outcome or {}).get("placed"),
         )
         if graphics_on else ([], [])
     )

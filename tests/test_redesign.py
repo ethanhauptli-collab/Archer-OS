@@ -367,6 +367,20 @@ def test_a_redesigned_graphic_with_new_words_and_no_design_is_left_out_not_calle
     assert not any(i.startswith("New graphic") for i in items)
 
 
+def test_a_redesign_does_not_call_a_graphic_that_never_had_room_a_failure(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    crowded = {**GRAPHIC, "kind": "quote", "text": "Crowded Out"}  # on the same words as the title card: one graphic at a time
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, plan=plan_of(GRAPHIC, STAT, crowded))
+    assert len(manifest_of(out)["graphics"]) == 2  # it never had room, in the build or after
+    result = pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)
+    assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2
+    items = result.changes["items"]
+    assert "Graphics: 2 redesigned, 1 had no room in this cut (see Warnings)" in items
+    assert 'Graphic "Crowded Out": had no room in this cut (see Warnings)' in items
+    assert not any("could not be made" in i for i in items)  # nothing failed
+    assert any("would cover" in w and "Crowded Out" in w for w in result.warnings)  # the warning the line points to
+    assert any("had no room in this cut" in i for i in json.loads((out / "result.json").read_text())["changes"]["items"])
+
+
 @pytest.mark.parametrize("how", ["flag", "planner"])
 def test_a_redesign_stopped_by_the_usage_limit_is_finished_in_the_look_the_notes_asked_for(how, footage, tmp_path, monkeypatch, shared_cache, clear_mov):
     out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
