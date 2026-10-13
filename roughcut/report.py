@@ -18,7 +18,7 @@ def _tc(frames: int, tl: Timeline) -> str:
 
 # Warnings about what the brief or the revise notes asked for that this cut doesn't do: also at the top
 # of the report and at the end of the CLI's output, not only in the Warnings.
-HEADLINE_WARNINGS = ("The brief asks for graphics", "Your notes ask for")
+HEADLINE_WARNINGS = ("The brief asks for graphics", "Your notes ask for", "The output folder is inside the Venture Studio library")
 
 
 def collapse_warnings(warnings: list[str]) -> list[str]:

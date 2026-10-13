@@ -153,7 +153,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
-    d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic")
+    d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic or check whether Venture Studio's folders are online")
+
+    st = sub.add_parser("studio", help="Venture Studio: what Roughcut can read from it (read only; never Studio's live files)")
+    st_sub = st.add_subparsers(dest="studio_command", required=True)
+    sts = st_sub.add_parser("status", help="the catalog snapshot Roughcut reads, its age, item count and folders")
+    sts.add_argument("--json", action="store_true", help="print the status as JSON")
+    sts.add_argument("--where", metavar="DIR", help="also say whether DIR is inside a Venture Studio library, and where a build of it would write")
+    sts.add_argument("--offline", action="store_true", help="don't check whether the library folders are online")
+    sts.add_argument("--cache-dir", help="where Roughcut keeps its copy of Studio's catalog snapshot (default: Roughcut's cache, as for build)")
 
     k = sub.add_parser("key", help="save, check or remove your API key (stored in the macOS Keychain, shared with the Mac app)")
     k.add_argument("action", choices=["set", "status", "remove"])
@@ -401,7 +409,28 @@ def doctor_report(offline: bool = False) -> dict:
         "openai_installed": importlib.util.find_spec("openai") is not None,
         **claude_code_report(offline),
         "graphics": _graphics_problem() if not offline else "not checked",
+        "venture_studio": studio_report(offline=offline),
     }
+
+
+def studio_report(offline: bool = False, cache_dir: Path | None = None) -> dict:
+    """Venture Studio's status for doctor and `studio status`; a problem is a reason in it, never an error."""
+    from . import studio
+
+    try:
+        return studio.status(cache_dir=cache_dir, offline=offline)
+    except Exception as e:  # noqa: BLE001 - doctor always answers
+        return {"installed": True, "available": False, "reason": f"couldn't read Venture Studio: {e}", "summary": f"couldn't read Venture Studio: {e}",
+                "libraries": [], "notes": [], "offline": offline}
+
+
+def _studio_detail(vs: dict) -> str:
+    if not vs.get("installed"):
+        return "optional: not installed"
+    if not vs.get("available"):
+        return vs.get("reason") or "not available"
+    notes = vs.get("notes") or []
+    return (vs.get("summary") or "") + (f" ({len(notes)} note{'s' if len(notes) != 1 else ''}: roughcut studio status)" if notes else "")
 
 
 def _graphics_problem() -> str | None:
@@ -452,6 +481,9 @@ def _print_doctor(r: dict) -> int:
         ("Claude Code", r.get("claude_code_auth") not in (None, "api_key"), _claude_code_detail(r)),
         ("Graphics", r.get("graphics") is None, "ready for --graphics" if r.get("graphics") is None else f"optional: {r.get('graphics')}"),
     ]
+    vs = r.get("venture_studio")
+    if isinstance(vs, dict):  # informational: never changes doctor's exit code
+        rows.append(("Venture Studio", bool(vs.get("available")) and not vs.get("notes"), _studio_detail(vs)))
     print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
     for label, ok, detail in rows:
         print(f"  {'ok ' if ok else '-- '} {label:<15} {detail}")
@@ -522,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"roughcut: {problem}", file=sys.stderr)
             progress.emit("error", message=problem)
             return 1
+    if args.command == "studio":
+        return _studio_command(args)
     if args.command == "key":
         # Works on the real environment: what the shell exports vs the Keychain.
         return _key_command(args.action, args.openai)
@@ -551,6 +585,91 @@ def main(argv: list[str] | None = None) -> int:
         _restore_handlers(restore)
         if _OUTCOME and not json_mode and _interactive() and time.monotonic() - started >= NOTIFY_AFTER:
             signal_done(_OUTCOME["text"])
+
+
+# ------------------------------------------------------------------ Venture Studio
+
+
+def where_report(folder: str, report: dict) -> dict:
+    """`studio status --where DIR`: is DIR inside a Studio library, and where would a build of it write?"""
+    from . import studio
+    from .pipeline import default_out_dir
+
+    path = Path(folder).expanduser().resolve()
+    out = default_out_dir([path])
+    found: dict = {"path": str(path), "output": str(out), "inside": None, "library": None, "root": None, "output_inside": None, "elsewhere": None}
+    if not report.get("installed"):
+        return {**found, "inside": False, "output_inside": False}  # no Studio, no libraries
+    if not report.get("available"):
+        return found  # couldn't tell
+    libs = [studio.Library(0, lib["path"], lib["name"]) for lib in report.get("libraries") or []]
+    roots = [lib.path for lib in libs]
+    root = studio.inside_library(path, roots)
+    out_root = studio.inside_library(out, roots)
+    lib = next((x for x in libs if x.path == (root or out_root)), None)
+    elsewhere = studio.elsewhere_for(out, lib, roots) if out_root is not None and lib is not None else None
+    found.update(
+        inside=root is not None, library=lib.name if lib else None, root=lib.path if lib else None, output_inside=out_root is not None,
+        elsewhere=str(elsewhere) if elsewhere else None,
+    )
+    return found
+
+
+def _where_lines(w: dict) -> list[str]:
+    if w["inside"] is None:
+        return [f"Couldn't tell whether {w['path']} is inside a Venture Studio library."]
+    lines = [
+        f"{w['path']} is inside the Venture Studio library {w['library']!r} ({w['root']})." if w["inside"]
+        else f"{w['path']} isn't inside a Venture Studio library."
+    ]
+    if w["output_inside"]:
+        lines.append(
+            f"A build of it writes to {w['output']} by default, inside the library"
+            + (f": in Terminal, Roughcut offers {w['elsewhere']} instead (or choose a folder with -o)." if w["elsewhere"] else ": choose a folder outside it with -o.")
+        )
+    return lines
+
+
+def _studio_command(args) -> int:
+    report = studio_report(offline=args.offline, cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None)
+    if args.where:
+        report["where"] = where_report(args.where, report)
+    if args.json:
+        print(json.dumps(report))
+        return 0
+    from .studio import status_lines
+
+    for line in status_lines(report):
+        print(line)
+    if args.where:
+        for line in _where_lines(report["where"]):
+            print(line)
+    return 0
+
+
+def offer_outside_library(inputs: list[Path], cache_dir: Path | None, ask=None) -> Path | None:
+    """Terminal builds with the default output folder: when it would land inside a Venture Studio library,
+    offer a folder outside every library (~/Movies/Roughcut/<library>/<path below it>). Its answer, or None."""
+    from . import studio, versions
+    from .pipeline import default_out_dir
+
+    out = default_out_dir(inputs).expanduser().resolve()
+    guard, _ = studio.output_guard(out, cache_dir=cache_dir)
+    if guard is None or guard.elsewhere is None or versions.entries(out):
+        return None  # an existing project folder keeps its versions where they are (the run warns)
+    print(
+        f"The default output folder, {out}, is inside the Venture Studio library {guard.library.name!r}. "
+        "Studio would catalog everything Roughcut writes there."
+    )
+    try:
+        answer = (ask or input)(f"Save this cut in {guard.elsewhere} instead? [Y/n] ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer in ("", "y", "yes"):
+        print(f"Saving in {guard.elsewhere}.\n")
+        return guard.elsewhere
+    print("Keeping the default folder (the paper edit's Warnings will say it's inside the library).\n")
+    return None
 
 
 # ------------------------------------------------------------------ walking away from a long run
@@ -661,6 +780,9 @@ def _run(args, json_mode: bool) -> int:
                 graphics=args.graphics,
             )
         else:
+            out = Path(args.out) if args.out else None
+            if out is None and args.menu and not json_mode and _interactive():
+                out = offer_outside_library([Path(p) for p in args.inputs], Path(args.cache_dir).expanduser() if args.cache_dir else None)
             if args.provider in ("anthropic", "claude-code"):
                 from .providers.anthropic_provider import resolve_model
 
@@ -674,7 +796,7 @@ def _run(args, json_mode: bool) -> int:
                 context = "\n\n".join(t for t in (args.context, _read(args.context_file)) if t.strip())
             opts = Options(
                 inputs=[Path(p) for p in args.inputs],
-                out=Path(args.out) if args.out else None,
+                out=out,
                 context=context,
                 preset_brief=args.preset_brief.strip(),
                 script=_read(args.script) or None,

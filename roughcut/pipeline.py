@@ -729,6 +729,27 @@ def name_timelines(rough: Timeline, stringout: Timeline | None, name: str, versi
         stringout.name = f"{base} - Stringout v{version}"
 
 
+def studio_guard(out_dir: Path, cache_dir: Path | None) -> tuple[str | None, str | None]:
+    """(warning, note) about an output folder inside a Venture Studio library, checked before anything is written there.
+
+    The warning goes in the log and the paper edit's Warnings; the note (Studio couldn't be checked) only in the log.
+    Both None when the folder is outside every library or Studio isn't installed. Never stops a run.
+    """
+    from .studio import output_guard
+
+    try:
+        guard, note = output_guard(out_dir, cache_dir=cache_dir)
+    except Exception as e:  # noqa: BLE001 - Studio never stops a run
+        return None, f"Couldn't check whether the output folder is inside a Venture Studio library: {e}"
+    return (guard.message if guard else None), note
+
+
+def _log_studio(warning: str | None, note: str | None) -> None:
+    for line in (warning, note):
+        if line:
+            log(line)
+
+
 def start_log(out_dir: Path, command: str) -> None:
     """Every run leaves roughcut.log in its output folder: what ran, and how it ended."""
     from .analyze import log_to
@@ -767,7 +788,9 @@ def build(opts: Options) -> Result:
     out_dir = (opts.out or default_out_dir(opts.inputs)).expanduser().resolve()
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
     _plan_saved_at(None)
+    studio_warning, studio_note = studio_guard(out_dir, opts.cache_dir)  # before the folder is created
     start_log(out_dir, "build")
+    _log_studio(studio_warning, studio_note)
 
     # Check the key before spending minutes on transcription: a rejected key
     # is fatal, never a silent fallback to the stringout.
@@ -791,7 +814,7 @@ def build(opts: Options) -> Result:
     visual_log = None
 
     usage = []
-    extra_warnings: list[str] = []
+    extra_warnings: list[str] = [studio_warning] if studio_warning else []
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision
@@ -974,7 +997,9 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     """
     _plan_saved_at(None)
     _require_output_folder(out_dir)
+    studio_warning, studio_note = studio_guard(out_dir, opts.cache_dir)
     start_log(out_dir, "render")
+    _log_studio(studio_warning, studio_note)
     analysis, saved = _load_saved(out_dir)
     settings = saved.get("settings") or {}
     opts = render_options(opts, settings, overrides)
@@ -1015,7 +1040,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     version = versions.next_number(out_dir)
     rough, stringout = make_timelines(plan, analysis, opts, name)
     name_timelines(rough, stringout, name, version, opts.style, plan.source)
-    graphics_warnings: list[str] = missing_media(analysis, rough, stringout)
+    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + missing_media(analysis, rough, stringout)
     placed, with_graphics = [], analysis
     planned_graphics, graphics_note = None, None
     usage: list = []
@@ -1437,7 +1462,9 @@ def revise(
     out_dir = out_dir.expanduser().resolve()
     _plan_saved_at(None)
     _require_output_folder(out_dir)
+    studio_warning, studio_note = studio_guard(out_dir, opts.cache_dir)
     start_log(out_dir, "revise")
+    _log_studio(studio_warning, studio_note)
     analysis, saved = _load_saved(out_dir)
     settings = dict(saved.get("settings") or {})
     if "context" not in settings and (out_dir / "prompt.md").is_file():
@@ -1476,7 +1503,7 @@ def revise(
         problem = gfx.renderer_problem()
         if problem:
             raise RoughcutError(problem)
-    extra_warnings: list[str] = []
+    extra_warnings: list[str] = [studio_warning] if studio_warning else []
     opts = replace(opts, graphics_logo=_saved_logo(settings, extra_warnings if opts.graphics else []))
     measure_missing_levels(analysis, opts)
 

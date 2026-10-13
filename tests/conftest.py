@@ -35,6 +35,13 @@ def spread_words(start: float, end: float, sentence: str) -> list[dict]:
     ]
 
 
+@pytest.fixture(autouse=True)
+def _no_venture_studio(tmp_path_factory, monkeypatch):
+    """No test reads a real Venture Studio folder on the machine running it: Studio "isn't installed"
+    unless a test points ROUGHCUT_STUDIO_DIR at a fake one."""
+    monkeypatch.setenv("ROUGHCUT_STUDIO_DIR", str(tmp_path_factory.getbasetemp() / "no-venture-studio"))
+
+
 def ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], check=True)
 
