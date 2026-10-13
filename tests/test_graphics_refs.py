@@ -226,6 +226,18 @@ def test_a_disk_that_stops_answering_is_a_warning_not_a_hang(pictures, tmp_path,
     assert time.monotonic() - t0 < 3 and "look.png" in warnings[0] and "didn't open" in warnings[0]
 
 
+def test_a_converter_that_hangs_is_given_up_on(pictures, tmp_path, monkeypatch):
+    path = pictures / "look.png"
+    path.write_bytes(png_bytes(16, 16, (1, 1, 1, 255)))
+    monkeypatch.setattr(references, "CONVERT_SECONDS", 0.2)
+    monkeypatch.setattr(references, "KILL_GRACE", 0.2)
+    monkeypatch.setattr(references, "run_text", lambda cmd, **kw: time.sleep(30))  # ignores its own timeout, as a hung read on a share can
+    t0 = time.monotonic()
+    warnings: list[str] = []
+    assert references.ingest([path], tmp_path / "out", warnings) == []
+    assert time.monotonic() - t0 < 5 and warnings == ["The reference image look.png took longer than 0.2 s to convert, so it was left out."]
+
+
 def test_saved_names_are_checked_before_they_are_read(tmp_path):
     good = "graphics/references/R01-abcdef.jpg"
     assert references.stored_names([good, good, "../etc/passwd", "/abs/R01-abcdef.jpg", 5, None, "graphics/references/R1-abc.jpg"]) == [good]

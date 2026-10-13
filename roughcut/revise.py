@@ -541,8 +541,9 @@ def change_items(
             tail = "If you meant how the graphics look, attach reference images or tick Redesign graphics."
             body = f"This version plays the same lines, B-roll and graphics as {version}. "
         else:
-            tail = "This cut has no graphics: ask for them in your notes, for example a lower third when someone is named."
-            body = f"This version plays the same lines and B-roll as {version}. "
+            told = any("no graphics" in n for n in advice)  # the notes already say it
+            tail = "" if told else "This cut has no graphics: ask for them in your notes, for example a lower third when someone is named."
+            body = f"This version plays the same lines and B-roll as {version}." + ("" if told else " ")
         return advice + [body + tail], True
     items = [_length_item(before_seconds, after_seconds)] if before_seconds is not None else []
     return items + notes + deltas + plan_changes + ([] if gfx_changes else gfx_same), False

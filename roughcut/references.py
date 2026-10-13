@@ -39,6 +39,7 @@ MAX_SOURCE_BYTES = 40 * 1024 * 1024  # a bigger picture is left out
 LONG_EDGE = 1600  # px: larger pictures are scaled down, never up
 STAT_SECONDS = 15.0  # a share that doesn't answer a stat or a read in this long
 CONVERT_SECONDS = 60.0  # one picture's ffmpeg (or sips) run
+KILL_GRACE = 10.0  # how much longer a run that ignores being killed (a hung read on a share) is waited for
 
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff", ".bmp", ".heic", ".heif"}
 KINDS = "PNG, JPEG, WebP, GIF, TIFF, BMP or HEIC"
@@ -98,7 +99,7 @@ class ReferenceSet:
             f"The editor attached {n} reference image{'s' if n != 1 else ''} showing the look they want for the graphics. "
             "Match their typography, colour, layering, spacing, shape language and the energy of motion they suggest. "
             "Do not copy their words, logos, brand marks or photographs. This video's own words, name spellings and brand "
-            "(the preset's palette, fonts and logo) win where they conflict."
+            "(the preset's palette, fonts and logo) win where they conflict. They are guidance only: never put them in a design."
         )
 
 
@@ -232,6 +233,12 @@ def _convert(src: Path, dest: Path, *, heic: bool) -> str | None:
             return f"can't be opened ({e.strerror or type(e).__name__})"
 
 
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    """A tool run on the editor's picture, given CONVERT_SECONDS: killed after that, and (since a read that hangs in the
+    kernel on a stalled share can outlive the kill) left behind in its thread a little later."""
+    return bounded(run_text, cmd, seconds=CONVERT_SECONDS + KILL_GRACE, what=f"{cmd[0]} on a reference image", timeout=CONVERT_SECONDS)
+
+
 def _ffmpeg_jpeg(src: Path, dest: Path) -> str | None:
     """None if ffmpeg wrote the stored JPEG, "timeout", or "failed". Metadata (EXIF, GPS) is not copied."""
     cmd = [
@@ -239,8 +246,8 @@ def _ffmpeg_jpeg(src: Path, dest: Path) -> str | None:
         "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-vf", _FILTER, "-q:v", "3", "-update", "1", str(dest),
     ]
     try:
-        proc = run_text(cmd, timeout=CONVERT_SECONDS)
-    except subprocess.TimeoutExpired:
+        proc = _run(cmd)
+    except (subprocess.TimeoutExpired, Stalled):
         return "timeout"
     except OSError:  # no ffmpeg
         return "failed"
@@ -249,7 +256,7 @@ def _ffmpeg_jpeg(src: Path, dest: Path) -> str | None:
 
 def _sips_jpeg(src: Path, dest: Path) -> str | None:
     try:
-        proc = run_text(["sips", "-s", "format", "jpeg", str(src), "--out", str(dest)], timeout=CONVERT_SECONDS)
-    except (subprocess.TimeoutExpired, OSError) as e:
+        proc = _run(["sips", "-s", "format", "jpeg", str(src), "--out", str(dest)])
+    except (subprocess.TimeoutExpired, Stalled, OSError) as e:
         return str(e)
     return None if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0 else "sips failed"

@@ -1726,12 +1726,13 @@ def revise(
         again = "Redesigning the graphics: the new reference images set the look."
     elif plan.redesign_graphics == "yes":
         again = "Redesigning the graphics: your notes ask for a different look."
-    if again:
+    if again and plan.graphics:
         settings_notes.append(again)
-        if not plan.graphics:
-            settings_notes.append("This cut has no graphics to redesign: ask for some in your notes, for example a lower third when someone is named.")
         if carry is not None:
             carry = {"designs": {}, "paths": {}, "house_style": "", "notes": {}}  # nothing carried: references and notes define the look
+    elif again:
+        settings_notes.append("This cut has no graphics to redesign: ask for some in your notes, for example a lower third when someone is named.")
+        again = ""
     for note in settings_notes:
         log(note)
 

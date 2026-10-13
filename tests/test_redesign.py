@@ -290,3 +290,19 @@ def test_the_command_line_redesigns_and_prints_what_changed(footage, tmp_path, m
     capsys.readouterr()
     assert main(["revise", str(out)]) == 1  # still needs something to do
     assert "Say what to change" in capsys.readouterr().err
+
+
+def test_redesigning_a_cut_that_has_no_graphics_says_so(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
+    out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, plan=plan_of())
+    provider.plan = {**CANNED_PLAN, "graphics": []}  # the reviser drops them all
+    before = len(asked(provider))
+    result = pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)
+    assert len(asked(provider)) == before
+    note = "This cut has no graphics to redesign: ask for some in your notes, for example a lower third when someone is named."
+    assert note in result.changes["items"]
+    assert not any(i.startswith("Redesigning the graphics") for i in result.changes["items"])
+    assert any(i.startswith("Graphics: ") and "2 removed" in i for i in result.changes["items"])  # they went with the plan
+
+    again = pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)  # nothing else changed now
+    assert again.changes["unchanged"] is True
+    assert again.changes["items"] == [note, "This version plays the same lines and B-roll as v2."]
