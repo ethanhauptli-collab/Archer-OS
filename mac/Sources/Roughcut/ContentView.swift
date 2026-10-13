@@ -221,6 +221,7 @@ struct BuildForm: View {
                         TextField("Graphics style", text: $model.options.graphicsStyle, prompt: Text("Brand colors, fonts and mood, or pick a preset above"), axis: .vertical)
                             .lineLimit(1...4)
                         LogoPicker()
+                        ReferenceImagesWell(references: $model.options.graphicsReferences)
                         if !model.options.graphicsLook.isEmpty {
                             HStack {
                                 Text("Matching \(model.options.graphicsLook.count) approved graphic\(model.options.graphicsLook.count == 1 ? "" : "s") from an earlier video")

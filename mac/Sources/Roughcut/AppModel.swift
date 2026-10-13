@@ -54,6 +54,10 @@ final class AppModel {
     var reviseTarget = ""
     /// Who re-plans a cut made without AI (it has no planner of its own to reuse).
     var reviseProvider: ModelProvider = .anthropic
+    /// Pictures of the look wanted for the graphics, for this revision only (the build form's are `options.graphicsReferences`).
+    var reviseReferences: [URL] = []
+    /// Design every graphic again with this revision. Off until asked; adding a picture asks.
+    var reviseRedesign = false
 
     // Finished runs, newest first
     private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
@@ -100,6 +104,13 @@ final class AppModel {
 
     func status(of stage: Stage) -> StageStatus {
         stageStatus[stage] ?? .pending
+    }
+
+    // MARK: Reference images
+
+    /// At launch: pasted pictures older than 30 days that the saved list doesn't use are removed from the app's References folder.
+    func tidyReferences() {
+        ReferenceFiles.removeStale(keeping: options.graphicsReferences)
     }
 
     // MARK: Sources
@@ -153,7 +164,10 @@ final class AppModel {
     func revise(_ result: RunResult) {
         guard let cli = resolveCLI() else { return }
         let text = reviseNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, ReviseOptions.lengthProblem(reviseTarget) == nil else { return }
+        // Pictures and the redesign count only for a cut with graphics; any of them can stand in for notes.
+        let references = ReviseOptions.usableReferences(reviseReferences, for: result)
+        let redesign = ReviseOptions.usableRedesign(reviseRedesign, for: result)
+        guard ReviseOptions.canStart(notes: text, references: references, redesign: redesign), ReviseOptions.lengthProblem(reviseTarget) == nil else { return }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-notes-\(UUID().uuidString).txt")
         do {
             try text.write(to: file, atomically: true, encoding: .utf8)
@@ -164,7 +178,10 @@ final class AppModel {
         }
         notesFile = file
         let provider = ReviseOptions.planner(reviseProvider, form: options, doctor: doctor)
-        let revise = ReviseOptions.revising(result, notesFile: file, targetLength: reviseTarget, provider: provider, form: options)
+        let revise = ReviseOptions.revising(
+            result, notesFile: file, targetLength: reviseTarget, provider: provider, form: options,
+            references: references, redesignGraphics: redesign
+        )
         run(cli: cli, arguments: revise.arguments(), kind: .revise, from: result)
     }
 
@@ -271,6 +288,8 @@ final class AppModel {
             if runKind == .revise {
                 reviseNotes = ""  // they're in this version now (and in its paper edit)
                 reviseTarget = ""
+                reviseReferences = []  // the CLI stored them with this version
+                reviseRedesign = false
             }
             show(result)
         case .returned(let source, let problem):
@@ -288,6 +307,8 @@ final class AppModel {
         if result.outDir != draftFolder {
             reviseNotes = ""
             reviseTarget = ""
+            reviseReferences = []
+            reviseRedesign = false
             reviseProvider = ReviseOptions.defaultProvider(form: options, doctor: doctor)
             draftFolder = result.outDir
         }

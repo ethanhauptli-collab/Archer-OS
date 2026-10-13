@@ -41,7 +41,10 @@ struct RoughcutApp: App {
                     Text(model.updateOutput ?? "")
                 }
                 .onAppear { appDelegate.model = model }
-                .task { await model.refreshDoctor() }
+                .task {
+                    model.tidyReferences()
+                    await model.refreshDoctor()
+                }
         }
         .windowResizability(.contentMinSize)
         .commands {

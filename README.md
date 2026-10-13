@@ -41,13 +41,14 @@ cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics
 
 1. Drop your footage folder (or clips) on the window.
 2. Pick a **Preset** (Venture OC or Save the Kid fill in the brief, length, pacing and graphics look), then add to the brief what's special about this video: who's in it, the must-keep moments, the angle.
-3. Optional: a **Music bed** song, a different **Dialogue level**, **Motion graphics** and a logo.
+3. Optional: a **Music bed** song, a different **Dialogue level**, **Motion graphics** with a logo and **Reference images** (paste or drop screenshots of the look you want).
 4. **Build Rough Cut**. The checklist shows each step; you can switch to another app, and the Mac stays awake and tells you when it's done.
 5. **Open in Final Cut Pro**, choose a library, and open the project the result screen names (for example "OC Food Fest - Rough Cut v1 (tight, Opus)").
 
 After a cut you can:
 - **Re-cut** it at another pacing or format, or with punch-ins on or off, with no AI call.
-- **Revise with notes**: type what to change ("tighter hook, drop the second interview line, more drone over the intro") and Claude re-plans it as a new version.
+- **Revise with notes**: type what to change ("tighter hook, drop the second interview line, more drone over the intro") and Claude re-plans it as a new version. With graphics in the cut you can also paste or drop reference images and tick **Redesign the graphics** to have them designed again from your notes and pictures.
+- Read **What changed in this version** under the summary: after a revision or re-cut it lists what differs from the version before, or says that nothing a viewer would see did and what to try.
 - Open the **Paper Edit**.
 
 **Recent rough cuts** on the main screen reopen earlier results.

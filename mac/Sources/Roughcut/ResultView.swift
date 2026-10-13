@@ -11,8 +11,13 @@ struct ResultView: View {
     @State private var recutPunchIn: Bool? = nil
     @State private var showWarnings = false
 
-    private var notesAreEmpty: Bool {
-        model.reviseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// Revise has something to go on: notes, reference pictures, or a redesign of the graphics.
+    private var canRevise: Bool {
+        ReviseOptions.canStart(
+            notes: model.reviseNotes,
+            references: ReviseOptions.usableReferences(model.reviseReferences, for: result),
+            redesign: ReviseOptions.usableRedesign(model.reviseRedesign, for: result)
+        ) && ReviseOptions.lengthProblem(model.reviseTarget) == nil
     }
 
     private var subtitle: String {
@@ -98,6 +103,10 @@ struct ResultView: View {
                                 .lineLimit(4)
                         }
                     }
+                }
+
+                if let changes = result.changes, changes.hasContent {
+                    WhatChangedBox(changes: changes)
                 }
 
                 HStack(spacing: 10) {
@@ -186,6 +195,22 @@ struct ResultView: View {
                                 }
                                 .frame(maxWidth: 420)
                             }
+                            if ReviseOptions.acceptsReferences(result) {
+                                ReferenceImagesWell(references: $model.reviseReferences) {
+                                    // A picture is asked to be matched: the graphics are designed again from it.
+                                    if ReviseOptions.canRedesign(result) {
+                                        model.reviseRedesign = true
+                                    }
+                                }
+                            }
+                            if ReviseOptions.canRedesign(result) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Toggle("Redesign the graphics", isOn: $model.reviseRedesign)
+                                    Text("Notes about how graphics look are applied when this is on; the AI also decides from your words.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             HStack {
                                 TextField("New length", text: $model.reviseTarget, prompt: Text("Same length"))
                                     .frame(maxWidth: 140)
@@ -198,7 +223,7 @@ struct ResultView: View {
                                 Button("Revise") {
                                     model.revise(result)
                                 }
-                                .disabled(notesAreEmpty || ReviseOptions.lengthProblem(model.reviseTarget) != nil)
+                                .disabled(!canRevise)
                             }
                         }
                         .padding(4)
@@ -242,6 +267,50 @@ struct ResultView: View {
             recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
             recutFormat = nil
             recutPunchIn = nil
+        }
+    }
+}
+
+/// What a revision or re-cut changed from the version before: bullets for the items. When nothing a viewer
+/// would see changed, the first line says so in a highlighted (not alarming) style, with what to try.
+struct WhatChangedBox: View {
+    let changes: RunChanges
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                if let lead = changes.highlighted {
+                    Label {
+                        Text(lead)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                }
+                ForEach(Array(changes.bullets.enumerated()), id: \.offset) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        Text(item.element)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .textSelection(.enabled)
+            .padding(4)
+        } label: {
+            HStack(spacing: 8) {
+                Text(RunChanges.heading)
+                if let comparison = changes.comparison {
+                    Text(comparison)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 }
