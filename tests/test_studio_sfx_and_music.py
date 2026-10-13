@@ -151,6 +151,84 @@ def test_a_build_with_sounds_and_music_from_the_same_studio(footage, catalog, fa
     assert changes["unchanged"] is True and not [i for i in changes["items"] if "Studio" in i or "credit" in i.lower()]
 
 
+@pytest.fixture
+def slashed(catalog, fake) -> Path:
+    """The same files, in collections with a slash in their names (Studio allows any characters)."""
+    rel = "Sound Effects/Accents/"
+    fake.snapshot("1700000600-1-1", NOW - 1800, assets=[
+        _asset(1, rel + "whoosh_soft_01.wav", kind="audio", category="audio", provider="Vendor A", license="Standard", duration=1.0),
+        _asset(2, rel + "swoosh_fast_02.wav", kind="audio", category="audio", provider="Vendor B", license="Extended", duration=0.8),
+        _asset(3, rel + "impact_hit_01.wav", kind="audio", category="audio", provider="Vendor B", license="Extended", duration=1.2),
+        _asset(4, "Music/Sunrise.m4a", kind="audio", category="audio", provider="Vendor A", license="Standard", duration=50.0, favorite=1),
+    ], collections={"Hits/Impacts": [1, 2, 3], "Songs/Warm": [4]})
+    return catalog
+
+
+def test_a_name_is_a_kit_file_only_when_it_ends_in_json():
+    """One rule for --sfx-from and --music-from: a slash in a collection's name doesn't make it a path."""
+    for name in ("Hits/Impacts", "collection:Hits/Impacts", "kit:Promo/Kit", "/Volumes/Media/Sound Effects", "kits/promo-kit", "Promo Sounds"):
+        assert not sfx.is_kit_file(name), name
+    for name in ("promo-kit.json", "kits/promo.JSON", "/Users/you/Kits/promo kit.json", "~/promo.json", " promo.json "):
+        assert sfx.is_kit_file(name), name
+    assert not sfx.is_kit_file("collection:promo.json")
+
+
+def test_a_collection_with_a_slash_in_its_name_works_unprefixed_for_sounds_and_songs(footage, slashed, fake, provider, tmp_path, capsys):
+    out, cache = tmp_path / "out", tmp_path / "cache"
+    base = ["build", str(footage), "-o", str(out), "--name", "footage", *_args(footage, out, cache)]
+    with untouched(fake.dir, slashed):
+        assert main(base + ["--sfx-from", "Hits/Impacts", "--music-from", "Songs/Warm", "--music-max", "1"]) == 0
+    saved = json.loads((out / "plan.json").read_text())
+    assert saved["settings"]["sfx_from"] == ["Hits/Impacts"], "kept as typed, never turned into a path"
+    assert sorted(s.name for s in sfx.Pool.from_json(saved["settings"]["sfx_pool"]).sounds) == ["impact_hit_01.wav", "swoosh_fast_02.wav", "whoosh_soft_01.wav"]
+    root = ET.parse(next(out.glob("*.fcpxml"))).getroot()
+    assert _accents(root)
+    assert {_src(root, el) for el in _project(root, "Rough Cut").iter("asset-clip") if str(el.get("audioRole", "")).startswith("music")} == {
+        slashed.as_uri() + "/Music/Sunrise.m4a"}
+
+    # The spelling the Mac app and a preset use for a name that isn't typed in a build: the same name, a warning when it fails.
+    again = tmp_path / "again"
+    assert main(["build", str(footage), "-o", str(again), "--name", "footage", *_args(footage, again, cache), "--preset-sfx-from=Hits/Impacts"]) == 0
+    assert len(json.loads((again / "plan.json").read_text())["settings"]["sfx_pool"]["sounds"]) == 3
+    assert json.loads((again / "plan.json").read_text())["settings"]["sfx_from"] == ["Hits/Impacts"]
+
+    # A re-cut and a render with the name keep it too, and the saved pool is replaced by that collection's.
+    assert main(["render", str(out), "--sfx-from", "Hits/Impacts"]) == 0
+    assert json.loads((out / "plan.json").read_text())["settings"]["sfx_from"] == ["Hits/Impacts"]
+
+    # A saved preset with the name works the same way.
+    from roughcut import presets
+
+    assert main(["preset", "save", "slashes", "--brief", "Promo.", "--sfx-from", "Hits/Impacts"]) == 0
+    assert presets.flags(presets.load("slashes"), "build").count("--preset-sfx-from=Hits/Impacts") == 1
+    viapreset = tmp_path / "viapreset"
+    assert main(["build", str(footage), "-o", str(viapreset), "--name", "footage", *_args(footage, viapreset, cache), "--preset", "slashes"]) == 0
+    assert len(json.loads((viapreset / "plan.json").read_text())["settings"]["sfx_pool"]["sounds"]) == 3
+    capsys.readouterr()
+
+
+def test_a_name_with_a_slash_that_studio_lacks_says_what_it_can_take(footage, slashed, fake, provider, tmp_path, capsys):
+    out, cache = tmp_path / "out", tmp_path / "cache"
+    base = ["build", str(footage), "-o", str(out), "--name", "footage", *_args(footage, out, cache)]
+    for typo in ("Hits/Impact", "kits/promo-kit"):
+        assert main(base + ["--sfx-from", typo]) == 1 and not out.exists(), "stopped before its folder was made"
+        err = capsys.readouterr().err
+        assert f"Venture Studio has no collection or kit named {typo!r}" in err
+        assert "path ending in .json" in err, "a kit file is given by a path that says so"
+        assert str(Path.cwd()) not in err, "not turned into a path nobody typed"
+    # A folder of sounds is still told apart, whether or not Studio is there.
+    folder = tmp_path / "Sounds"
+    folder.mkdir()
+    for studio_dir in (str(fake.dir), str(tmp_path / "nowhere")):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(studio.STUDIO_ENV, studio_dir)
+            assert main(base + ["--sfx-from", str(folder)]) == 1 and not out.exists()
+            assert "that's a folder" in capsys.readouterr().err
+    # Not typed (a preset's): a warning, and the cut goes on.
+    assert main(base + ["--preset-sfx-from", "Hits/Impact"]) == 0
+    assert any("no collection or kit named 'Hits/Impact'" in w for w in json.loads((out / "result.json").read_text())["warnings"])
+
+
 def _count(out: Path, version: int) -> int:
     return len(_accents(ET.parse(next(out.glob(f"*v{version}.fcpxml"))).getroot()))
 

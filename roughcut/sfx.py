@@ -51,7 +51,7 @@ FILE_SECONDS = 20.0  # one file's stat, probe and measurements together
 KIT_SECONDS = 20.0  # reading a kit file Studio exported (a small JSON file, maybe on a share)
 SCAN_IDLE_SECONDS = 30.0  # a folder listing has stopped answering when no entry has come for this long
 SCAN_TOTAL_SECONDS = 180.0  # ... and is cut short, keeping what it listed, after this long in all (a slow share, still answering)
-POOL_SECONDS = 240.0  # the whole pool; the rest waits for the next run (each sound is cached once read)
+POOL_SECONDS = 240.0  # the whole pool; the rest waits for a new build or new --sfx/--sfx-from (each sound is cached once read)
 SCAN_LIMIT = 50_000  # entries looked at in one folder tree
 CACHE_NAME = "sfx-v1.json"
 IMPORT_MARKER = ".venture-studio-import-incomplete.json"  # a folder Studio is still copying files into
@@ -179,11 +179,30 @@ def _which(name: str) -> tuple[str | None, str]:
 
 
 def is_kit_file(name: str) -> bool:
-    """A --sfx-from value that names a kit file Studio exported, not a collection or kit in its catalog
-    ("collection:Hits/Impacts" is a collection, slash and all)."""
+    """A --sfx-from value that names a kit file Studio exported: it ends in .json (the rule --music-from uses too).
+    Anything else is a collection or kit in Studio's catalog, whatever characters its name has: a slash is part of a
+    name ("Hits/Impacts"), not a sign of a path."""
     if _which(name)[0]:
         return False
-    return name.strip().lower().endswith(".json") or "/" in name
+    return name.strip().lower().endswith(".json")
+
+
+def _path_like(name: str) -> bool:
+    """A name nobody prefixed with kit: or collection: that has a slash in it, so it may have been meant as a path."""
+    return _which(name)[0] is None and "/" in name
+
+
+def _is_folder(name: str) -> bool:
+    """Whether `name` is a folder on this Mac (looked at under a deadline: it may be on a share that stopped answering)."""
+    path = os.path.expanduser(name.strip())
+    try:
+        return bool(bounded(os.path.isdir, path, seconds=KIT_SECONDS, what=f"{Path(path).name}'s folder"))
+    except (Stalled, OSError, ValueError):
+        return False
+
+
+FOLDER_TEXT = "that's a folder. Sound effects in a folder go with --sfx."
+KIT_FILE_HINT = " If you meant a kit file Studio exported, give its path ending in .json."
 
 
 def sources(
@@ -214,7 +233,7 @@ def sources(
             problem(name, f"--sfx-from {name}: the file didn't answer in {KIT_SECONDS:g} s (a network share that stopped responding?).")
             continue
         except IsADirectoryError:
-            problem(name, f"--sfx-from {name}: that's a folder. Sound effects in a folder go with --sfx.")
+            problem(name, f"--sfx-from {name}: {FOLDER_TEXT}")
             continue
         except studio.StudioUnavailable as e:
             problem(name, f"--sfx-from {name}: {e.reason}.")
@@ -241,9 +260,13 @@ def sources(
                 is_collection, is_kit = studio.named(con, bare)
                 if want == "kit" and not is_kit or want == "collection" and not is_collection or not (is_collection or is_kit):
                     what = want or "collection or kit"
+                    if _path_like(name) and _is_folder(name):
+                        problem(name, f"--sfx-from {name}: {FOLDER_TEXT}")
+                        continue
                     problem(name, (
                         f"--sfx-from {name}: Venture Studio has no {what} named {bare!r} in its catalog snapshot from {copy.snapshot.when()} "
                         "(one made since then shows up after Studio's next snapshot: in Studio, click Back up catalog now)."
+                        + (KIT_FILE_HINT if _path_like(name) else "")
                     ))
                     continue
                 use_kit = want == "kit" or (want is None and is_kit and not is_collection)
@@ -262,10 +285,18 @@ def sources(
                         known_seconds=a.duration, root=a.library_root, from_studio=True,
                     ))
     except studio.StudioUnavailable as e:
-        out.warnings.append(
-            f"Sound effects from Venture Studio ({', '.join(catalog_names)}): {e.reason if not e.silent else 'Venture Studio is not installed on this Mac'}. "
-            "This cut has none from there."
-        )
+        # Studio can't say what it has. A folder typed here is still a folder; the rest is Studio's problem, a warning.
+        rest = []
+        for name in catalog_names:
+            if _path_like(name) and _is_folder(name):
+                problem(name, f"--sfx-from {name}: {FOLDER_TEXT}")
+            else:
+                rest.append(name)
+        if rest:
+            out.warnings.append(
+                f"Sound effects from Venture Studio ({', '.join(rest)}): {e.reason if not e.silent else 'Venture Studio is not installed on this Mac'}. "
+                "This cut has none from there."
+            )
     return out
 
 
@@ -533,7 +564,7 @@ SKIP_REASONS = {
     "importing": "in a folder Venture Studio is still copying files into",
     "offline": "on a folder or share that's offline or didn't answer",
     "over_cap": f"over the {MAX_FILES} Roughcut reads in one run",
-    "late": "not read in the time a run gives them (the next run reads more)",
+    "late": "not read yet (a run has only so long; a new build, or render with --sfx or --sfx-from again, reads the rest)",
 }
 
 
@@ -785,7 +816,12 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
         + ")" + (f" {_skipped_text(pool)}" if pool.skipped else "")
     )
     if pool.skipped.get("late"):
-        pool.notes.append(f"{pool.skipped['late']['count']} sound effects weren't read in the {POOL_SECONDS:g} s a run gives them; the next run reads more (each one is cached once read).")
+        n = pool.skipped["late"]["count"]
+        pool.notes.append(
+            f"{n} sound effect{'s' if n != 1 else ''} {'were' if n != 1 else 'was'}n't read in the {POOL_SECONDS:g} s a run gives them. Re-cuts and revisions "
+            "place the sounds read so far, again; build again, or render with --sfx FOLDER (or --sfx-from NAME) again, to read the rest "
+            "(each one is cached once read, so reading again is quick)."
+        )
     return pool
 
 

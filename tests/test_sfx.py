@@ -653,6 +653,46 @@ def test_a_folder_given_to_sfx_from_says_to_use_sfx(tmp_path):
         sfx.sources([], [str(folder)], strict=[str(folder)])
 
 
+def test_a_partly_read_pool_says_what_reads_more_and_only_that_does(footage, sfx_folder, tmp_path, fake, monkeypatch):
+    """The pool's time limit leaves some sounds unread. A re-cut places the saved pool again (the same sounds, so the same
+    cut), so "the next run reads more" was false for it; the note names what really does: another build, or new --sfx."""
+    import types
+
+    real_time, skew, measured = time, [0.0], []
+    real_measure = sfx._measure
+
+    def measure(*a, **k):
+        measured.append(a[0].name)
+        out = real_measure(*a, **k)
+        if len(measured) == 2:
+            skew[0] += 1000.0  # two sounds read, then the run's time is up
+        return out
+
+    out = tmp_path / "out"
+    fake.plan = dict(CANNED_PLAN, sfx="soft")
+    with monkeypatch.context() as m:
+        m.setattr(sfx, "time", types.SimpleNamespace(monotonic=lambda: real_time.monotonic() + skew[0], sleep=real_time.sleep))
+        m.setattr(sfx, "_measure", measure)
+        built = pipeline.build(Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=tmp_path / "cache", sfx=(str(sfx_folder),), workers=1))
+    assert len(measured) == 2
+    pool = sfx.Pool.from_json(json.loads((out / "plan.json").read_text())["settings"]["sfx_pool"])
+    assert len(pool.sounds) == 2 and pool.skipped["late"]["count"] == 4  # the sixth, a long one, is only found out to be long when read
+    note = next(n for n in pool.notes if "weren't read" in n)
+    assert "next run" not in note and "build again" in note and "--sfx" in note and "--sfx-from" in note
+    assert "next run" not in sfx.SKIP_REASONS["late"]
+    assert note in built.report.read_text()
+
+    # A re-cut places the same two sounds again and doesn't read the folder, and its report still tells how to get the rest.
+    again = pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
+    assert len(sfx.Pool.from_json(json.loads((out / "plan.json").read_text())["settings"]["sfx_pool"]).sounds) == 2
+    assert note in again.report.read_text() and "next run" not in again.report.read_text()
+
+    # What the note names does read the rest (the two read before are cached).
+    assert main(["render", str(out), "--sfx", str(sfx_folder)]) == 0
+    full = sfx.Pool.from_json(json.loads((out / "plan.json").read_text())["settings"]["sfx_pool"])
+    assert len(full.sounds) == 5 and "late" not in full.skipped and not [n for n in full.notes if "weren't read" in n]
+
+
 def test_a_slow_share_that_keeps_answering_loses_no_sounds(sfx_folder, tmp_path, monkeypatch):
     """The deadline is about silence: a listing that takes minutes because the share is slow, one entry after another, finishes."""
     real = os.scandir

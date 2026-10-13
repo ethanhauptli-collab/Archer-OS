@@ -80,8 +80,8 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     )
     fx.add_argument(
         "--sfx-from", action="append", metavar="NAME",
-        help="sound effects from a Venture Studio collection by name (\"kit:NAME\" for a kit, \"collection:NAME\" when both have it), "
-        "or a kit file Studio exported (.json). Read only. Repeat for more",
+        help="sound effects from a Venture Studio collection by name (\"kit:NAME\" for a kit, \"collection:NAME\" when both have it; "
+        "a slash in the name is fine), or a kit file Studio exported (a path ending in .json). Read only. Repeat for more",
     )
     fx.add_argument("--no-sfx", action="store_true", help="no sound-effect accents, even if a preset or the earlier run has them")
     p.add_argument("--name", help="project/event name (default: folder name)")
