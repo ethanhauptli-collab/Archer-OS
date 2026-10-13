@@ -124,6 +124,15 @@ def test_a_missing_folder_is_a_warning_not_a_stop(tmp_path):
     assert pool.sounds == [] and "can't find it" in pool.warnings[0]
 
 
+def test_a_folder_macos_wont_let_us_read_says_how_to_allow_it(sfx_folder, tmp_path, monkeypatch):
+    def denied(*a, **k):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(sfx, "_measure", denied)
+    pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c"))
+    assert pool.sounds == [] and "Privacy & Security" in pool.warnings[-1] and pool.skipped["unreadable"]["count"] == 6
+
+
 def test_the_pool_is_capped_with_every_class_taking_turns():
     def c(name):
         return sfx.Candidate(f"/Volumes/Media/{name}", name)

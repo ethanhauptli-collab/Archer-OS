@@ -169,7 +169,7 @@ roughcut build ~/Movies/OCFoodFest --preset venture-oc --sfx "/Volumes/Media/Sou
 - **Where it lands**: each sound's loudest moment (a riser's end) lands on its frame. Accents keep about 2 seconds apart (a hit beats a pop, a pop a section whoosh), the same file never plays twice within 10 seconds, and each kind takes its sounds in turn, so the same cut gets the same sounds. None go in the Stringout.
 - **Levels**: each one sits 12 dB under the dialogue (9 dB with lots), 6 dB lower where someone is speaking, and never past -1 dBFS, even a 150 ms pop. They're connected clips below the music, on their own role, with an ordinary Volume you can change.
 - **Re-cuts and revisions** place the same sounds again without reading the folder (the sounds Roughcut found, their hit points and levels are saved with the plan), so a sleeping network share doesn't matter. A note like "lose the whooshes" or "more sound design" changes how many. `render --sfx` or `--sfx-from` swaps the sounds; `--no-sfx` takes them off.
-- **A network share** that's offline or stops answering never stalls or fails a run: each file gets a few seconds, and the sounds on a share that doesn't answer are left out with a warning. Each sound is measured once and cached.
+- **A network share** that's offline or stops answering never stalls or fails a run: each file gets up to 20 seconds, the first one that doesn't answer leaves out the rest of that share's sounds with a warning, and macOS asking for access to a folder or network volume is said so. Each sound is measured once and cached.
 
 ## Motion graphics
 

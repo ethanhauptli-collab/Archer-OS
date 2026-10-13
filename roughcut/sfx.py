@@ -575,16 +575,22 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
             return c, e.reason, None
         except FileNotFoundError:
             return c, "gone", None
+        except PermissionError:
+            return c, "denied", None
         except (OSError, MediaError, ValueError) as e:
             return c, "unreadable", str(e)
 
     log(f"reading {len(todo)} sound effects (each is measured once, then cached)")
     with progress.doing(f"reading {len(todo)} sound effects", external=True), ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         results = list(ex.map(one, todo))
-    gone = []
+    gone, denied = [], []
     for c, reason, rec in results:
         if reason == "gone":
             gone.append(c)
+            continue
+        if reason == "denied":
+            denied.append(c)
+            pool.skip("unreadable", c.name)
             continue
         if reason:
             pool.skip(reason, c.name)
@@ -613,6 +619,11 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
         pool.warnings.append(
             f"{len(gone)} sound effect{'s' if len(gone) != 1 else ''} named in Venture Studio or a folder listing "
             f"{'are' if len(gone) != 1 else 'is'} no longer there ({named}); left out."
+        )
+    if denied:
+        pool.warnings.append(
+            f"macOS didn't let Roughcut read {len(denied)} sound effect{'s' if len(denied) != 1 else ''} (in {os.path.dirname(denied[0].path)}): "
+            "Privacy & Security may be asking for access to that folder or network volume. Allow it, then build again."
         )
     pool.sounds.sort(key=lambda s: s.path)
     width = max(2, len(str(len(pool.sounds))))
