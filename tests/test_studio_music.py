@@ -64,7 +64,7 @@ FTS = "CREATE VIRTUAL TABLE assets_fts USING fts5(name, tags); INSERT INTO asset
 
 
 def test_the_listing_is_studios_standalone_audio_with_a_guess(fake, library):
-    fake.snapshot("1700000500-1-1", NOW - 3600, assets=LISTED, collections={"Promo Music": [1, 2, 7, 8]})
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=LISTED, collections={"Promo Music": [1, 2, 7, 8], "Calm": [8]})
     with untouched(fake.dir, library):
         listing = studio.music_listing()
         promo = studio.music_listing(collection="promo music")
@@ -76,6 +76,7 @@ def test_the_listing_is_studios_standalone_audio_with_a_guess(fake, library):
     assert (rows[1]["provider"], rows[1]["license"], rows[1]["path"]) == ("Vendor A", "Standard", f"{library}/Music/Sunrise.m4a")
     assert {i: rows[i]["guess"] for i in (1, 6, 7, 8, 10, 11)} == {1: "music", 6: "sfx", 7: "music", 8: "music", 10: "sfx", 11: "unknown"}
     assert not rows[5]["usable"] and ".flac" in rows[5]["why_not"] and all(rows[i]["usable"] for i in rows if i != 5)
+    assert rows[8]["collections"] == ["Calm", "Promo Music"] and rows[6]["collections"] == []
     assert "catalog snapshot from" in listing.source and "1 h old" in listing.source
 
 
@@ -105,7 +106,7 @@ def test_the_json_listing_is_an_array_and_the_text_says_how_old(fake, library, c
     rows = json.loads(capsys.readouterr().out)
     assert isinstance(rows, list) and rows and all(isinstance(r, dict) and "event" not in r for r in rows)
     assert set(rows[0]) == {"id", "name", "file", "path", "library", "seconds", "length", "provider", "license", "favorite", "tags", "notes",
-                            "guess", "usable", "why_not", "as_of"}
+                            "collections", "guess", "usable", "why_not", "as_of"}
     assert main(["studio", "music", "piano"]) == 0
     text = capsys.readouterr().out
     assert "catalog snapshot from" in text and "3 h old" in text and "Back up catalog now" in text
@@ -135,7 +136,8 @@ def test_a_kit_file_lists_its_audio(tmp_path, monkeypatch, capsys):
 
 
 def _sample_rows(fake) -> list[dict]:
-    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")], assets=LISTED[:2] + LISTED[4:8])
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")], assets=LISTED[:2] + LISTED[4:8],
+                  collections={"Promo Music": [1, 7]})
     return [{**r, "as_of": "the catalog snapshot from 12 Oct 21:04 (14 h old)"} for r in studio.music_listing().rows]
 
 
@@ -150,6 +152,18 @@ def test_swift_fixture_matches_the_listing(fake, monkeypatch):
     assert [set(r) for r in sample] == [set(r) for r in live]
     assert [{k: type(v).__name__ for k, v in r.items()} for r in sample] == [{k: type(v).__name__ for k, v in r.items()} for r in live]
     assert any(r["seconds"] is None for r in sample) and any(not r["usable"] for r in sample) and any(r["favorite"] for r in sample)
+    assert any(r["collections"] for r in sample)
+
+
+def test_the_apps_music_bed_takes_the_audio_types_roughcut_reads():
+    """MusicFiles.extensions in the app is media.AUDIO_EXTS."""
+    import re
+
+    from roughcut.media import AUDIO_EXTS
+
+    swift = (Path(__file__).parents[1] / "mac" / "Sources" / "RoughcutKit" / "StudioMusic.swift").read_text()
+    listed = re.search(r"static let extensions: \[String\] = \[([^\]]*)\]", swift).group(1)
+    assert {"." + e for e in re.findall(r'"(\w+)"', listed)} == AUDIO_EXTS
 
 
 # ---------------------------------------------------------------- --music studio:ID
@@ -208,6 +222,35 @@ def test_a_studio_song_that_cant_be_used_stops_before_the_output_folder(footage,
     assert main(_build(footage, out, "--music", ref)) == 1
     err = capsys.readouterr().err
     assert said in err and f"--music {ref}" in err and not out.exists()
+
+
+def test_a_studio_song_given_by_its_path_is_treated_as_one(footage, songs, fake, tmp_path):
+    """The app adds Studio's songs as plain paths: the run still knows them (tags for the planner, deadlines)."""
+    out = tmp_path / "out"
+    assert main(_build(footage, out, "--music", str(songs["ballad"]), "--music", str(footage / "music" / "music.m4a"))) == 0
+    clips = {Path(c["media"]["path"]).name: c for c in json.loads((out / "analysis.json").read_text())["clips"]}
+    assert clips["Old Ballad.m4a"]["library"]["studio_id"] == 2 and clips["Old Ballad.m4a"]["music_order"] == 0
+    assert "library" not in clips["music.m4a"] and clips["music.m4a"]["music_order"] == 1
+    assert "Venture Studio song: tags: upbeat, energetic." in (out / "prompt.md").read_text()
+
+
+def test_a_song_on_a_share_that_stopped_answering_stops_before_the_output_folder(footage, tmp_path, monkeypatch, capsys):
+    song = footage / "music" / "music.m4a"
+    release = threading.Event()
+    real = Path.exists
+
+    def hung(self, *a, **k):
+        if self == song:
+            release.wait(30)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "exists", hung)
+    monkeypatch.setattr(studio, "FILE_SECONDS", 0.3)
+    out = tmp_path / "out"
+    t0 = time.monotonic()
+    code = main(_build(footage, out, "--music", str(song)))
+    release.set()
+    assert code == 1 and time.monotonic() - t0 < 5 and "didn't answer in 0.3 s" in capsys.readouterr().err and not out.exists()
 
 
 def test_a_studio_song_without_studio_stops_too(footage, tmp_path, monkeypatch, capsys):

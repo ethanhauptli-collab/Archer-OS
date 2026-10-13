@@ -539,11 +539,19 @@ def style_for(opts: Options) -> Style:
 
 
 def music_problem(song: Path | str) -> str | None:
-    """What's wrong with a --music file, or None: one that isn't there is told apart from one roughcut can't read."""
+    """What's wrong with a --music file, or None: one that isn't there is told apart from one roughcut can't read.
+    Looked at with a deadline (studio.FILE_SECONDS): a song on a network share that stopped answering can't hang the run."""
+    from .studio import FILE_SECONDS
+    from .textio import Stalled, bounded
+
     path = Path(song).expanduser()
-    if not path.exists():
+    try:
+        exists, is_file = bounded(lambda: (path.exists(), path.is_file()), seconds=FILE_SECONDS, what="its folder")
+    except Stalled:
+        return f"--music {song}: its folder didn't answer in {FILE_SECONDS:g} s (a network share that stopped answering?)"
+    if not exists:
         return f"--music {song}: can't find that file (moved, renamed, or a typo in the path?)"
-    if not path.is_file() or path.suffix.lower() not in AUDIO_EXTS:
+    if not is_file or path.suffix.lower() not in AUDIO_EXTS:
         return f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})"
     return None
 
@@ -699,8 +707,8 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
     music, studio_songs, dropped = [], [], []
     for song in opts.music:
         if str(Path(song)) in library:
-            # A Venture Studio song: checked with a deadline, and left out (never a stopped run) once the run has started.
-            problem = studio_song_problem(song)
+            # A Venture Studio song: left out (never a stopped run) once the run has started.
+            problem = music_problem(song)
             if problem:
                 dropped.append(f"{problem}; left out of the music bed")
                 log(dropped[-1])

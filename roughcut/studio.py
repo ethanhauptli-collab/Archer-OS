@@ -699,7 +699,40 @@ def _fts_ids(con: sqlite3.Connection, tokens: list[str]) -> set[int] | None:
         return None
 
 
-def audio_row(asset: Asset) -> dict:
+def songs_at(con: sqlite3.Connection, paths: list[str]) -> dict[str, Asset]:
+    """The standalone audio items whose original is at exactly one of `paths` (a song given by its path)."""
+    libs = libraries(con)
+    out: dict[str, Asset] = {}
+    for path in paths:
+        for lib in libs:
+            root = lib.path.rstrip("/") + "/"
+            if not path.startswith(root):
+                continue
+            found = _select(con, [STANDALONE_AUDIO, "a.library_id = ?", "a.relative_path = ?"], [lib.id, path[len(root):]], [])
+            hit = next((a for a in found if a.path == path), None)
+            if hit is not None:
+                out[path] = hit
+                break
+    return out
+
+
+def asset_collections(con: sqlite3.Connection, ids: list[int]) -> dict[int, list[str]]:
+    """The collections each of these items is in, by name."""
+    out: dict[int, list[str]] = {}
+    for n in range(0, len(ids), 500):
+        chunk = ids[n : n + 500]
+        rows = _query(
+            con,
+            f"SELECT ca.asset_id, c.name FROM collection_assets ca JOIN collections c ON c.id = ca.collection_id "
+            f"WHERE ca.asset_id IN ({', '.join('?' * len(chunk))}) ORDER BY c.name COLLATE NOCASE",
+            tuple(chunk),
+        )
+        for aid, name in rows:
+            out.setdefault(int(aid), []).append(str(name))
+    return out
+
+
+def audio_row(asset: Asset, collections: list[str] | tuple = ()) -> dict:
     """One line of `roughcut studio music`: what a music bed needs to know, from the snapshot (no file is touched)."""
     from .media import AUDIO_EXTS
 
@@ -709,7 +742,7 @@ def audio_row(asset: Asset) -> dict:
     return {
         "id": asset.id, "name": asset.title, "file": PurePosixPath(asset.path).name, "path": asset.path, "library": asset.library,
         "seconds": asset.duration, "length": clock(asset.duration), "provider": asset.provider, "license": asset.license,
-        "favorite": asset.favorite, "tags": list(asset.tags), "notes": asset.notes,
+        "favorite": asset.favorite, "tags": list(asset.tags), "notes": asset.notes, "collections": list(collections),
         "guess": music_guess(asset.title + " " + PurePosixPath(asset.path).stem, asset.duration, [*folders, *asset.tags]),
         "usable": usable, "why_not": None if usable else f"{ext or 'no extension'}: not an audio type Roughcut reads",
     }
@@ -723,7 +756,7 @@ def kit_audio_row(item: KitItem) -> dict:
     usable = ext in AUDIO_EXTS
     return {
         "id": item.asset_id, "name": item.name, "file": PurePosixPath(item.path).name, "path": item.path, "library": "",
-        "seconds": None, "length": "?", "provider": item.provider, "license": item.license, "favorite": False, "tags": [], "notes": "",
+        "seconds": None, "length": "?", "provider": item.provider, "license": item.license, "favorite": False, "tags": [], "notes": "", "collections": [],
         "guess": music_guess(item.name + " " + PurePosixPath(item.path).stem, None, PurePosixPath(item.path).parts[1:-1]),
         "usable": usable, "why_not": None if usable else f"{ext or 'no extension'}: not an audio type Roughcut reads",
     }
@@ -803,7 +836,8 @@ def music_listing(
     copy = newest_copy(folder, cache_dir)
     with catalog(copy) as con:
         found = standalone_audio(con, words=words, collection=collection, kit=kit, favorites=favorites)
-    rows = sorted((audio_row(a) for a in found), key=lambda r: (r["name"].casefold(), r["id"]))
+        groups = asset_collections(con, [a.id for a in found])
+    rows = sorted((audio_row(a, groups.get(a.id, [])) for a in found), key=lambda r: (r["name"].casefold(), r["id"]))
     snap = copy.snapshot
     return Listing(rows, f"the catalog snapshot from {snap.when()} ({_age(snap.age_hours(now))})", None, copy.notes(now))
 

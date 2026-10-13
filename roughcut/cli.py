@@ -281,11 +281,11 @@ def _studio_songs(args) -> str | None:
     from . import studio
     from .pipeline import studio_song_problem
 
+    cache = Path(args.cache_dir).expanduser() if args.cache_dir else None
     for i, song in enumerate(args.music):
         m = STUDIO_SONG.match(str(song).strip())
         if not m or Path(song).exists():
             continue
-        cache = Path(args.cache_dir).expanduser() if args.cache_dir else None
         try:
             copy = studio.newest_copy(cache_dir=cache)
             with studio.catalog(copy) as con:
@@ -299,11 +299,29 @@ def _studio_songs(args) -> str | None:
             )
         path = str(Path(found.path))
         args.music[i] = path
-        args.music_library[path] = {
-            "studio_id": found.id, "title": found.title, "provider": found.provider, "license": found.license,
-            "tags": list(found.tags), "notes": found.notes, "favorite": found.favorite, "from": f"--music {song}",
-        }
+        args.music_library[path] = _library_info(found, f"--music {song}")
+    # A song given by its path (the app's picks from Studio) that is a Studio item: the same deadlines, and the planner sees its tags.
+    plain = {os.path.abspath(os.path.expanduser(str(s))): s for s in args.music if not STUDIO_SONG.match(str(s).strip())}
+    plain = {p: s for p, s in plain.items() if p not in args.music_library}
+    if plain and studio.installed():
+        try:
+            copy = studio.newest_copy(cache_dir=cache)
+            with studio.catalog(copy) as con:
+                found_at = studio.songs_at(con, list(plain))
+        except studio.StudioUnavailable:
+            found_at = {}  # a song given by its path never needs Studio
+        for path, asset in found_at.items():
+            args.music = [path if s == plain[path] else s for s in args.music]
+            args.music_library[path] = _library_info(asset, f"--music {plain[path]}")
     return None
+
+
+def _library_info(asset, given: str) -> dict:
+    """What a run keeps about a Venture Studio song (Clip.library)."""
+    return {
+        "studio_id": asset.id, "title": asset.title, "provider": asset.provider, "license": asset.license,
+        "tags": list(asset.tags), "notes": asset.notes, "favorite": asset.favorite, "from": given,
+    }
 
 
 def _music_problem(args) -> str | None:
@@ -312,8 +330,7 @@ def _music_problem(args) -> str | None:
         return None
     from .pipeline import music_problem
 
-    studio_songs = getattr(args, "music_library", {}) or {}
-    return next((p for p in (music_problem(song) for song in args.music if str(Path(song)) not in studio_songs) if p), None)
+    return next((p for p in (music_problem(song) for song in args.music) if p), None)
 
 
 def _key_command(action: str, openai: bool) -> int:
