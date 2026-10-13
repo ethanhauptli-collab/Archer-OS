@@ -1378,8 +1378,10 @@ def _fill_picture(tl: Timeline, analysis: Analysis, style: Style, volume_db: flo
 
 
 def _music_cues(plan: Plan, analysis: Analysis, beds: bool, notes: list[str]) -> list[MusicCue]:
-    """The plan's music cues, or the --music song under the whole cut when the plan didn't use it."""
+    """The plan's music cues, or the --music song under the whole cut when the plan didn't use it:
+    the first one given (an analysis saved before the order was kept: the earliest-dated, as it played then)."""
     songs = [c for c in analysis.clips if c.music_bed] if beds else []
+    songs.sort(key=lambda c: (c.music_order is None, c.music_order or 0))  # stable: clip order breaks ties
     if not songs or not plan.sections or any(analysis.clip(cue.clip_id).music_bed for cue in plan.music):
         return list(plan.music)
     song = songs[0]

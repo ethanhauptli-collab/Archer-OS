@@ -22,6 +22,7 @@ from . import timecode as tc
 from .analyze import ROLE_LABELS, Analysis, Clip
 from .media import MediaInfo
 from .timeline import SpineClip, Timeline
+from .versions import final_cut_name
 
 FCPXML_VERSION = "1.10"
 
@@ -261,7 +262,7 @@ def _sequence(tl: Timeline, analysis: Analysis, res: _Resources) -> ET.Element:
     fd = tl.frame_duration
     tb = fd.denominator
     fmt = res.video_format(tl.width, tl.height, fd)
-    project = ET.Element("project", {"name": tl.name})
+    project = ET.Element("project", {"name": final_cut_name(tl.name)})
     seq = ET.SubElement(
         project,
         "sequence",
@@ -490,7 +491,7 @@ def build_fcpxml(
     root = ET.Element("fcpxml", {"version": FCPXML_VERSION})
     root.append(res.el)
     library = ET.SubElement(root, "library")
-    event = ET.SubElement(library, "event", {"name": event_name})
+    event = ET.SubElement(library, "event", {"name": final_cut_name(event_name)})
 
     projects = [_sequence(tl, analysis, res) for tl in timelines if tl.spine]
     if browser_clips:

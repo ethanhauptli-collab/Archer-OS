@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from fractions import Fraction
 
@@ -294,3 +295,161 @@ def test_build_skips_the_menu_when_it_should(monkeypatch, tmp_path, extra, inter
     assert "menu" not in seen
     if "--model" in extra:
         assert seen["opts"].model == "claude-sonnet-5-5"
+
+
+# ---------------------------------------------------------------- names Venture Studio's Project history accepts
+
+
+def _studio_accepts(name: str) -> bool:
+    """Venture Studio's rule for a project name in an FCPXML it reviews: 1-200 characters once trimmed, no control characters."""
+    import unicodedata
+
+    v = name.strip()
+    return 0 < len(v) <= 200 and not any(unicodedata.category(c) == "Cc" for c in v)
+
+
+def _old_slug(text: str) -> str:
+    """slug() as every earlier release wrote it: file names a folder already has."""
+    import re
+
+    s = re.sub(r"[^\w\s-]", "", text).strip()
+    return re.sub(r"\s+", " ", s) or "Roughcut"
+
+
+def test_project_names_lose_control_characters_and_stay_under_200():
+    from roughcut.pipeline import event_name, name_timelines
+    from roughcut.timeline import Timeline
+    from roughcut.versions import final_cut_name, fit_name, safe_name, short_slug, slug
+
+    def timelines():
+        rough = Timeline(name="", width=1920, height=1080, frame_duration=NTSC)
+        stringout = Timeline(name="", width=1920, height=1080, frame_duration=NTSC)
+        return rough, stringout
+
+    rough, stringout = timelines()
+    name_timelines(rough, stringout, "Launch\tnight\nOC\x7f\x85", 1, "medium", "heuristic")
+    assert rough.name == "Launch night OC - Rough Cut v1 (medium, no AI)" and stringout.name == "Launch night OC - Stringout v1"
+    long = "Venture OC member spotlight " * 12  # 336 characters
+    rough, stringout = timelines()
+    name_timelines(rough, stringout, long, 12, "tight", "anthropic:claude-opus-5-5")
+    assert len(rough.name) == 200 and rough.name.endswith("… - Rough Cut v12 (tight, Opus)")
+    assert len(stringout.name) <= 200 and stringout.name.endswith(" - Stringout v12")
+    assert len(event_name(long)) <= 200 and all(_studio_accepts(n) for n in (rough.name, stringout.name, event_name(long)))
+    # An odd model name from another provider can't push it past 200 either.
+    rough, stringout = timelines()
+    name_timelines(rough, stringout, "Promo", 2, "medium", "openai:" + "m" * 300)
+    assert _studio_accepts(rough.name) and rough.name.startswith("Promo - Rough Cut v2 (medium, mmm")
+    # Names that already fit are exactly what they were, in Final Cut and on disk.
+    rough, stringout = timelines()
+    name_timelines(rough, stringout, "OCVIBE: Café 🎉 / night", 3, "tight", "anthropic:claude-opus-5-5")
+    assert rough.name == "OCVIBE - Café 🎉 - night - Rough Cut v3 (tight, Opus)"
+    assert safe_name("A: B/C") == "A - B - C" and final_cut_name("x" * 200) == "x" * 200 and final_cut_name("Tab\there") == "Tab here"
+    assert len(final_cut_name("y" * 250)) == 200 and fit_name("Promo", " v1") == "Promo v1"
+    for name in ("OCVIBE", "Café 🎉 night", "  spaced\tout  ", "a" * 300, "é" * 200, "x: y/z?", "", "!!!"):
+        assert slug(name) == _old_slug(name)
+        assert short_slug(name) == slug(name) or len(short_slug(name).encode()) <= 255 - len(" v99999.fcpxml") - len("..12345678.tmp")
+
+
+def test_every_project_name_in_the_fcpxml_is_one_studio_accepts(footage, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    from roughcut.cli import main
+
+    name = "Member\tspotlight\r\n" + "a very long name " * 15
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--name", name]) == 0
+    (fcpxml,) = out.glob("*.fcpxml")
+    root = ET.parse(fcpxml).getroot()
+    projects = [p.get("name") for p in root.iter("project")]
+    assert len(projects) == 2 and all(_studio_accepts(p) for p in projects), projects
+    assert all(_studio_accepts(e.get("name")) for e in root.iter("event"))
+    assert projects[0].endswith(" - Rough Cut v1 (medium, no AI)") and projects[1].endswith(" - Stringout v1")
+    # A name too long for a file name used to stop the run when the cut was written; now only it is shortened...
+    assert len(fcpxml.name.encode()) <= 255 and fcpxml.name.endswith(" v1.fcpxml")
+    # ...and versions.json names the same project Final Cut shows.
+    entry = json.loads((out / "versions.json").read_text())["versions"][-1]
+    assert entry["project"] == projects[0]
+    # The next version is shortened the same way: the folder's files keep one name.
+    assert main(["render", str(out), "--style", "tight"]) == 0
+    assert (out / fcpxml.name.replace(" v1.fcpxml", " v2.fcpxml")).is_file()
+
+
+def test_a_name_that_fits_keeps_its_file_name(footage, tmp_path):
+    from roughcut.cli import main
+
+    # The longest name a disk takes once atomic_write's temp-name parts are added: written exactly as before.
+    name = "a" * 231
+    out = tmp_path / "out"
+    assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"), "--name", name]) == 0
+    assert (out / f"{name} v1.fcpxml").is_file()
+    assert main(["render", str(out)]) == 0
+    assert (out / f"{name} v2.fcpxml").is_file()
+    assert [v["fcpxml"] for v in json.loads((out / "versions.json").read_text())["versions"]] == [f"{name} v1.fcpxml", f"{name} v2.fcpxml"]
+
+
+# ---------------------------------------------------------------- the first --music song plays
+
+
+def _two_songs(first_order, second_order):
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=[(1.0, 3.0, "Hello there.")], role="aroll")])
+    for cid, order in (("A01", first_order), ("A02", second_order)):
+        song = make_clip(cid, kind="audio", seconds=90, role="music")
+        song.music_bed, song.music_order = True, order
+        a.clips.append(song)
+    return a
+
+
+def test_the_first_music_file_given_plays_when_the_plan_cues_none():
+    from roughcut.timeline import _music_cues
+
+    # A01 is the older file (clips are numbered by date); A02 was given first.
+    a = _two_songs(1, 0)
+    plan = normalize({"title": "t", "sections": [{"name": "A", "items": ["V01.S001"]}]}, a)
+    notes: list[str] = []
+    (cue,) = _music_cues(plan, a, True, notes)
+    assert cue.clip_id == "A02"
+    assert notes == ["Music: A02.wav (--music) runs under the whole cut; A01.wav not used."]
+    # An analysis saved before the order was kept plays what it played then: the earliest-dated.
+    old = _two_songs(None, None)
+    assert [c.clip_id for c in _music_cues(normalize({"title": "t", "sections": [{"name": "A", "items": ["V01.S001"]}]}, old), old, True, [])] == ["A01"]
+    restored = Analysis.from_json(json.loads(json.dumps(a.to_json())))
+    assert [c.music_order for c in restored.clips] == [None, 1, 0]
+
+
+def _song_in_cut(fcpxml) -> str:
+    import xml.etree.ElementTree as ET
+
+    rough = next(p for p in ET.parse(fcpxml).getroot().iter("project") if "Rough Cut" in p.get("name"))
+    (music,) = [el for el in rough.iter("asset-clip") if el.get("lane") == "-1"]
+    return music.get("name")
+
+
+def test_the_first_music_file_given_plays_end_to_end(footage, tmp_path):
+    from conftest import ffmpeg
+
+    from roughcut.cli import main
+    from roughcut.pipeline import analysis_digest
+
+    songs = tmp_path / "Downloads"
+    songs.mkdir()
+    for name, created in (("Older Song.m4a", "2026-01-01T09:00:00Z"), ("Favourite.m4a", "2026-06-01T09:00:00Z")):
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=330:duration=30:sample_rate=48000", "-c:a", "aac", "-metadata", f"creation_time={created}", str(songs / name))
+    out = tmp_path / "out"
+    code = main([
+        "build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "c"),
+        "--music", str(songs / "Favourite.m4a"), "--music", str(songs / "Older Song.m4a"), "--name", "footage",
+    ])
+    assert code == 0
+    assert _song_in_cut(out / "footage v1.fcpxml") == "Favourite"
+    assert "Favourite.m4a (--music) runs under the whole cut; Older Song.m4a not used." in (out / "edit_report.md").read_text()
+
+    # A folder an earlier release built: its analysis.json has no music_order. Its plan still matches
+    # (the digest is clip IDs and files only), render re-cuts it, and it plays the song it played then.
+    saved = json.loads((out / "analysis.json").read_text())
+    digest = json.loads((out / "plan.json").read_text())["analysis_digest"]
+    for clip in saved["clips"]:
+        clip.pop("music_order", None)
+    (out / "analysis.json").write_text(json.dumps(saved, indent=1))
+    assert analysis_digest(Analysis.from_json(saved)) == digest
+    assert main(["render", str(out)]) == 0
+    assert _song_in_cut(out / "footage v2.fcpxml") == "Older Song"

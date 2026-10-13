@@ -86,6 +86,24 @@ def slug(text: str) -> str:
     return re.sub(r"\s+", " ", s) or "Roughcut"
 
 
+# 255 bytes (the longest file name, counted so it fits on any disk) less " v99999.fcpxml" and the
+# ".<name>.<8 random>.tmp" atomic_write writes first.
+SHORT_SLUG_BYTES = 255 - len(" v99999.fcpxml") - len("..12345678.tmp")
+
+
+def short_slug(text: str) -> str:
+    """slug(text) cut to SHORT_SLUG_BYTES of UTF-8, at a character boundary.
+
+    Only for a name the disk refused as too long (a long folder name or --name), so every name
+    that could be written keeps its file names from one version to the next.
+    """
+    s = slug(text)
+    raw = s.encode("utf-8")
+    if len(raw) <= SHORT_SLUG_BYTES:
+        return s
+    return raw[:SHORT_SLUG_BYTES].decode("utf-8", errors="ignore").rstrip() or "Roughcut"
+
+
 def _legacy_cut(out_dir: Path) -> Path | None:
     """The cut an earlier release wrote into a folder from before versions: `<slug(name)>.fcpxml`.
 
@@ -97,7 +115,10 @@ def _legacy_cut(out_dir: Path) -> Path | None:
     except (OSError, json.JSONDecodeError, AttributeError):
         return None
     cut = out_dir / f"{slug(name)}.fcpxml" if isinstance(name, str) and name.strip() else None
-    return cut if cut is not None and cut.is_file() else None
+    try:
+        return cut if cut is not None and cut.is_file() else None
+    except OSError:  # a name too long for the disk: no release could have written it
+        return None
 
 
 def entries(out_dir: Path) -> list[dict]:
@@ -321,6 +342,35 @@ def planner_label(source: str) -> str:
     return m.group(1).title() if m else safe_name(model)
 
 
+_CONTROL = re.compile(r"\s*[\x00-\x1f\x7f-\x9f]+\s*")  # tabs, newlines, DEL and the other control characters
+NAME_LIMIT = 200  # characters: the longest project name Venture Studio's Project history accepts (Final Cut takes more)
+
+
+def _no_controls(text: str) -> str:
+    """Control characters (and the spaces around them) become one space; text without any stays exactly as it is."""
+    return _CONTROL.sub(" ", text).strip() if _CONTROL.search(text) else text
+
+
 def safe_name(text: str) -> str:
-    """Final Cut and Finder names: no ':' or '/'."""
-    return re.sub(r"\s*[:/]\s*", " - ", text).strip() or "Roughcut"
+    """Final Cut and Finder names: no ':' or '/', and no control characters (a tab or newline from a folder name or --name)."""
+    return re.sub(r"\s*[:/]\s*", " - ", _no_controls(text)).strip() or "Roughcut"
+
+
+def fit_name(base: str, suffix: str = "", limit: int = NAME_LIMIT) -> str:
+    """`base + suffix` in at most `limit` characters. A longer base is shortened (ending in '…') so the suffix,
+    which carries the version, stays whole; a name that fits is returned as it is."""
+    if len(base) + len(suffix) <= limit:
+        return base + suffix
+    room = limit - len(suffix) - 1
+    if room < 1:  # a suffix that long (an odd model name) is cut too
+        return (base + suffix)[: limit - 1].rstrip() + "…"
+    return base[:room].rstrip() + "…" + suffix
+
+
+def final_cut_name(text: str, limit: int = NAME_LIMIT) -> str:
+    """A project or event name as the FCPXML gets it: no control characters, at most `limit` characters.
+
+    Venture Studio's Project history review rejects a whole file whose project name has a control character
+    or runs past 200 characters. Names that already fit are written byte for byte as they are.
+    """
+    return fit_name(_no_controls(text), "", limit)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import re
@@ -24,7 +25,7 @@ from .report import build_report
 from .report_html import report_page
 from .timeline import DIALOGUE_LEVEL, STYLES, Style, Timeline, build_timeline, dead_air
 from .transcribe import Transcriber, resolve_backend
-from .versions import atomic_write, planner_label, safe_name, slug
+from .versions import atomic_write, fit_name, planner_label, safe_name, short_slug, slug
 
 
 @dataclass
@@ -686,7 +687,15 @@ def write_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     versions.snapshot(out_dir, before=version)
     fcpxml_path = out_dir / f"{slug(name)} v{version}.fcpxml"
-    atomic_write(fcpxml_path, xml)
+    try:
+        atomic_write(fcpxml_path, xml)
+    except OSError as e:
+        if e.errno != errno.ENAMETOOLONG:
+            raise
+        # A name too long for the disk (a long folder name or --name) is shortened only now, so every
+        # name that could be written keeps its file names from one version to the next.
+        fcpxml_path = out_dir / f"{short_slug(name)} v{version}.fcpxml"
+        atomic_write(fcpxml_path, xml)
     captions_path = fcpxml_path.with_suffix(".srt")
     if subtitles:
         atomic_write(captions_path, subtitles)
@@ -717,16 +726,20 @@ def write_outputs(
 
 
 def event_name(name: str) -> str:
-    return f"{safe_name(name)} ({date.today().isoformat()})"
+    return fit_name(safe_name(name), f" ({date.today().isoformat()})")
 
 
 def name_timelines(rough: Timeline, stringout: Timeline | None, name: str, version: int, style: str, source: str) -> None:
-    """'OCVIBE - Rough Cut v3 (tight, Opus)': every version is its own project in Final Cut."""
+    """'OCVIBE - Rough Cut v3 (tight, Opus)': every version is its own project in Final Cut.
+
+    At most 200 characters, with no control characters, so Venture Studio's Project history accepts the file:
+    a very long name is shortened before the " - Rough Cut v3 (...)" part, never inside it.
+    """
     base = safe_name(name)
     shape = ", vertical" if rough.height > rough.width else ", square" if rough.height == rough.width else ""
-    rough.name = f"{base} - Rough Cut v{version} ({style}{shape}, {planner_label(source)})"
+    rough.name = fit_name(base, f" - Rough Cut v{version} ({style}{shape}, {planner_label(source)})")
     if stringout is not None:
-        stringout.name = f"{base} - Stringout v{version}"
+        stringout.name = fit_name(base, f" - Stringout v{version}")
 
 
 def studio_guard(out_dir: Path, cache_dir: Path | None) -> tuple[str | None, str | None]:

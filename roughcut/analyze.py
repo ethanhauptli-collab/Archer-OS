@@ -108,6 +108,7 @@ class Clip:
     speech_peak: float | None = None  # sample peak dBFS inside the words
     sound_end: float | None = None  # seconds: where the last sound fades out
     music_bed: bool = False  # given with --music: not transcribed, always the cut's music
+    music_order: int | None = None  # its place among the --music files (0: the first given), which plays when the plan cues none
 
     @property
     def hidden(self) -> bool:
@@ -150,6 +151,7 @@ class Clip:
             "speech_peak": self.speech_peak,
             "sound_end": self.sound_end,
             "music_bed": self.music_bed,
+            "music_order": self.music_order,
         }
 
     @classmethod
@@ -178,6 +180,7 @@ class Clip:
             speech_peak=d.get("speech_peak"),
             sound_end=d.get("sound_end"),
             music_bed=bool(d.get("music_bed", False)),
+            music_order=d.get("music_order") if isinstance(d.get("music_order"), int) else None,
         )
 
 
@@ -387,7 +390,9 @@ def analyze(
     """`music`: files given with --music. They aren't transcribed and become the cut's music bed."""
     t0 = time.monotonic()
     warnings: list[str] = []
-    music_paths = {str(Path(p).expanduser().resolve()) for p in music or []}
+    music_paths: dict[str, int] = {}  # each --music file and its place in the order given (the first time it's given)
+    for i, p in enumerate(music or []):
+        music_paths.setdefault(str(Path(p).expanduser().resolve()), i)
     progress.stage("probe", f"Reading {len(paths)} files")
 
     def _probe(p: Path) -> MediaInfo | None:
@@ -418,9 +423,11 @@ def analyze(
 
     clips = [Clip(id=cid, media=info) for cid, info in assign_ids(infos)]
     for clip in clips:
-        if str(Path(clip.media.path).resolve()) in music_paths:
+        order = music_paths.get(str(Path(clip.media.path).resolve()))
+        if order is not None:
             if clip.media.kind == "audio":
                 clip.music_bed = True
+                clip.music_order = order
             else:
                 warnings.append(f"{clip.media.name}: --music takes an audio file; this one has pictures, so it's used as an ordinary clip")
 
