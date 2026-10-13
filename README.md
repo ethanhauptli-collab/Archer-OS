@@ -41,7 +41,7 @@ cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics
 
 1. Drop your footage folder (or clips) on the window.
 2. Pick a **Preset** (Venture OC or Save the Kid fill in the brief, length, pacing and graphics look), then add to the brief what's special about this video: who's in it, the must-keep moments, the angle.
-3. Optional: a **Music bed** song, a different **Dialogue level**, **Motion graphics** and a logo.
+3. Optional: a **Music bed** song, **Sound effects** (a folder of whooshes, pops and hits, or a Venture Studio collection), a different **Dialogue level**, **Motion graphics** and a logo.
 4. **Build Rough Cut**. The checklist shows each step; you can switch to another app, and the Mac stays awake and tells you when it's done.
 5. **Open in Final Cut Pro**, choose a library, and open the project the result screen names (for example "OC Food Fest - Rough Cut v1 (tight, Opus)").
 
@@ -106,7 +106,7 @@ When a run ends, Terminal and the app say what made it in and what was left out 
 ### In Final Cut Pro
 
 - **Markers**: chapter markers for each section; to-do markers for decisions to check (an uncovered jump cut, a music jump inside a finished promo, a line you asked to keep that didn't fit); standard markers name the alternate takes of a line.
-- **Roles**: dialogue (narration as its own subrole), B-Roll (planned shots and auto-fill separately), nat sound as effects, the music bed as music, graphics as titles. In the Timeline Index you can mute the music or hide the auto-fill in one click.
+- **Roles**: dialogue (narration as its own subrole), B-Roll (planned shots and auto-fill separately), nat sound as effects, sound-effect accents as their own `SFX` subrole, the music bed as music, graphics as titles. In the Timeline Index you can mute the music, solo the sound effects or hide the auto-fill in one click.
 - **Notes**: each planned B-roll shot carries Claude's reason for it in the inspector.
 - **Keywords**: the other reads of each line you used are marked "Alt take" in the browser, so swapping a read is select, then Shift-R. Duplicate exports are marked too.
 - **Levels**: every clip's speech is matched to the dialogue level, B-roll sound sits under it, and the music ducks under speech and comes up between lines. Volume and fades are ordinary FCP volume settings and fade handles you can drag.
@@ -134,12 +134,12 @@ roughcut preset save venture-oc --look-from ~/Movies/OCVIBE_roughcut G01 G03
 
 Every later run with that preset shows those designs to the designer, which matches their type, colors, plates and motion. Name up to three graphics by the number in their file name, or leave the numbers off to take the first two of different kinds. The preset keeps its own copies, so the run folder can go; `--no-look` drops them.
 
-`roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics`, `--graphics-style` set the rest). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
+`roughcut preset save` also makes new presets (`--from save-the-kid` starts from an existing one; `--brief`, `--brief-file`, `-t`, `--style`, `--format`, `--graphics` or `--no-graphics`, `--graphics-style` set the rest, and `--sfx FOLDER` or `--sfx-from COLLECTION` give your preset its sound effects; the built-in ones have none). Yours are saved as JSON in `~/Library/Application Support/roughcut/presets/`, and `roughcut preset remove NAME` deletes one (a built-in preset comes back as it was).
 
 ## Revise, re-cut and finish
 
 - **`roughcut revise FOLDER "notes"`** re-plans the latest cut from your notes as the next version. Claude sees the footage, the current cut and every earlier note, and changes only what you asked. `--keep V01.S003,V02.S010` and `--avoid V04` (or `V04@12-30` for seconds 12 to 30 of a clip) pin lines and shots; what you avoid stays out of every later revision and re-cut until a later `--keep` covers it (a line by its ID; a range by its clip or a line that overlaps it; a clip by the clip or any line of it, which brings the whole clip back), and a line you asked to keep that the revision left out stays a to-do marker in re-cuts too. `-t 60s` sets a new length. Graphics that didn't change are reused as they are, hand edits included. Name spellings carry over too; a note like "Choy is right, don't change it" undoes one, in the captions and in the graphics. The paper edit opens with what changed. Notes can change the pacing and punch-ins too: Claude reads them against the cut's settings, so "make it looser" or "too tight" on a medium cut gives a loose version, "it drags" a tight one, and "remove the punch-ins" or "add punch-ins" turns them off or on. Only these notes count, not the brief or earlier notes, so a pacing you picked or a re-cut you made since stays unless these notes ask to change it. The log and the paper edit's revision block say what changed; `--style` or `--punch-in`/`--no-punch-in` given to revise win over the notes. A note asking for graphics when they're off is answered at the top of the paper edit and at the end of the run with the `--graphics` command that adds them.
-- **`roughcut render FOLDER`** rebuilds the latest plan with no AI call. It keeps the run's own pacing, format, fillers, punch-ins, levels and fades unless you give new ones (`--style tight`, `--format vertical`, `--format auto` for the footage's own, `--no-keep-fillers`, `--punch-in` or `--no-punch-in`, `--dialogue-level -14`); the app's Re-cut works the same way.
+- **`roughcut render FOLDER`** rebuilds the latest plan with no AI call. It keeps the run's own pacing, format, fillers, punch-ins, levels, fades and sound effects unless you give new ones (`--style tight`, `--format vertical`, `--format auto` for the footage's own, `--no-keep-fillers`, `--punch-in` or `--no-punch-in`, `--dialogue-level -14`); the app's Re-cut works the same way.
 - **If a run stops** after Claude planned the cut (a crash, a closed laptop, a graphic that wouldn't render), nothing paid for is lost: the plan was saved first, and roughcut prints the `roughcut render FOLDER` command that finishes the cut without AI. The app shows a **Finish without AI** button.
 - **If your Claude plan's usage limit or your API credit runs out**, the run stops and says so; it never delivers a silence-only cut that looks finished. Transcripts and clip descriptions are cached, so the same command after the reset carries on from there. If it ran out while designing graphics, the cut is written with the graphics that were done, and `roughcut render FOLDER --design-missing` designs the rest after the reset without re-planning anything. Plain `render` also tells you when a cut has graphics with no design yet.
 
@@ -151,8 +151,25 @@ Every later run with that preset shows those designs to the designer, which matc
 | `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue |
 | `--music FILE` | | A song to lay under the cut (repeatable; when Claude doesn't pick one, or without AI, the first one given plays). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame |
 | `--fades on/off` | on | Short de-click fades at audio edits and soft fades on B-roll sound (never over a word) |
+| `--sfx PATH` | | Sound effects for accents: an audio file or a folder (its subfolders too). Repeatable |
+| `--sfx-from NAME` | | Sound effects from a [Venture Studio](#venture-studio) collection (`kit:NAME` for a kit), or a kit file Studio exported. Repeatable |
+| `--no-sfx` | | No accents, even if a preset or the earlier run has sounds |
 
 A boost stops before the peaks clip, and the paper edit's Levels table says when a clip couldn't reach the dialogue level or brings a noisy background up with it (Voice Isolation or a limiter in Final Cut finishes the job).
+
+### Sound effects
+
+Give Roughcut a folder of sound effects and it accents the cut on its own frames: a whoosh into each section change, a pop as each lower third lands and a hit on each title card or stat. When the brief asks for lots ("punchy sound design", "whooshes on the B-roll"), it also puts a whoosh on the first B-roll cut of each stretch without speech and a riser into the last section; "no sound effects" turns them off, and without a word about them you get the few. Claude only says how many the brief asks for; the times are the cut's own.
+
+```bash
+roughcut build ~/Movies/OCFoodFest --preset venture-oc --sfx "/Volumes/Media/Sound Effects"
+```
+
+- **Which sound is which** comes from the words in its file name, its Studio tags or its folders: whoosh, swoosh, swipe, transition...; riser, uplifter, tension...; pop, click, blip, UI...; hit, impact, boom, stinger... Files over 8 seconds, without one of those words, or in a format Roughcut doesn't read (`.flac`, `.ogg`) are left out, and the paper edit lists them. A folder Venture Studio is still copying files into is skipped.
+- **Where it lands**: each sound's loudest moment (a riser's end) lands on its frame. Accents keep about 2 seconds apart (a hit beats a pop, a pop a section whoosh), the same file never plays twice within 10 seconds, and each kind takes its sounds in turn, so the same cut gets the same sounds. None go in the Stringout.
+- **Levels**: each one sits 12 dB under the dialogue (9 dB with lots), 6 dB lower where someone is speaking, and never past -1 dBFS, even a 150 ms pop. They're connected clips below the music, on their own role, with an ordinary Volume you can change.
+- **Re-cuts and revisions** place the same sounds again without reading the folder (the sounds Roughcut found, their hit points and levels are saved with the plan), so a sleeping network share doesn't matter. A note like "lose the whooshes" or "more sound design" changes how many. `render --sfx` or `--sfx-from` swaps the sounds; `--no-sfx` takes them off.
+- **A network share** that's offline or stops answering never stalls or fails a run: each file gets a few seconds, and the sounds on a share that doesn't answer are left out with a warning. Each sound is measured once and cached.
 
 ## Motion graphics
 
@@ -179,6 +196,7 @@ Roughcut only ever reads, and only a verified copy of Studio's own daily catalog
 
 - **Output folder guard**: when your footage sits inside a Studio library, the default output folder (`<footage folder>_roughcut`, next to it) would be inside it too, and Studio would catalog the FCPXML, graphics and history copies Roughcut writes there. A Terminal build (without `--no-menu`) asks first and offers `~/Movies/Roughcut/<library name>/<path below the library>_roughcut` instead, never a folder that is inside a library itself, even through a link. If you say no, or with `-o`, a folder that already holds a project, `--no-menu`, or from the app, Roughcut writes in the library as told and warns in the log and at the top of the paper edit; `render` and `revise` warn too. A share mounted as `/Volumes/<name>-1` (macOS adds the number when the usual folder is taken) counts as the same library.
 - **Project names** in the FCPXML have no control characters and stay within 200 characters (a long name is shortened before " - Rough Cut vN (...)"), so Studio's Project history can review the file.
+- **Sound effects from a collection**: `--sfx-from "Whooshes"` takes the audio in that Studio collection (or kit: `--sfx-from "kit:Promo Kit"`; a name that's both uses the collection and says so), with Studio's own list filter, so audio inside a Motion template never comes along. A name typed for a build that Studio doesn't have stops it before anything is written; from a preset, or with Studio not installed, it's a warning. A collection made today shows up after Studio's next snapshot. The paper edit's Sound effects table lists each sound's provider and license.
 
 ## Useful options
 
