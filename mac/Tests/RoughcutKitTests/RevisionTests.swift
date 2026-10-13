@@ -276,6 +276,91 @@ final class RevisionTests: XCTestCase {
         XCTAssertFalse(ReviseOptions(outputFolder: URL(fileURLWithPath: "/o"), notesFile: URL(fileURLWithPath: "/n")).arguments().contains { $0.hasPrefix("--target") })
     }
 
+    /// A cut a model planned, with its graphics line as the CLI writes it ("graphics": null when they're off).
+    private func plannedCut(graphics: String) throws -> RunResult {
+        try result(plannedBy: "anthropic:claude-opus-5-5", extra: ", \"graphics\": \(graphics)")
+    }
+
+    private let withGraphics = #"{"planned": 3, "placed": 3, "rendered": 3, "note": null}"#
+
+    func testReviseSendsReferencePicturesAndTheRedesignToggle() throws {
+        let cut = try plannedCut(graphics: withGraphics)
+        let notes = URL(fileURLWithPath: "/tmp/notes.txt")
+        let form = BuildOptions()
+        let pictures = [URL(fileURLWithPath: "/Users/you/Pictures/title look.png"), URL(fileURLWithPath: "/Users/you/Pictures/-sheet.jpg")]
+        let base = ["revise", "/o/Promo_roughcut", "--progress-json", "--notes-file=/tmp/notes.txt"]
+
+        // Nothing given: the arguments are what they were before.
+        XCTAssertEqual(ReviseOptions.revising(cut, notesFile: notes, targetLength: "", provider: .anthropic, form: form).arguments(), base)
+        // Pictures and the toggle: one flag per picture, then the toggle.
+        let both = ReviseOptions.revising(cut, notesFile: notes, targetLength: "1:30", provider: .anthropic, form: form, references: pictures, redesignGraphics: true)
+        XCTAssertEqual(both.arguments(), base + [
+            "--target=90", "--graphics-ref=/Users/you/Pictures/title look.png", "--graphics-ref=/Users/you/Pictures/-sheet.jpg", "--redesign-graphics",
+        ])
+        // The toggle alone, and pictures alone.
+        XCTAssertEqual(ReviseOptions.revising(cut, notesFile: notes, targetLength: "", provider: .anthropic, form: form, redesignGraphics: true).arguments(), base + ["--redesign-graphics"])
+        XCTAssertEqual(
+            ReviseOptions.revising(cut, notesFile: notes, targetLength: "", provider: .anthropic, form: form, references: [pictures[0]]).arguments(),
+            base + ["--graphics-ref=/Users/you/Pictures/title look.png"]
+        )
+        // Straight from the initializer too.
+        let direct = ReviseOptions(outputFolder: URL(fileURLWithPath: "/o"), notesFile: notes, references: pictures, redesignGraphics: true)
+        XCTAssertEqual(direct.arguments().suffix(3), ["--graphics-ref=/Users/you/Pictures/title look.png", "--graphics-ref=/Users/you/Pictures/-sheet.jpg", "--redesign-graphics"])
+        XCTAssertEqual(ReviseOptions(outputFolder: URL(fileURLWithPath: "/o"), notesFile: notes).references, [])
+        XCTAssertFalse(ReviseOptions(outputFolder: URL(fileURLWithPath: "/o"), notesFile: notes).redesignGraphics)
+        // At most eight.
+        let ten = (1...10).map { URL(fileURLWithPath: "/p/\($0).png") }
+        XCTAssertEqual(ReviseOptions.revising(cut, notesFile: notes, targetLength: "", provider: .anthropic, form: form, references: ten).arguments().filter { $0.hasPrefix("--graphics-ref") }.count, 8)
+    }
+
+    func testReferencesAndRedesignOnlyCountForACutWithGraphics() throws {
+        let notes = URL(fileURLWithPath: "/tmp/notes.txt")
+        let pictures = [URL(fileURLWithPath: "/p/look.png")]
+        let graphicsOff = try plannedCut(graphics: "null")  // graphics were off for this cut
+        XCTAssertFalse(ReviseOptions.acceptsReferences(graphicsOff))
+        XCTAssertFalse(ReviseOptions.canRedesign(graphicsOff))
+        XCTAssertEqual(
+            ReviseOptions.revising(graphicsOff, notesFile: notes, targetLength: "", provider: .anthropic, form: BuildOptions(), references: pictures, redesignGraphics: true).arguments(),
+            ["revise", "/o/Promo_roughcut", "--progress-json", "--notes-file=/tmp/notes.txt"]
+        )
+        // Graphics on but none planned: pictures set the look of what comes later, but there is nothing to redesign.
+        let nonePlanned = try plannedCut(graphics: #"{"planned": 0, "placed": 0, "rendered": 0, "note": null}"#)
+        XCTAssertTrue(ReviseOptions.acceptsReferences(nonePlanned))
+        XCTAssertFalse(ReviseOptions.canRedesign(nonePlanned))
+        XCTAssertEqual(
+            ReviseOptions.revising(nonePlanned, notesFile: notes, targetLength: "", provider: .anthropic, form: BuildOptions(), references: pictures, redesignGraphics: true).arguments().suffix(1),
+            ["--graphics-ref=/p/look.png"]
+        )
+        let designed = try plannedCut(graphics: withGraphics)
+        XCTAssertTrue(ReviseOptions.acceptsReferences(designed))
+        XCTAssertTrue(ReviseOptions.canRedesign(designed))
+        XCTAssertEqual(ReviseOptions.usableReferences(pictures, for: designed), pictures)
+        XCTAssertEqual(ReviseOptions.usableReferences(pictures, for: graphicsOff), [])
+        XCTAssertTrue(ReviseOptions.usableRedesign(true, for: designed))
+        XCTAssertFalse(ReviseOptions.usableRedesign(false, for: designed))
+        XCTAssertFalse(ReviseOptions.usableRedesign(true, for: nonePlanned))
+    }
+
+    func testReviseStartsWithNotesPicturesOrTheRedesign() {
+        let picture = [URL(fileURLWithPath: "/p/look.png")]
+        XCTAssertFalse(ReviseOptions.canStart(notes: "", references: [], redesign: false))
+        XCTAssertFalse(ReviseOptions.canStart(notes: " \n ", references: [], redesign: false))
+        XCTAssertTrue(ReviseOptions.canStart(notes: "tighter hook", references: [], redesign: false))
+        XCTAssertTrue(ReviseOptions.canStart(notes: "", references: picture, redesign: false))  // the CLI takes pictures alone
+        XCTAssertTrue(ReviseOptions.canStart(notes: "", references: [], redesign: true))  // and the redesign alone
+    }
+
+    func testReviseOfACutMadeWithoutAIKeepsThePlannerFlagsBeforeThePictures() throws {
+        let quick = try result(plannedBy: "heuristic", extra: #", "graphics": {"planned": 2, "placed": 2, "rendered": 2, "note": null}"#)
+        var form = BuildOptions()
+        form.provider = .none
+        let revise = ReviseOptions.revising(
+            quick, notesFile: URL(fileURLWithPath: "/tmp/notes.txt"), targetLength: "", provider: .claudeCode, form: form,
+            references: [URL(fileURLWithPath: "/p/look.png")], redesignGraphics: true
+        )
+        XCTAssertEqual(Array(revise.arguments().dropFirst(4)), ["--provider", "claude-code", "--effort", "high", "--graphics-ref=/p/look.png", "--redesign-graphics"])
+    }
+
     func testResumeCommandGivesTheOutputFolder() {
         XCTAssertEqual(
             ResumeCommand.outputFolder(from: "roughcut render '/Users/you/Desktop/YouTube Current Project Staging/OCVIBE_roughcut'")?.path,

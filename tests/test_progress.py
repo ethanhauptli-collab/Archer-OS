@@ -136,6 +136,37 @@ def test_swift_fixture_matches_the_cli_contract():
     assert set(done["result"]) == set(live)
 
 
+def test_swift_revise_fixture_matches_the_cli_contract():
+    """progress-revise-sample.jsonl is a real `roughcut revise --progress-json` stream, kept so the app's tests decode
+    a done event whose `changes` is not null (the build sample's is). If the CLI's shape drifts this fails here first."""
+    from roughcut.pipeline import Result, result_summary
+
+    fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "progress-revise-sample.jsonl"
+    events = [json.loads(ln) for ln in fixture.read_text().splitlines() if ln.strip()]
+    stages = [e["stage"] for e in events if e["event"] == "stage"]
+    assert stages and all(s in progress.STAGES for s in stages)
+    assert stages == sorted(stages, key=progress.STAGES.index)  # only ever forward
+    done = events[-1]
+    assert done["event"] == "done"
+
+    class _TL:
+        seconds = 1.0
+        spine = []
+        connected = []
+        section_starts = []
+
+    class _Plan:
+        title = "t"
+        source = "s"
+
+    live = result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None))
+    assert set(done["result"]) == set(live)
+    changes = done["result"]["changes"]
+    assert set(changes) == {"from_version", "items", "unchanged"}  # RunChanges in the app
+    assert isinstance(changes["from_version"], int) and done["result"]["version"] == changes["from_version"] + 1
+    assert changes["items"] and all(isinstance(i, str) for i in changes["items"]) and changes["unchanged"] is False
+
+
 def test_done_payload_additions_keep_their_shape():
     """Keys added after the app's first version: what the Swift side should decode (all optional there)."""
     fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "progress-sample.jsonl"

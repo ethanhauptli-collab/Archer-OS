@@ -69,6 +69,62 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNil(try XCTUnwrap(JSONLines.event(from: done(nil))?.result).changes)
     }
 
+    /// Fixtures/progress-revise-sample.jsonl is real `roughcut revise --progress-json` output (done event with
+    /// `changes`). tests/test_progress.py checks it still matches the CLI.
+    func testDecodesARealReviseStream() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "progress-revise-sample", withExtension: "jsonl", subdirectory: "Fixtures"))
+        let lines = try String(contentsOf: url, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        let events = lines.compactMap(JSONLines.event(from:))
+        XCTAssertEqual(events.count, lines.count, "every line should decode")
+
+        let stages = events.compactMap(\.stageValue)
+        XCTAssertEqual(stages, [.plan, .cut, .write])  // a revision plans, cuts and writes
+        let result = try XCTUnwrap(events.last?.result)
+        XCTAssertEqual(result.version, 2)
+        XCTAssertTrue(result.fcpxml.hasSuffix("Trip v2.fcpxml"))
+        let changes = try XCTUnwrap(result.changes)
+        XCTAssertEqual(changes.fromVersion, 1)
+        XCTAssertFalse(changes.unchanged)
+        XCTAssertTrue(changes.hasContent)
+        XCTAssertTrue(changes.items.contains { $0.hasPrefix("Length:") })
+        XCTAssertTrue(changes.items.contains { $0.hasPrefix("Removed V01.S004") })
+        XCTAssertNil(changes.highlighted)
+        XCTAssertEqual(changes.bullets, changes.items)
+        XCTAssertEqual(changes.comparison, "Compared with version 1")
+    }
+
+    func testTheWhatChangedBoxReadsItsLines() throws {
+        let changed = RunChanges(fromVersion: 2, items: ["Length: 0:30 → 0:20 (−0:10)", "Graphics: 2 redesigned (every graphic is designed again)"], unchanged: false)
+        XCTAssertTrue(changed.hasContent)
+        XCTAssertEqual(changed.comparison, "Compared with version 2")
+        XCTAssertNil(changed.highlighted)  // a change isn't set apart
+        XCTAssertEqual(changed.bullets, changed.items)
+
+        // Nothing a viewer would see changed: the first line says so, set apart; the rest are bullets.
+        let same = RunChanges(fromVersion: 1, items: ["This version plays the same lines as v1. Try X.", "Another thing to try"], unchanged: true)
+        XCTAssertEqual(same.highlighted, "This version plays the same lines as v1. Try X.")
+        XCTAssertEqual(same.bullets, ["Another thing to try"])
+        XCTAssertEqual(RunChanges(items: ["Only line"], unchanged: true).bullets, [])
+
+        // Nothing to say, no box; a folder that doesn't say its earlier version has no comparison line.
+        XCTAssertFalse(RunChanges().hasContent)
+        XCTAssertNil(RunChanges(items: ["x"]).comparison)
+        XCTAssertEqual(RunChanges.heading, "What changed in this version")
+    }
+
+    func testWhatChangedSurvivesBeingSavedWithRecentRuns() throws {
+        let line = #"{"event":"done","result":{"title":"T","out_dir":"/o","fcpxml":"/o/T v2.fcpxml","report":"/o/edit_report.md","rough_seconds":20.5,"stringout_seconds":null,"edits":4,"broll":1,"sections":["A"],"planned_by":"anthropic:claude-opus-5-5","fell_back":false,"warnings":[],"version":2,"changes":{"from_version":1,"items":["This is the same cut as v1."],"unchanged":true}}}"#
+        let result = try XCTUnwrap(JSONLines.event(from: line)?.result)
+        XCTAssertEqual(result.changes, RunChanges(fromVersion: 1, items: ["This is the same cut as v1."], unchanged: true))
+        let saved = try JSONEncoder().encode(result)
+        XCTAssertEqual(try JSONDecoder().decode(RunResult.self, from: saved), result)
+        // A recent run saved before the app knew the key still opens.
+        let older = #"{"title":"T","outDir":"/o","fcpxml":"/o/T.fcpxml","report":"/o/r.md","roughSeconds":1,"edits":1,"broll":0,"sections":[],"plannedBy":"none","fellBack":false,"warnings":[]}"#
+        XCTAssertNil(try JSONDecoder().decode(RunResult.self, from: Data(older.utf8)).changes)
+    }
+
     func testUnknownStageStillDecodes() throws {
         let event = try XCTUnwrap(JSONLines.event(from: #"{"event":"stage","stage":"future-stage","message":"x"}"#))
         XCTAssertNil(event.stageValue)

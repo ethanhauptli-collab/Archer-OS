@@ -107,6 +107,74 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(o.problems, ["Motion graphics are designed by the AI: choose a provider other than None."])
     }
 
+    func testReferenceImagesGoWithGraphicsOnly() {
+        let look = URL(fileURLWithPath: "/Users/you/Pictures/title look.png")
+        let sheet = URL(fileURLWithPath: "/Users/you/Pictures/-brand sheet.jpg")
+        var o = options()
+        o.graphicsReferences = [look, sheet]
+        // Graphics off: nothing about them is sent, like the logo and the style.
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--graphics-ref") })
+        o.graphics = true
+        let args = o.arguments()
+        // One flag each, in the order shown, with "=" so a name that starts with "-" can't be read as a flag.
+        XCTAssertEqual(args.filter { $0.hasPrefix("--graphics-ref") }, [
+            "--graphics-ref=/Users/you/Pictures/title look.png",
+            "--graphics-ref=/Users/you/Pictures/-brand sheet.jpg",
+        ])
+        XCTAssertLessThan(try XCTUnwrap(args.firstIndex(of: "--graphics")), try XCTUnwrap(args.firstIndex { $0.hasPrefix("--graphics-ref") }))
+        // The graphics designer needs a model: none, none.
+        o.provider = .none
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--graphics-ref") })
+    }
+
+    func testBuildWithoutReferencesIsAsItWas() {
+        var o = options()
+        o.graphics = true
+        o.graphicsStyle = "navy and orange"
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--graphics-ref") })
+        XCTAssertEqual(o.problems, [])
+        XCTAssertEqual(o.arguments(), [
+            "build", "/Users/you/Movies/Trip", "--progress-json", "--style", "auto",
+            "--provider", "anthropic", "--effort", "high", "--vision",
+            "--graphics", "--graphics-style=navy and orange",
+        ])
+    }
+
+    func testAtMostEightReferencesAreSent() {
+        var o = options()
+        o.graphics = true
+        o.graphicsReferences = (1...10).map { URL(fileURLWithPath: "/Users/you/Pictures/look \($0).png") }
+        let sent = o.arguments().filter { $0.hasPrefix("--graphics-ref") }
+        XCTAssertEqual(sent.count, 8)
+        XCTAssertEqual(sent.last, "--graphics-ref=/Users/you/Pictures/look 8.png")
+    }
+
+    func testReferencesAreRememberedByPathAndOnlyWhileTheyExist() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-prefs-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let kept = dir.appendingPathComponent("look.png")
+        let soonGone = dir.appendingPathComponent("gone.png")
+        try Data("x".utf8).write(to: kept)
+        try Data("x".utf8).write(to: soonGone)
+
+        var o = options()
+        o.graphics = true
+        o.graphicsReferences = [kept, soonGone]
+        let saved = try JSONEncoder().encode(o.preferencesOnly)
+        // Remembered with the other preferences, as paths (they aren't per project like the footage).
+        XCTAssertEqual(o.preferencesOnly.graphicsReferences, [kept, soonGone])
+        XCTAssertEqual(try JSONDecoder().decode(BuildOptions.self, from: saved).graphicsReferences.map(\.path), [kept.path, soonGone.path])
+
+        // A file that has gone since isn't restored.
+        try FileManager.default.removeItem(at: soonGone)
+        XCTAssertEqual(try JSONDecoder().decode(BuildOptions.self, from: saved).graphicsReferences.map(\.path), [kept.path])
+
+        // Preferences from an app before reference images have none.
+        XCTAssertEqual(try JSONDecoder().decode(BuildOptions.self, from: Data("{}".utf8)).graphicsReferences, [])
+        XCTAssertEqual(BuildOptions().graphicsReferences, [])
+    }
+
     func testTargetIsSentAsSeconds() {
         var o = options()
         o.targetLength = "8 min"

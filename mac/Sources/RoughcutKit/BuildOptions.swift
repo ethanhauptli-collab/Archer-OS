@@ -238,6 +238,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var graphicsLogo: String = ""
     /// Approved graphics (.html) new designs match (`--graphics-look`).
     public var graphicsLook: [String] = []
+    /// Pictures of the look wanted for the graphics (`--graphics-ref`): at most `ReferenceImages.maxCount`, shown to
+    /// the graphics designer only. Remembered by path; the ones that have gone aren't restored.
+    public var graphicsReferences: [URL] = []
 
     public init() {}
 
@@ -245,7 +248,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         case sources, outputFolder, projectName, brief, targetLength, format, provider, model, visionModel
         case style = "pacing"
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
-        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn
+        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn, graphicsReferences
     }
 
     /// How apps from before Auto pacing saved it.
@@ -295,6 +298,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         graphicsLogo = value(.graphicsLogo, d.graphicsLogo)
         graphicsLook = value(.graphicsLook, d.graphicsLook)
         punchIn = value(.punchIn, d.punchIn)
+        graphicsReferences = ReferenceImages.restoring(value(.graphicsReferences, d.graphicsReferences))
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -411,6 +415,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
                 args.append("--graphics-logo=\(graphicsLogo.trimmed)")
             }
             args += graphicsLook.map { "--graphics-look=\($0)" }
+            args += ReferenceImages.arguments(for: graphicsReferences)
         }
         return args
     }

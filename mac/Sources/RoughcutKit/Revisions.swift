@@ -86,21 +86,62 @@ public struct ReviseOptions: Equatable, Sendable {
     /// With `provider`: its model ("" for its default) and, for Claude, the effort.
     public var model: String
     public var effort: Effort?
+    /// Pictures of the look wanted for the graphics (`--graphics-ref`): they replace the ones the cut has and every
+    /// graphic is designed again from them. Shown to the graphics designer only.
+    public var references: [URL]
+    /// Design every graphic again (`--redesign-graphics`), with the notes as the designer's direction.
+    public var redesignGraphics: Bool
 
-    public init(outputFolder: URL, notesFile: URL, targetLength: String = "", provider: ModelProvider? = nil, model: String = "", effort: Effort? = nil) {
+    public init(
+        outputFolder: URL, notesFile: URL, targetLength: String = "", provider: ModelProvider? = nil, model: String = "", effort: Effort? = nil,
+        references: [URL] = [], redesignGraphics: Bool = false
+    ) {
         self.outputFolder = outputFolder
         self.notesFile = notesFile
         self.targetLength = targetLength
         self.provider = provider
         self.model = model
         self.effort = effort
+        self.references = references
+        self.redesignGraphics = redesignGraphics
+    }
+
+    /// Reference images matter to a cut that has motion graphics on. Without them the CLI leaves the pictures out, with a warning.
+    public static func acceptsReferences(_ result: RunResult) -> Bool {
+        result.graphics != nil
+    }
+
+    /// There is a graphic in the cut to design again.
+    public static func canRedesign(_ result: RunResult) -> Bool {
+        (result.graphics?.planned ?? 0) > 0
+    }
+
+    /// The pictures a revision of `result` sends: none for a cut without graphics, never more than `ReferenceImages.maxCount`.
+    public static func usableReferences(_ list: [URL], for result: RunResult) -> [URL] {
+        acceptsReferences(result) ? Array(list.prefix(ReferenceImages.maxCount)) : []
+    }
+
+    /// Whether "Redesign the graphics" is in force for `result`: only a cut with graphics has any to redesign.
+    public static func usableRedesign(_ wanted: Bool, for result: RunResult) -> Bool {
+        wanted && canRedesign(result)
+    }
+
+    /// Revise needs something to go on: notes, pictures, or a redesign of the graphics (the CLI takes any of them alone).
+    public static func canStart(notes: String, references: [URL], redesign: Bool) -> Bool {
+        !notes.trimmed.isEmpty || !references.isEmpty || redesign
     }
 
     /// A revision of `result`. A cut a model planned is re-planned by that model. One made without AI
     /// has none to reuse (the CLI would fall back to the API key), so `provider` re-plans it, with
     /// the build form's model and effort where they fit that provider.
-    public static func revising(_ result: RunResult, notesFile: URL, targetLength: String, provider: ModelProvider, form: BuildOptions) -> ReviseOptions {
+    /// `references` and `redesignGraphics` are what the Revise box holds; they only count for a cut with graphics.
+    public static func revising(
+        _ result: RunResult, notesFile: URL, targetLength: String, provider: ModelProvider, form: BuildOptions,
+        references: [URL] = [], redesignGraphics: Bool = false
+    ) -> ReviseOptions {
         var options = ReviseOptions(outputFolder: result.outDirURL, notesFile: notesFile, targetLength: targetLength)
+        options.references = usableReferences(references, for: result)
+        options.redesignGraphics = usableRedesign(redesignGraphics, for: result)
         guard result.madeWithoutAI, provider != .none else { return options }
         options.provider = provider
         let sameModels = provider == form.provider || (provider.usesClaudeModels && form.provider.usesClaudeModels)
@@ -160,6 +201,10 @@ public struct ReviseOptions: Equatable, Sendable {
             if provider.usesClaudeModels, let effort {
                 args += ["--effort", effort.rawValue]
             }
+        }
+        args += ReferenceImages.arguments(for: references)
+        if redesignGraphics {
+            args.append("--redesign-graphics")
         }
         return args
     }

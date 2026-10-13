@@ -115,6 +115,29 @@ public struct RunChanges: Codable, Equatable, Sendable {
         self.items = items
         self.unchanged = unchanged
     }
+
+    /// The result screen's box heading.
+    public static let heading = "What changed in this version"
+
+    /// "Compared with version 1", when the folder says which version it was measured from.
+    public var comparison: String? {
+        fromVersion.map { "Compared with version \($0)" }
+    }
+
+    /// The sentence to set apart when nothing a viewer would see changed (it says so, and what to try instead).
+    public var highlighted: String? {
+        unchanged ? items.first : nil
+    }
+
+    /// The items to bullet: all of them, or what follows the highlighted one.
+    public var bullets: [String] {
+        unchanged ? Array(items.dropFirst()) : items
+    }
+
+    /// There is something to show.
+    public var hasContent: Bool {
+        !items.isEmpty
+    }
 }
 
 /// A version's cut settings, as saved in its plan.json (`result_summary`'s "cut").
