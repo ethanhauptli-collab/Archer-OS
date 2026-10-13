@@ -238,6 +238,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var graphicsLogo: String = ""
     /// Approved graphics (.html) new designs match (`--graphics-look`).
     public var graphicsLook: [String] = []
+    /// Sound effects for accents (`--sfx`): folders or single sounds. Remembered, like a library you use every time.
+    public var sfx: [URL] = []
+    /// Venture Studio collections (or kits) to take sound effects from, by name (`--sfx-from`).
+    public var sfxFrom: [String] = []
 
     public init() {}
 
@@ -245,7 +249,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         case sources, outputFolder, projectName, brief, targetLength, format, provider, model, visionModel
         case style = "pacing"
         case baseURL, effort, vision, keepFillers, stringout, language, graphics, graphicsStyle, openInFinalCutWhenDone
-        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn
+        case presetName, music, dialogueLevel, fades, graphicsLogo, graphicsLook, punchIn, sfx, sfxFrom
     }
 
     /// How apps from before Auto pacing saved it.
@@ -295,6 +299,8 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         graphicsLogo = value(.graphicsLogo, d.graphicsLogo)
         graphicsLook = value(.graphicsLook, d.graphicsLook)
         punchIn = value(.punchIn, d.punchIn)
+        sfx = value(.sfx, d.sfx)
+        sfxFrom = value(.sfxFrom, d.sfxFrom)
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -396,6 +402,9 @@ public struct BuildOptions: Codable, Equatable, Sendable {
             args.append("--language=\(language.trimmed)")
         }
         args += music.map { "--music=\($0.path)" }
+        // Read only, and never checked here: a folder on a network share that's asleep would hang the form.
+        args += sfx.map { "--sfx=\($0.path)" }
+        args += sfxFrom.map(\.trimmed).filter { !$0.isEmpty }.map { "--sfx-from=\($0)" }
         if dialogueLevel != .standard {
             args.append("--dialogue-level=\(dialogueLevel.rawValue)")
         }

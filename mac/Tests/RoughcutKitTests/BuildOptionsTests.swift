@@ -333,4 +333,29 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(o.arguments()[3...4], ["--style", "medium"])
         XCTAssertFalse(CutStyle.recut.contains(.auto))  // a cut's pacing is always a real one
     }
+
+    func testSoundEffectsFlags() throws {
+        var o = options()
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--sfx") })  // none chosen: no accents
+        o.sfx = [URL(fileURLWithPath: "/Volumes/Media/Sound Effects"), URL(fileURLWithPath: "/Users/you/Downloads/whoosh_soft_01.wav")]
+        o.sfxFrom = [" Studio Whooshes ", "", "kit:Promo Kit"]
+        let args = o.arguments()
+        XCTAssertEqual(args.filter { $0.hasPrefix("--sfx") }, [
+            "--sfx=/Volumes/Media/Sound Effects", "--sfx=/Users/you/Downloads/whoosh_soft_01.wav",
+            "--sfx-from=Studio Whooshes", "--sfx-from=kit:Promo Kit",
+        ])
+        // Remembered between sessions, like the rest of the settings (a sound library is used every time).
+        let prefs = o.preferencesOnly
+        XCTAssertEqual(prefs.sfx, o.sfx)
+        XCTAssertEqual(prefs.sfxFrom, o.sfxFrom)
+        let back = try JSONDecoder().decode(BuildOptions.self, from: JSONEncoder().encode(o))
+        XCTAssertEqual(back, o)
+        // Preferences saved before sound effects existed read as none.
+        let older = try JSONDecoder().decode(BuildOptions.self, from: Data(#"{"graphics":true}"#.utf8))
+        XCTAssertEqual(older.sfx, [])
+        XCTAssertEqual(older.sfxFrom, [])
+        // A folder on a share that isn't connected isn't a problem in the form: the run warns and goes on.
+        o.sfx = [URL(fileURLWithPath: "/Volumes/Not Connected/SFX")]
+        XCTAssertEqual(o.problems, [])
+    }
 }
