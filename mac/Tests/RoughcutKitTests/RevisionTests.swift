@@ -104,7 +104,9 @@ final class RevisionTests: XCTestCase {
         presets[1].apply(to: &o)
         XCTAssertEqual(o.sfx, [URL(fileURLWithPath: "/Volumes/Media/SFX")])
         XCTAssertEqual(o.sfxFrom, ["Whooshes"])
-        XCTAssertTrue(o.arguments().contains("--sfx-from=Whooshes"))
+        // A preset's Studio names are a preset's to send: one Studio has lost is a warning in the paper edit, never a stop.
+        XCTAssertTrue(o.arguments().contains("--preset-sfx-from=Whooshes"))
+        XCTAssertFalse(o.arguments().contains("--sfx-from=Whooshes"))
         presets[2].apply(to: &o)
         XCTAssertEqual(o.sfxFrom, ["Whooshes"])
     }

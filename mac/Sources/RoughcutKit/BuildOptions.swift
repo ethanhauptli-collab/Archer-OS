@@ -240,8 +240,12 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var graphicsLook: [String] = []
     /// Sound effects for accents (`--sfx`): folders or single sounds. Remembered, like a library you use every time.
     public var sfx: [URL] = []
-    /// Venture Studio collections (or kits) to take sound effects from, by name (`--sfx-from`).
+    /// Venture Studio collections (or kits) to take sound effects from, by name. Remembered, and filled in by a preset.
     public var sfxFrom: [String] = []
+    /// The names in `sfxFrom` typed into the form in this session. Only these are sent as `--sfx-from`, which stops the build
+    /// when Venture Studio has no such collection; the others (remembered, or a preset's) go as `--preset-sfx-from`, a warning
+    /// in the paper edit, so a collection renamed in Studio doesn't block every build. Not remembered.
+    public var sfxFromTyped: [String] = []
 
     public init() {}
 
@@ -404,7 +408,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         args += music.map { "--music=\($0.path)" }
         // Read only, and never checked here: a folder on a network share that's asleep would hang the form.
         args += sfx.map { "--sfx=\($0.path)" }
-        args += sfxFrom.map(\.trimmed).filter { !$0.isEmpty }.map { "--sfx-from=\($0)" }
+        let typed = Set(sfxFromTyped.map(\.trimmed))
+        for name in sfxFrom.map(\.trimmed) where !name.isEmpty {
+            args.append(typed.contains(name) ? "--sfx-from=\(name)" : "--preset-sfx-from=\(name)")
+        }
         if dialogueLevel != .standard {
             args.append("--dialogue-level=\(dialogueLevel.rawValue)")
         }
@@ -433,6 +440,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         copy.brief = ""
         copy.targetLength = ""
         copy.music = []
+        copy.sfxFromTyped = []
         return copy
     }
 }

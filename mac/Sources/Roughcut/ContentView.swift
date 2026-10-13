@@ -510,6 +510,9 @@ struct SoundEffectsPicker: View {
         if !model.options.sfxFrom.contains(name) {
             model.options.sfxFrom.append(name)
         }
+        if !model.options.sfxFromTyped.contains(name) {
+            model.options.sfxFromTyped.append(name)  // typed now: the build stops if Studio has no such collection
+        }
         collection = ""
     }
 }

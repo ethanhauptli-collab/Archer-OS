@@ -336,14 +336,9 @@ final class BuildOptionsTests: XCTestCase {
 
     func testSoundEffectsFlags() throws {
         var o = options()
-        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--sfx") })  // none chosen: no accents
+        XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--sfx") || $0.hasPrefix("--preset-sfx") })  // none chosen: no accents
         o.sfx = [URL(fileURLWithPath: "/Volumes/Media/Sound Effects"), URL(fileURLWithPath: "/Users/you/Downloads/whoosh_soft_01.wav")]
         o.sfxFrom = [" Studio Whooshes ", "", "kit:Promo Kit"]
-        let args = o.arguments()
-        XCTAssertEqual(args.filter { $0.hasPrefix("--sfx") }, [
-            "--sfx=/Volumes/Media/Sound Effects", "--sfx=/Users/you/Downloads/whoosh_soft_01.wav",
-            "--sfx-from=Studio Whooshes", "--sfx-from=kit:Promo Kit",
-        ])
         // Remembered between sessions, like the rest of the settings (a sound library is used every time).
         let prefs = o.preferencesOnly
         XCTAssertEqual(prefs.sfx, o.sfx)
@@ -354,6 +349,21 @@ final class BuildOptionsTests: XCTestCase {
         let older = try JSONDecoder().decode(BuildOptions.self, from: Data(#"{"graphics":true}"#.utf8))
         XCTAssertEqual(older.sfx, [])
         XCTAssertEqual(older.sfxFrom, [])
+        XCTAssertEqual(older.sfxFromTyped, [])
+        // Names that were remembered or a preset's go as a preset's do: Studio losing one is a warning, never a stop.
+        let args = o.arguments()
+        XCTAssertEqual(args.filter { $0.hasPrefix("--sfx") || $0.hasPrefix("--preset-sfx") }, [
+            "--sfx=/Volumes/Media/Sound Effects", "--sfx=/Users/you/Downloads/whoosh_soft_01.wav",
+            "--preset-sfx-from=Studio Whooshes", "--preset-sfx-from=kit:Promo Kit",
+        ])
+        // A name typed into the form in this session must exist in Studio: the build stops before it makes anything.
+        o.sfxFrom.append("Hits")
+        o.sfxFromTyped = [" Hits ", "A name since removed"]
+        XCTAssertEqual(o.arguments().filter { $0.hasPrefix("--sfx-from") || $0.hasPrefix("--preset-sfx-from") }, [
+            "--preset-sfx-from=Studio Whooshes", "--preset-sfx-from=kit:Promo Kit", "--sfx-from=Hits",
+        ])
+        // What was typed isn't remembered as typed: next launch, a name is one that was remembered.
+        XCTAssertEqual(o.preferencesOnly.sfxFromTyped, [])
         // A folder on a share that isn't connected isn't a problem in the form: the run warns and goes on.
         o.sfx = [URL(fileURLWithPath: "/Volumes/Not Connected/SFX")]
         XCTAssertEqual(o.problems, [])
