@@ -99,6 +99,10 @@ def sound_effects_section(tl: Timeline, sfx: dict | None) -> list[str]:
         L += [f"None: no usable sound effects in {where}."]
     elif amount == "none":
         L += [f"None: the brief or notes asked for no sound effects. The pool has {len(pool.sounds)} sounds ({counts}) from {where}."]
+    elif not tl.accents:
+        missed = sfx.get("missed") or {}
+        nothing = "" if missed.get("no_sound") or missed.get("too_short") or missed.get("replayed") else " Nothing in this cut calls for one."
+        L += [f"No accents on this cut ({AMOUNT_TEXT.get(amount, amount)}).{nothing} The pool has {len(pool.sounds)} sounds ({counts}) in {where}."]
     else:
         L += [
             f"{len(tl.accents)} accent{'s' if len(tl.accents) != 1 else ''} ({AMOUNT_TEXT.get(amount, amount)}), from {len(pool.sounds)} sounds "
@@ -120,6 +124,10 @@ def sound_effects_section(tl: Timeline, sfx: dict | None) -> list[str]:
     missed = sfx.get("missed") or {}
     for kind, n in sorted((missed.get("no_sound") or {}).items()):
         L.append(f"- No {kind} in the pool, so {n} place{'s' if n != 1 else ''} that would take one {'have' if n != 1 else 'has'} none.")
+    for kind, n in sorted((missed.get("too_short") or {}).items()):
+        L.append(
+            f"- {n} place{'s' if n != 1 else ''} would take a {kind}, but every {kind} in the pool is shorter than a frame at this cut's frame rate."
+        )
     if missed.get("replayed"):
         n = missed["replayed"]
         L.append(

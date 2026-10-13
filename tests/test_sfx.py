@@ -5,6 +5,7 @@ through build, render and revise, with every FCPXML checked against the DTD and 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -16,7 +17,7 @@ import pytest
 from conftest import CANNED_PLAN, FakeProvider, ffmpeg, make_clip
 from test_end_to_end import RATE_UNDEFINED, check_invariants, validate_dtd
 
-from roughcut import accents, pipeline, presets, sfx
+from roughcut import accents, pipeline, presets, report, sfx, studio
 from roughcut.analyze import Analysis, Cache
 from roughcut.cli import main
 from roughcut.media import MediaInfo
@@ -532,13 +533,13 @@ def test_a_share_that_stops_answering_drops_its_sounds_in_time(footage, sfx_fold
 
     # A folder listing that never comes back is dropped the same way.
     stuck.clear()
-    monkeypatch.setattr(sfx, "SCAN_SECONDS", 0.3)
-    monkeypatch.setattr(sfx, "_scan", hang)
+    monkeypatch.setattr(sfx, "SCAN_IDLE_SECONDS", 0.3)
+    monkeypatch.setattr(sfx, "_scandir", hang)
     try:
         pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c2"))
     finally:
         stuck.set()
-    assert pool.sounds == [] and "didn't answer" in pool.warnings[0]
+    assert pool.sounds == [] and "stopped answering" in pool.warnings[0]
 
 
 def test_a_render_checks_sound_effects_under_a_deadline(monkeypatch):
@@ -556,6 +557,376 @@ def test_a_render_checks_sound_effects_under_a_deadline(monkeypatch):
     monkeypatch.setattr(pipeline, "bounded", stalled)
     warnings = pipeline.missing_media(analysis, tl)
     assert len(calls) == 1 and len(warnings) == 1 and "didn't answer" in warnings[0] and "2 sound effects" in warnings[0]
+
+
+# ------------------------------------------------------------------ shares that are slow, asleep or in the way
+
+
+class _Slow:
+    """os.scandir's iterator, answering one entry at a time as a loaded network share does."""
+
+    def __init__(self, it, delay: float):
+        self.it, self.delay = it, delay
+
+    def __enter__(self):
+        self.it.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self.it.__exit__(*exc)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        time.sleep(self.delay)
+        return next(self.it)
+
+
+class _Entry:
+    """A directory entry that costs nothing to make."""
+
+    def __init__(self, name: str, directory: str, *, folder: bool = False):
+        self.name, self.path, self.folder = name, f"{directory}/{name}", folder
+
+    def is_dir(self, follow_symlinks: bool = True) -> bool:
+        return self.folder
+
+    def is_symlink(self) -> bool:
+        return False
+
+
+class _Listed:
+    """What os.scandir returns for a folder: its entries, one at a time, then `after` (a sleep or a stall)."""
+
+    def __init__(self, entries, after=None, delay: float = 0.0):
+        self.entries, self.after, self.delay = entries, after, delay
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        for e in self.entries:
+            if self.delay:
+                time.sleep(self.delay)
+            yield e
+        if self.after:
+            self.after()
+
+
+def test_a_kit_file_on_a_stalled_share_is_read_under_a_deadline(footage, tmp_path, fake, monkeypatch, capsys):
+    """studio.load_kit opens the file with plain os calls, which a stalled mount blocks in the kernel."""
+    stuck = threading.Event()
+
+    def hang(*a, **k):
+        stuck.wait(30)
+        raise OSError("gave up")
+
+    monkeypatch.setattr(studio, "load_kit", hang)
+    monkeypatch.setattr(sfx, "KIT_SECONDS", 0.3, raising=False)
+    kit = str(tmp_path / "Volumes-Media" / "promo-kit.json")
+    t = time.monotonic()
+    try:
+        with pytest.raises(sfx.SourceError, match="didn't answer"):
+            sfx.sources([], [kit], strict=[kit])
+        loose = sfx.sources([], [kit])
+        assert loose.items == [] and "didn't answer" in loose.warnings[0] and "no sound effects from it" in loose.warnings[0]
+        # The build stops before its folder is made (a kit file you named is an explicit request); a preset's never stops it.
+        out = tmp_path / "out"
+        base = ["build", str(footage), "-o", str(out), "--transcriber", "none", "--cache-dir", str(tmp_path / "cache")]
+        assert main(base + ["--sfx-from", kit]) == 1 and not out.exists()
+        assert "didn't answer" in capsys.readouterr().err
+        assert main(base + ["--preset-sfx-from", kit]) == 0
+        assert any("didn't answer" in w for w in json.loads((out / "result.json").read_text())["warnings"])
+    finally:
+        stuck.set()
+    assert time.monotonic() - t < 30
+
+
+def test_a_folder_given_to_sfx_from_says_to_use_sfx(tmp_path):
+    folder = tmp_path / "Sound Effects"
+    folder.mkdir()
+    with pytest.raises(sfx.SourceError, match="folder.*--sfx"):
+        sfx.sources([], [str(folder)], strict=[str(folder)])
+
+
+def test_a_slow_share_that_keeps_answering_loses_no_sounds(sfx_folder, tmp_path, monkeypatch):
+    """The deadline is about silence: a listing that takes minutes because the share is slow, one entry after another, finishes."""
+    real = os.scandir
+    monkeypatch.setattr(sfx, "SCAN_SECONDS", 0.5, raising=False)  # the old whole-listing ceiling
+    monkeypatch.setattr(sfx, "SCAN_IDLE_SECONDS", 0.5, raising=False)
+    monkeypatch.setattr(sfx, "_scandir", lambda p: _Slow(real(p), 0.12), raising=False)
+    t = time.monotonic()
+    pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c"))
+    assert time.monotonic() - t > 1.0, "slower than the silence it allows, in all"
+    assert len(pool.sounds) == 5
+    assert not [w for w in pool.warnings if "answer" in w or "stopped" in w or "slow" in w]
+
+
+def test_a_listing_that_stops_answering_keeps_the_folders_it_finished(tmp_path):
+    folder = str(tmp_path)
+    stuck = threading.Event()
+
+    def asleep():
+        stuck.wait(30)
+        raise OSError("gave up")
+
+    def scandir(p):
+        if str(p) == folder:
+            return _Listed([_Entry("whoosh_a.wav", folder), _Entry("whoosh_b.wav", folder), _Entry("More", folder, folder=True)])
+        return _Listed([_Entry("whoosh_c.wav", str(p))], after=asleep)  # the subfolder goes to sleep before it is done
+
+    t = time.monotonic()
+    try:
+        listing = sfx.list_folder(folder, idle=0.3, total=60, scandir=scandir)
+    finally:
+        stuck.set()
+    assert time.monotonic() - t < 10
+    assert listing.status == "stalled" and sorted(c.name for c in listing.found) == ["whoosh_a.wav", "whoosh_b.wav"]
+    assert listing.seen == 2, "a half-listed folder counts for nothing: Studio's import marker may be in the half not seen"
+
+
+def test_a_listing_that_runs_past_its_total_time_keeps_what_it_listed(tmp_path):
+    folder = str(tmp_path)
+
+    def scandir(p):
+        if str(p) == folder:
+            return _Listed([_Entry(f"whoosh_{i}.wav", folder) for i in range(20)] + [_Entry("More", folder, folder=True)])
+        return _Listed([_Entry(f"pop_{i}.wav", str(p)) for i in range(100_000)], delay=0.01)  # steady, so never silent
+
+    listing = sfx.list_folder(folder, idle=5, total=0.5, scandir=scandir)
+    assert listing.status == "slow" and len(listing.found) == 20
+
+
+def test_a_listing_reads_a_tree_the_way_os_walk_did(sfx_folder):
+    listing = sfx.list_folder(str(sfx_folder))
+    assert listing.status == "done" and listing.denied == []
+    assert sorted(c.name for c in listing.found) == sorted(
+        ["impact_hit_01.wav", "long_whoosh_bed.wav", "pop_ui_01.wav", "riser_tension_01.wav", "room_tone.wav", "swoosh_fast_02.wav", "whoosh_soft_01.wav"])
+    assert listing.other == ["whoosh_lossless.flac"] and listing.importing == ["Incoming/"]
+    by = {c.name: c for c in listing.found}
+    assert by["pop_ui_01.wav"].folders == ("UI", "Sound Effects") and by["impact_hit_01.wav"].folders == ("Sound Effects",)
+    assert by["pop_ui_01.wav"].path == str(sfx_folder / "UI" / "pop_ui_01.wav")
+    single = sfx.list_folder(str(sfx_folder / "UI" / "pop_ui_01.wav"))
+    assert [c.name for c in single.found] == ["pop_ui_01.wav"] and single.found[0].folders == ("UI",)
+    with pytest.raises(FileNotFoundError):
+        sfx.list_folder(str(sfx_folder / "nope"))
+
+
+def test_a_stalled_folder_listing_is_worded_apart_from_a_slow_one(sfx_folder, tmp_path, monkeypatch):
+    stuck = threading.Event()
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith("UI"):
+            stuck.wait(30)
+            raise OSError("gave up")
+        return real(p)
+
+    monkeypatch.setattr(sfx, "SCAN_IDLE_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(sfx, "_scandir", scandir, raising=False)
+    try:
+        pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c"))
+    finally:
+        stuck.set()
+    assert any("stopped answering" in w and "listed" in w for w in pool.warnings)
+    assert {s.name for s in pool.sounds} >= {"impact_hit_01.wav", "riser_tension_01.wav"}, "what was listed before it stopped"
+    assert "whoosh_soft_01.wav" not in {s.name for s in pool.sounds}
+
+    monkeypatch.setattr(sfx, "SCAN_IDLE_SECONDS", 5, raising=False)
+    monkeypatch.setattr(sfx, "SCAN_TOTAL_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(sfx, "_scandir", lambda p: _Slow(real(p), 0.1), raising=False)
+    pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c2"))
+    assert any("slow" in w and "listed" in w for w in pool.warnings) and not any("stopped answering" in w for w in pool.warnings)
+
+
+def test_a_folder_macos_wont_list_says_how_to_allow_it(sfx_folder, tmp_path, monkeypatch):
+    real = os.scandir
+
+    def denied(p):
+        if str(p) == str(sfx_folder):
+            raise PermissionError(1, "Operation not permitted")
+        return real(p)
+
+    monkeypatch.setattr(sfx, "_scandir", denied, raising=False)
+    pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c"))
+    assert pool.sounds == [] and "Privacy & Security" in pool.warnings[0] and str(sfx_folder) in pool.warnings[0]
+    # One subfolder it can't open is said, and the rest of the folder still counts.
+
+    def sub_denied(p):
+        if str(p).endswith("UI"):
+            raise PermissionError(1, "Operation not permitted")
+        return real(p)
+
+    monkeypatch.setattr(sfx, "_scandir", sub_denied, raising=False)
+    pool = sfx.build_pool(sfx.sources([str(sfx_folder)], []), Cache(tmp_path / "c2"))
+    assert any("UI" in w and "Privacy & Security" in w for w in pool.warnings)
+    assert "whoosh_soft_01.wav" in {s.name for s in pool.sounds} and "pop_ui_01.wav" not in {s.name for s in pool.sounds}
+
+
+def test_each_file_is_classed_once(monkeypatch):
+    calls = []
+    real = sfx.classify
+    monkeypatch.setattr(sfx, "classify", lambda *a, **k: calls.append(a[0]) or real(*a, **k))
+    found = [sfx.Candidate(f"/Volumes/Media/{k}_{i:03d}.wav", f"{k}_{i:03d}.wav") for k in ("whoosh", "pop", "hit", "riser", "noise") for i in range(40)]
+    kept, over = sfx._take_turns(found, 60)
+    assert len(kept) == 60 and len(over) == 100 and len(calls) == len(found)
+
+
+def test_classing_a_big_folder_is_quick():
+    found = [sfx.Candidate(f"/Volumes/Media/Library/Pack {i % 90}/{('whoosh', 'pop', 'hit', 'riser', 'take')[i % 5]}_{i:05d}.wav", f"{('whoosh', 'pop', 'hit', 'riser', 'take')[i % 5]}_{i:05d}.wav",
+                           folders=(f"Pack {i % 90}", "Library")) for i in range(20_000)]
+    t = time.monotonic()
+    kept, _ = sfx._take_turns(found, sfx.MAX_FILES)
+    assert time.monotonic() - t < 2 and len(kept) == sfx.MAX_FILES
+
+
+def test_the_class_words_still_mean_what_they_did():
+    for text, want in [("Whoosh Soft", ("whoosh", 0)), ("big pass by", ("whoosh", 1)), ("fly-by 3", ("whoosh", 0)), ("UI Notification", ("pop", 0)),
+                       ("then a build up", ("riser", 2)), ("Hit hit", ("hit", 0)), ("slam_dunk_impacts", ("hit", 0)), ("popcorn", None),
+                       ("Cinematic Riser 4", ("riser", 1)), ("Big Impacts 2", ("hit", 1)), ("hit then whoosh", ("hit", 0)), ("WhooshSoft01", ("whoosh", 0))]:
+        assert sfx.class_of_text(text) == want, text
+
+
+def test_a_cut_with_no_transcript_has_no_words_for_an_accent_to_sit_under():
+    tl, analysis, _ = _cut()
+    for seg in analysis.clip("V01").segments:
+        seg.words, seg.text = [], ""  # a build with no transcriber: one empty segment per clip
+    assert accents._word_spans(tl, analysis) == []
+    accents.place(tl, analysis, _pool(_sound("X01", "whoosh")), "soft")
+    assert tl.accents and not any(a["under_words"] for a in tl.accents)
+    for seg in analysis.clip("V01").segments:
+        seg.text = "A line the transcript has, without its words timed."
+    assert accents._word_spans(tl, analysis), "a line with text but no word times still sounds over its span"
+
+
+def test_a_sound_shorter_than_a_frame_is_said_so_not_blamed_on_the_replay_rule():
+    tl, analysis, _ = _cut()
+    _graphic(tl, "G01", 30)
+    tiny = _sound("X01", "pop", 0.02, hit=0.0)  # 20 ms: under one frame at any rate the cut runs at
+    pool = _pool(tiny, *(_sound(f"X0{i}", "whoosh", name=f"{c}_whoosh.wav") for i, c in enumerate("abc", 2)))
+    missed = accents.place(tl, analysis, pool, "soft", graphic_kinds={"G01": "lower_third"})
+    assert missed["replayed"] == 0 and missed["too_short"] == {"pop": 1} and missed["no_sound"] == {}
+    text = "\n".join(report.sound_effects_section(tl, {"pool": pool, "amount": "soft", "missed": missed}))
+    assert "shorter than a frame" in text and "10 s" not in text
+    # A pop a frame long or more is used, with the tiny one left to it.
+    pool = _pool(tiny, _sound("X03", "pop", 0.15, hit=0.0, name="pop_b.wav"))
+    missed = accents.place(tl, analysis, pool, "soft", graphic_kinds={"G01": "lower_third"})
+    assert missed["too_short"] == {} and [a["file"] for a in tl.accents if a["kind"] == "pop"] == ["pop_b.wav"]
+
+
+def test_a_cut_with_no_event_for_the_pool_says_no_accents_not_zero_accents():
+    tl, analysis, _ = _cut()
+    tl.section_starts = tl.section_starts[:1]  # a single section, no graphics: nothing calls for one
+    pool = _pool(_sound("X01", "whoosh"))
+    missed = accents.place(tl, analysis, pool, "soft")
+    text = "\n".join(report.sound_effects_section(tl, {"pool": pool, "amount": "soft", "missed": missed}))
+    assert tl.accents == [] and "No accents" in text and "0 accents" not in text
+
+
+def _two_graphics_attach(monkeypatch):
+    """graphics.make that attaches a title card and a lower third, the way a render that worked does."""
+    from roughcut import graphics
+    from roughcut.analyze import Clip
+    from roughcut.plan import GraphicSpec
+
+    title = {"kind": "title_card", "segment": "V01.S003", "words": "heading up the mountain", "text": "Heading Out", "subtext": "", "seconds": 2.5, "direction": ""}
+    lower = dict(title, kind="lower_third", segment="V01.S006", words="The kids", text="Maria Lopez")
+    monkeypatch.setattr(graphics, "renderer_problem", lambda: None)
+
+    def fake_make(designer, specs, tl, analysis, out_dir, **k):
+        fd = tl.frame_duration
+        placed, clips = [], []
+        for i, g in enumerate((title, lower)):
+            p = graphics.PlacedGraphic(id=f"G0{i + 1}", spec=GraphicSpec(**{f: g[f] for f in ("kind", "segment", "words", "text")}), index=i,
+                                       start=tl.seg_ranges[g["segment"]][0], frames=75)
+            media = MediaInfo(path=str(out_dir / "graphics" / f"{p.id}.mov"), name=f"{p.id}.mov", kind="video", duration=75 * fd, start=Fraction(0),
+                              has_video=True, has_audio=False, width=tl.width, height=tl.height, frame_duration=fd, codec="prores")
+            tl.connected.append(ConnectedClip(p.id, Fraction(0), p.frames, p.start, 2, kind="graphic", note=p.spec.text))
+            placed.append(p)
+            clips.append(Clip(id=p.id, media=media, role="graphic", transcript_source="graphic"))
+        return clips, placed, []
+
+    monkeypatch.setattr(graphics, "make", fake_make)
+    return [title, lower]
+
+
+def _every_sound_reads_as_missing(monkeypatch):
+    """pipeline.missing_media's existence checks for sounds, all answering 'gone'; returns the paths it was asked about."""
+    checked = []
+    real_bounded = pipeline.bounded
+
+    def gone(fn, *a, seconds, what=""):
+        if fn is not os.path.exists:
+            return real_bounded(fn, *a, seconds=seconds, what=what)
+        checked.append(a[0])
+        return False
+
+    monkeypatch.setattr(pipeline, "bounded", gone)
+    return checked
+
+
+def test_the_report_and_missing_media_describe_the_cut_after_its_graphics(footage, sfx_folder, tmp_path, monkeypatch, cache):
+    """Graphics attach after the first placement and change it (a hit beats a section whoosh; a lower third with no pop in
+    the pool gets none): the paper edit's notes and the missing-media warning are about the cut that is written."""
+    pool = tmp_path / "SFX"
+    pool.mkdir()
+    for name in ("Whooshes/whoosh_soft_01.wav", "impact_hit_01.wav"):
+        shutil.copy(sfx_folder / name, pool / Path(name).name)
+    graphics_asked = _two_graphics_attach(monkeypatch)
+    provider = FakeProvider(dict(CANNED_PLAN, graphics=graphics_asked, sfx="soft"))
+    monkeypatch.setattr(pipeline, "make_provider", lambda *a, **k: provider)
+    checked = _every_sound_reads_as_missing(monkeypatch)
+    out = tmp_path / "out"
+    result = pipeline.build(Options(inputs=[footage], out=out, name="footage", transcriber="none", cache_dir=cache, sfx=(str(pool),), graphics=True))
+    final = {a["file"] for a in result.timeline.accents}
+    assert final == {"impact_hit_01.wav", "whoosh_soft_01.wav"} and not any(a["kind"] == "pop" for a in result.timeline.accents)
+    assert "No pop in the pool" in result.report.read_text(), "the lower third that got none is said"
+    missing = next(w for w in result.warnings if "are no longer where the footage was read" in w)
+    assert missing.startswith("2 files") and "impact_hit_01.wav" in missing and "whoosh_soft_01.wav" in missing
+    assert {Path(p).name for p in checked[-2:]} == final, "the sounds in the cut that is written are the ones checked last"
+    # A re-cut does the same: the pool is saved with the plan, the folder can be gone, the notes follow the final placement.
+    shutil.rmtree(pool)
+    checked.clear()
+    again = pipeline.rerender(out, Options(inputs=[]), overrides=set())
+    assert {a["file"] for a in again.timeline.accents} == final
+    assert "No pop in the pool" in again.report.read_text()
+    assert {Path(p).name for p in checked[-2:]} == final
+    assert next(w for w in again.warnings if "are no longer where the footage was read" in w).startswith("2 files")
+
+
+def test_a_sounds_folder_reached_through_a_link_is_never_footage(tmp_path):
+    real = tmp_path / "real"
+    (real / "Trip" / "SFX").mkdir(parents=True)
+    (real / "Trip" / "talk.mov").write_bytes(b"x")
+    (real / "Trip" / "SFX" / "whoosh_soft_01.wav").write_bytes(b"x")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    out = tmp_path / "out"
+    spelled_apart = Options(inputs=[link / "Trip"], sfx=(str(real / "Trip" / "SFX"),))
+    assert [f.name for f in pipeline.footage_files(spelled_apart, out)] == ["talk.mov"]
+    as_a_file = Options(inputs=[link / "Trip"], sfx=(str(real / "Trip" / "SFX" / "whoosh_soft_01.wav"),))
+    assert [f.name for f in pipeline.footage_files(as_a_file, out)] == ["talk.mov"]
+    same = Options(inputs=[real / "Trip"], sfx=(str(real / "Trip" / "SFX"),))
+    assert [f.name for f in pipeline.footage_files(same, out)] == ["talk.mov"]
+    nothing = Options(inputs=[link / "Trip"])
+    assert sorted(f.name for f in pipeline.footage_files(nothing, out)) == ["talk.mov", "whoosh_soft_01.wav"]
+
+
+def test_finding_where_sounds_really_are_never_waits_on_a_stalled_share(tmp_path, monkeypatch):
+    (tmp_path / "Trip" / "SFX").mkdir(parents=True)
+    (tmp_path / "Trip" / "talk.mov").write_bytes(b"x")
+    (tmp_path / "Trip" / "SFX" / "whoosh_soft_01.wav").write_bytes(b"x")
+
+    def stalled(fn, *a, seconds, what=""):
+        raise pipeline.Stalled(what)
+
+    monkeypatch.setattr(pipeline, "bounded", stalled)
+    files = pipeline.footage_files(Options(inputs=[tmp_path / "Trip"], sfx=(str(tmp_path / "Trip" / "SFX"),)), tmp_path / "out")
+    assert [f.name for f in files] == ["talk.mov"], "by their spelling when the real location can't be found in time"
 
 
 # ------------------------------------------------------------------ presets

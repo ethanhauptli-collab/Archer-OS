@@ -638,12 +638,14 @@ def music_problem(song: Path | str) -> str | None:
 SFX_CHECK_SECONDS = 3.0  # is a sound effect still there: a network share gets this long to answer
 
 
-def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
+def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool = True, sounds: bool = True) -> list[str]:
     """Clips a cut uses whose files are gone from where the footage was read.
 
     `render` and `revise` reuse that reading, so a song taken out of Downloads or a moved
     footage folder would otherwise only show up as missing media in Final Cut. Sound effects
     (often on a network share) are checked under a deadline: a share that doesn't answer is said so.
+    `footage`, `sounds`: which of the two to check (the accents are placed again once graphics are attached,
+    so their files are checked for the cut that is written).
     """
     used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
     gone, unanswered = [], []
@@ -651,8 +653,10 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
         if c.id not in used:
             continue
         if c.role != "sfx":
-            if not Path(c.media.path).exists():
+            if footage and not Path(c.media.path).exists():
                 gone.append(c)
+            continue
+        if not sounds:
             continue
         if unanswered:  # the share already didn't answer: don't wait on it again for each file
             unanswered.append(c)
@@ -692,12 +696,7 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         problem = music_problem(song)
         if problem:
             raise RoughcutError(problem)
-    # Sound effects are never footage: a --sfx folder or file inside a footage folder is left out of its scan.
-    inside = [Path(p) for p in opts.sfx if any(_lexically_inside(str(p), str(Path(i).expanduser().absolute())) for i in opts.inputs)]
-    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir] + inside)
-    if inside:
-        held = [q.resolve() for q in inside]
-        files = [f for f in files if not any(f == h or h in f.parents for h in held)]
+    files = footage_files(opts, out_dir)
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -721,6 +720,31 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         read = {Path(c.media.path).resolve() for c in analysis.clips}
         skipped += [f.name for f in files if Path(f).resolve() not in read]
     return analysis
+
+
+def sound_locations(opts: Options) -> list[Path]:
+    """Where the --sfx files and folders really are, links followed, to keep them out of the footage scan.
+
+    Found under a deadline (a folder on a share that's asleep): then they are taken as spelled, and only
+    the ones spelled inside a footage folder can be left out.
+    """
+    if not opts.sfx:
+        return []
+    spelled = [os.path.normpath(str(Path(p).expanduser().absolute())) for p in opts.sfx]
+    try:
+        return [Path(p) for p in bounded(lambda: [os.path.realpath(p) for p in spelled], seconds=SFX_CHECK_SECONDS, what="finding the sound effects")]
+    except Stalled:
+        return [Path(p) for p in spelled if any(_lexically_inside(p, str(Path(i).expanduser().absolute())) for i in opts.inputs)]
+
+
+def footage_files(opts: Options, out_dir: Path) -> list[Path]:
+    """The media files to analyse: the footage folders and songs, without the output folder. Sound effects are never
+    footage: a --sfx folder or file inside a footage folder (or reached through a link to it) is left out of the scan."""
+    held = sound_locations(opts)
+    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir] + held)
+    if held:
+        files = [f for f in files if not any(f == h or h in f.parents for h in held)]
+    return files
 
 
 def _lexically_inside(path: str, folder: str) -> bool:
@@ -1052,7 +1076,8 @@ def _finish_build(
     extra_warnings += pool_warnings
     sfx_report = place_accents(rough, analysis, pool, opts, plan)
     with_sfx = accents.with_clips(analysis, rough, pool)
-    extra_warnings += missing_media(with_sfx, rough, stringout)
+    extra_warnings += missing_media(with_sfx, rough, stringout, sounds=False)
+    sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
     entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
     extra = report_extra(rough) if report_extra else {}
     if sfx_report is not None:
@@ -1070,7 +1095,7 @@ def _finish_build(
                 "`roughcut render` adds any whose designs were saved, and `roughcut render --design-missing` designs the rest."
             ]
             interim = write_outputs(
-                out_dir, name, record, plan, with_sfx, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + pending, **extra),
+                out_dir, name, record, plan, with_sfx, rough, stringout, dict(usage=usage, extra_warnings=extra_warnings + sound_warnings + pending, **extra),
                 version=version, command=command, entry=entry, quiet=True,
             )
             # result.json follows the folder: this version is the newest cut now, even if graphics never finish.
@@ -1097,8 +1122,12 @@ def _finish_build(
                         logo=opts.graphics_logo, look=opts.graphics_look, spellings=plan.spellings,
                     )
             extra_warnings += g_warnings
-            place_accents(rough, analysis, pool, opts, plan, placed)  # again, with a pop or hit on each graphic now attached
+            # Again, with a pop or hit on each graphic now attached: the paper edit and the missing-media check are about this placement.
+            sfx_report = place_accents(rough, analysis, pool, opts, plan, placed) or sfx_report
+            if sfx_report is not None:
+                extra["sfx"] = sfx_report
             with_graphics = accents.with_clips(analysis, rough, pool, g_clips)
+            sound_warnings = missing_media(with_graphics, rough, stringout, footage=False)
             timings["graphics"] = time.monotonic() - t
             limit_hit = designer.limit
             if limit_hit is not None:
@@ -1112,6 +1141,7 @@ def _finish_build(
     elif opts.graphics and fell_back:
         extra_warnings.append("Motion graphics were on, but AI planning failed, so this cut has none.")
         graphics_note = "none: AI planning failed"
+    extra_warnings += sound_warnings
     timings["total"] = time.monotonic() - t_start
     fcpxml_path, report_path = write_outputs(
         out_dir,
@@ -1204,7 +1234,8 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     pool, pool_warnings = sound_pool(opts, record, sources=sfx_sources(opts) if fresh else None)
     sfx_report = place_accents(rough, analysis, pool, opts, plan)
     with_sfx = accents.with_clips(analysis, rough, pool)
-    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + pool_warnings + missing_media(with_sfx, rough, stringout)
+    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + pool_warnings + missing_media(with_sfx, rough, stringout, sounds=False)
+    sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
     placed, with_graphics = [], with_sfx
     planned_graphics, graphics_note = None, None
     usage: list = []
@@ -1264,8 +1295,10 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                     None, ready, rough, analysis, out_dir, brief="", style=style, workers=opts.workers, saved_html=html, house_style=house, planned=specs,
                 )
             graphics_warnings += g_warnings
-            place_accents(rough, analysis, pool, opts, plan, placed)  # again, with a pop or hit on each graphic now attached
+            # Again, with a pop or hit on each graphic now attached: the paper edit and the missing-media check are about this placement.
+            sfx_report = place_accents(rough, analysis, pool, opts, plan, placed) or sfx_report
             with_graphics = accents.with_clips(analysis, rough, pool, g_clips)
+            sound_warnings = missing_media(with_graphics, rough, stringout, footage=False)
             undone = sum(1 for i in fits if i not in html)
             for i, g in enumerate(specs):
                 if g.text and i in html and i not in shown:
@@ -1286,6 +1319,7 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
                     else f"{undone} not designed yet; `roughcut render --design-missing` adds {'them' if undone > 1 else 'it'}"
                 )
                 graphics_warnings.append(design_missing_hint(out_dir, undone, after_reset=limit_hit is not None))
+    graphics_warnings += sound_warnings
     fcpxml_path, report_path = write_outputs(
         out_dir, name, record, plan, with_graphics, rough, stringout,
         {"graphics": placed, "extra_warnings": graphics_warnings, "usage": usage, **({"sfx": sfx_report} if sfx_report else {})},

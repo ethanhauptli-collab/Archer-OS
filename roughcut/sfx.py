@@ -8,10 +8,11 @@ MAX_SECONDS long, are kept; the rest are listed as skipped, never placed. Each k
 and measured once (cached by its fingerprint in Roughcut's cache): its length, its hit (the start of
 its loudest 50 ms), and its loudness with silence around it, so a 150 ms pop gets a reading too.
 
-Every touch of these files (a folder listing, a stat, ffprobe, ffmpeg) runs under textio.bounded:
-a network share that is offline or stops answering drops its sounds with a warning and never
-hangs or fails the run. Files are only read: nothing is written beside them, and Studio's own
-folder is read only through studio.py. The pool is saved in plan.json (`Pool.to_json`), so
+Every touch of these files (a folder listing, a stat, ffprobe, ffmpeg, a kit file) runs under a
+deadline (textio.bounded; a folder listing is watched for silence instead, so a slow share that keeps
+answering is read to the end): a network share that is offline or stops answering drops its sounds
+with a warning and never hangs or fails the run. Files are only read: nothing is written beside
+them, and Studio's own folder is read only through studio.py. The pool is saved in plan.json (`Pool.to_json`), so
 `render` and `revise` place the same sounds again without reading the share or Studio.
 
 accents.py places them on the cut's own frames.
@@ -26,6 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import cached_property
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 
@@ -46,7 +48,9 @@ MAX_SECONDS = 8.0  # longer isn't an accent (music, ambience), whatever its name
 MAX_FILES = 400  # sounds probed per run; the classes take turns, so a big folder of one kind can't crowd out the rest
 PAD = 0.4  # seconds of silence around a sound when measuring its loudness (ebur128's window is 400 ms)
 FILE_SECONDS = 20.0  # one file's stat, probe and measurements together
-SCAN_SECONDS = 30.0  # listing one --sfx folder
+KIT_SECONDS = 20.0  # reading a kit file Studio exported (a small JSON file, maybe on a share)
+SCAN_IDLE_SECONDS = 30.0  # a folder listing has stopped answering when no entry has come for this long
+SCAN_TOTAL_SECONDS = 180.0  # ... and is cut short, keeping what it listed, after this long in all (a slow share, still answering)
 POOL_SECONDS = 240.0  # the whole pool; the rest waits for the next run (each sound is cached once read)
 SCAN_LIMIT = 50_000  # entries looked at in one folder tree
 CACHE_NAME = "sfx-v1.json"
@@ -55,6 +59,7 @@ IMPORT_MARKER = ".venture-studio-import-incomplete.json"  # a folder Studio is s
 OTHER_AUDIO = {".flac", ".ogg", ".oga", ".opus", ".wma", ".mka", ".ape", ".aifc", ".m4b", ".mp2", ".ac3", ".dsf", ".wv"}
 ID_PREFIX = "X"  # clip IDs X01, X02...: V, A, I and G are taken
 VOLUMES = "/Volumes"
+PRIVACY_HINT = "Privacy & Security may be asking for access to that folder or network volume. Allow it, then build again."
 
 
 class SourceError(RuntimeError):
@@ -64,13 +69,20 @@ class SourceError(RuntimeError):
 # ------------------------------------------------------------------ classing
 
 
+_CAMEL_RUN = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL = re.compile(r"([a-z])([A-Z])")
+_LETTER_DIGIT = re.compile(r"([A-Za-z])(\d)")
+_DIGIT_LETTER = re.compile(r"(\d)([A-Za-z])")
+_NOT_WORD = re.compile(r"[^a-z0-9]+")
+
+
 def _tokens(text: str) -> list[str]:
     """'WhooshSoft_01', 'UIClick' -> ['whoosh', 'soft', '01'], ['ui', 'click']."""
-    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-    text = re.sub(r"([A-Za-z])(\d)", r"\1 \2", text)
-    text = re.sub(r"(\d)([A-Za-z])", r"\1 \2", text)
-    return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
+    text = _CAMEL_RUN.sub(r"\1 \2", text)
+    text = _CAMEL.sub(r"\1 \2", text)
+    text = _LETTER_DIGIT.sub(r"\1 \2", text)
+    text = _DIGIT_LETTER.sub(r"\1 \2", text)
+    return [t for t in _NOT_WORD.split(text.lower()) if t]
 
 
 def _singular(token: str, known: set[str]) -> str:
@@ -81,22 +93,27 @@ def _singular(token: str, known: set[str]) -> str:
 
 
 _KNOWN = {w for words in CLASS_WORDS.values() for phrase in words for w in phrase.split()}
+# The class words by their first word, so a name's words are looked up, not matched against every phrase.
+_BY_FIRST: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+for _kind, _words in CLASS_WORDS.items():
+    for _phrase in _words:
+        _want = tuple(_phrase.split())
+        _BY_FIRST.setdefault(_want[0], []).append((_kind, _want))
 
 
 def class_of_text(text: str) -> tuple[str, int] | None:
-    """(class, position) of the first class word in `text`, or None."""
+    """(class, position) of the first class word in `text` (the longest phrase there, then the class's name), or None."""
     tokens = [_singular(t, _KNOWN) for t in _tokens(text)]
-    best: tuple[int, int, str] | None = None  # (position, -length, class)
-    for kind, words in CLASS_WORDS.items():
-        for phrase in words:
-            want = phrase.split()
-            for i in range(len(tokens) - len(want) + 1):
-                if tokens[i : i + len(want)] == want:
-                    found = (i, -len(want), kind)
-                    if best is None or found < best:
-                        best = found
-                    break
-    return (best[2], best[0]) if best else None
+    for i, token in enumerate(tokens):
+        best: tuple[int, str] | None = None  # (-length, class)
+        for kind, want in _BY_FIRST.get(token, ()):
+            if tuple(tokens[i : i + len(want)]) == want:
+                found = (-len(want), kind)
+                if best is None or found < best:
+                    best = found
+        if best:
+            return best[1], i
+    return None
 
 
 def classify(name: str, tags: tuple[str, ...] = (), folders: tuple[str, ...] = ()) -> str | None:
@@ -128,8 +145,9 @@ class Candidate:
     root: str = ""  # its library root (Studio items): no link may lead out of it
     from_studio: bool = False
 
-    @property
+    @cached_property
     def kind(self) -> str | None:
+        """Its class, worked out once (a big folder asks many times)."""
         return classify(self.name, self.tags, self.folders)
 
 
@@ -191,7 +209,13 @@ def sources(
 
     for name in [n for n in names if is_kit_file(n)]:
         try:
-            kit = studio.load_kit(Path(name).expanduser())
+            kit = bounded(_read_kit, Path(name).expanduser(), seconds=KIT_SECONDS, what=f"reading {Path(name).name}")
+        except Stalled:
+            problem(name, f"--sfx-from {name}: the file didn't answer in {KIT_SECONDS:g} s (a network share that stopped responding?).")
+            continue
+        except IsADirectoryError:
+            problem(name, f"--sfx-from {name}: that's a folder. Sound effects in a folder go with --sfx.")
+            continue
         except studio.StudioUnavailable as e:
             problem(name, f"--sfx-from {name}: {e.reason}.")
             continue
@@ -245,6 +269,18 @@ def sources(
     return out
 
 
+def _read_kit(path: Path):
+    """studio.load_kit, which opens the file with plain calls (run it under textio.bounded). A folder is told apart from a bad kit."""
+    from . import studio
+
+    try:
+        return studio.load_kit(path)
+    except studio.StudioUnavailable:
+        if os.path.isdir(path):
+            raise IsADirectoryError(str(path)) from None
+        raise
+
+
 def _also(title: str, name: str) -> tuple[str, ...]:
     """Studio's name for an item, when it isn't just the file's name."""
     title = (title or "").strip()
@@ -259,43 +295,138 @@ def _folders_of(relative: str, top: str) -> tuple[str, ...]:
 
 # ------------------------------------------------------------------ listing folders
 
+_scandir = os.scandir  # the one way folders are opened (tests stand in for a slow or sleeping share here)
 
-def _scan(path: str) -> tuple[list[Candidate], list[str], list[str], bool]:
-    """(audio files, names of audio Roughcut doesn't read, folders skipped mid-import, listing cut short). Runs bounded."""
-    p = Path(path)
-    st = os.stat(p)
-    key = _share_key(str(p), str(p))
-    if stat.S_ISREG(st.st_mode):
-        ext = p.suffix.lower()
-        if ext in AUDIO_EXTS:
-            return [Candidate(str(p), p.name, folders=(p.parent.name,), origin="folder", key=key)], [], [], False
-        return [], [p.name] if ext in OTHER_AUDIO else [], [], False
-    if not stat.S_ISDIR(st.st_mode):
-        raise OSError(f"{p} isn't a file or folder")
-    found: list[Candidate] = []
-    other: list[str] = []
-    importing: list[str] = []
-    seen = 0
-    for root, dirs, files in os.walk(p):
-        if IMPORT_MARKER in files:  # Studio is still copying into this folder: its files may be partial
-            importing.append(PurePosixPath(root).name + "/")
-            dirs[:] = []
-            continue
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not d.endswith(SKIP_DIR_SUFFIXES))
-        rel = PurePosixPath(root).relative_to(PurePosixPath(str(p)))
-        folders = tuple(reversed([x for x in rel.parts if x not in (".", "")])) + (p.name,)
-        for f in sorted(files):
-            seen += 1
-            if seen > SCAN_LIMIT:
-                return found, other, importing, True
-            if f.startswith(".") or is_junk(f):
+
+@dataclass
+class Listing:
+    """What a folder listing found: the audio files, and what was left out of it and why."""
+
+    found: list[Candidate] = field(default_factory=list)
+    other: list[str] = field(default_factory=list)  # names of audio Roughcut doesn't read
+    importing: list[str] = field(default_factory=list)  # folders skipped mid-import
+    denied: list[tuple[str, bool]] = field(default_factory=list)  # (folder inside it that wouldn't open, macOS refused it)
+    seen: int = 0  # files looked at
+    cut_short: bool = False  # past SCAN_LIMIT
+    status: str = "done"  # done / slow (cut short after SCAN_TOTAL_SECONDS, still answering) / stalled (no answer for SCAN_IDLE_SECONDS)
+
+
+class _Walk:
+    """A listing in progress, shared by the thread doing it and the one waiting: every entry it reads is a sign of life."""
+
+    def __init__(self) -> None:
+        self.listing = Listing()
+        self.lock = threading.Lock()
+        self.last = time.monotonic()  # when the share last answered
+        self.finished = threading.Event()
+        self.error: BaseException | None = None  # the folder itself wouldn't open
+        self.abandoned = False  # the waiting thread gave up: stop adding
+
+    def beat(self) -> None:
+        self.last = time.monotonic()
+
+
+def _walk(path: str, w: _Walk, scandir) -> None:
+    """List `path` (an audio file, or a folder searched through its subfolders) into `w.listing`. Runs in its own thread."""
+    try:
+        p = Path(path)
+        st = os.stat(p)
+        w.beat()
+        key = _share_key(str(p), str(p))
+        out = w.listing
+        if stat.S_ISREG(st.st_mode):
+            ext = p.suffix.lower()
+            with w.lock:
+                if ext in AUDIO_EXTS:
+                    out.found.append(Candidate(str(p), p.name, folders=(p.parent.name,), origin="folder", key=key))
+                elif ext in OTHER_AUDIO:
+                    out.other.append(p.name)
+            return
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(f"{p} isn't a file or folder")
+        stack: list[tuple[str, tuple[str, ...]]] = [(str(p), ())]  # (folder, its names below the one given)
+        while stack:
+            directory, below = stack.pop()
+            try:
+                entries = []
+                with scandir(directory) as it:
+                    for entry in it:
+                        w.beat()
+                        entries.append(entry)
+            except OSError as e:
+                if not below:
+                    raise
+                with w.lock:
+                    out.denied.append(("/".join(below), isinstance(e, PermissionError)))
                 continue
-            ext = Path(f).suffix.lower()
-            if ext in AUDIO_EXTS:
-                found.append(Candidate(str(PurePosixPath(root) / f), f, folders=folders, origin="folder", key=key))
-            elif ext in OTHER_AUDIO:
-                other.append(f)
-    return found, other, importing, False
+            if any(e.name == IMPORT_MARKER for e in entries):  # Studio is still copying into this folder: its files may be partial
+                with w.lock:
+                    out.importing.append(os.path.basename(directory) + "/")
+                continue
+            folders = tuple(reversed(below)) + (p.name,)
+            dirs: list[str] = []
+            for entry in sorted(entries, key=lambda e: e.name):
+                w.beat()
+                name = entry.name
+                try:
+                    is_dir = entry.is_dir()
+                    followed = is_dir and entry.is_symlink()
+                except OSError:
+                    continue
+                if w.abandoned:
+                    return
+                if is_dir:
+                    if not name.startswith(".") and not name.endswith(SKIP_DIR_SUFFIXES) and not followed:
+                        dirs.append(name)
+                    continue
+                with w.lock:
+                    out.seen += 1
+                    if out.seen > SCAN_LIMIT:
+                        out.cut_short = True
+                        return
+                    if name.startswith(".") or is_junk(name):
+                        continue
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in AUDIO_EXTS:
+                        out.found.append(Candidate(os.path.join(directory, name), name, folders=folders, origin="folder", key=key))
+                    elif ext in OTHER_AUDIO:
+                        out.other.append(name)
+            stack += [(os.path.join(directory, d), below + (d,)) for d in reversed(dirs)]
+    except BaseException as e:  # noqa: BLE001 - handed to the thread that waits
+        w.error = e
+    finally:
+        w.finished.set()
+
+
+def list_folder(path: str, *, idle: float | None = None, total: float | None = None, scandir=None) -> Listing:
+    """The audio files at `path`, listed in a thread this one watches for silence.
+
+    A folder on a share that answers slowly but steadily is listed to the end (up to `total` seconds, then
+    cut short with what it has: status "slow"); one that stops answering for `idle` seconds is left behind,
+    also keeping what it had (status "stalled"). Raises what the folder itself raised (not found, refused).
+    """
+    idle = SCAN_IDLE_SECONDS if idle is None else idle
+    total = SCAN_TOTAL_SECONDS if total is None else total
+    w = _Walk()
+    started = w.last
+    threading.Thread(target=_walk, args=(path, w, scandir or _scandir), daemon=True, name="sfx-listing").start()
+    status = "done"
+    while not w.finished.wait(min(0.25, max(0.01, idle / 4))):
+        now = time.monotonic()
+        if now - w.last > idle:
+            status = "stalled"
+            break
+        if now - started > total:
+            status = "slow"
+            break
+    with w.lock:
+        w.abandoned = status != "done"
+        out = Listing(
+            list(w.listing.found), list(w.listing.other), list(w.listing.importing), list(w.listing.denied), w.listing.seen, w.listing.cut_short, status,
+        )
+    if status == "done" and w.error is not None:
+        raise w.error
+    return out
 
 
 # ------------------------------------------------------------------ the sounds
@@ -489,23 +620,42 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
     with progress.doing("looking for sound effects", external=True):
         for path in src.paths:
             try:
-                files, other, importing, cut_short = bounded(_scan, path, seconds=SCAN_SECONDS, what=f"listing {path}")
-            except Stalled:
-                pool.warnings.append(f"--sfx {path}: the folder didn't answer in {SCAN_SECONDS:g} s (a network share that stopped responding?); this cut has no sound effects from it.")
-                continue
+                listing = list_folder(path)
             except FileNotFoundError:
                 pool.warnings.append(f"--sfx {path}: can't find it (moved, renamed, or a share that isn't connected?); this cut has no sound effects from it.")
+                continue
+            except PermissionError:
+                pool.warnings.append(f"--sfx {path}: macOS didn't let Roughcut read it. {PRIVACY_HINT} This cut has no sound effects from it.")
                 continue
             except OSError as e:
                 pool.warnings.append(f"--sfx {path}: couldn't read it ({e.strerror or e}); this cut has no sound effects from it.")
                 continue
-            found += files
-            for name in other:
+            found += listing.found
+            for name in listing.other:
                 pool.skip("unsupported", name)
-            for folder in importing:
+            for folder in listing.importing:
                 pool.skip("importing", folder)
-            if cut_short:
+            n = listing.seen
+            if listing.status == "stalled":
+                pool.warnings.append(
+                    f"--sfx {path}: the folder stopped answering after {n} file{'s' if n != 1 else ''} {'was' if n == 1 else 'were'} listed (a network share that went "
+                    f"to sleep or dropped?); " + ("this cut uses the sounds listed before that." if listing.found else "this cut has no sound effects from it.")
+                )
+            elif listing.status == "slow":
+                pool.warnings.append(
+                    f"--sfx {path}: listing the folder is slow (a busy network share?) and was cut short after {SCAN_TOTAL_SECONDS:g} s with "
+                    f"{n} file{'s' if n != 1 else ''} listed; this cut uses those."
+                )
+            if listing.cut_short:
                 pool.notes.append(f"--sfx {path} holds more than {SCAN_LIMIT:,} files; only the first ones were looked at.")
+            refused = [d for d, perm in listing.denied if perm]
+            other = [d for d, perm in listing.denied if not perm]
+            if refused:
+                pool.warnings.append(
+                    f"macOS didn't let Roughcut open {len(refused)} folder{'s' if len(refused) != 1 else ''} in --sfx {path} ({_some(refused)}). {PRIVACY_HINT}"
+                )
+            if other:
+                pool.warnings.append(f"{len(other)} folder{'s' if len(other) != 1 else ''} in --sfx {path} couldn't be read ({_some(other)}); left out.")
         items = list(src.items)
         if src.roots:
             up = studio.online(list(src.roots))
@@ -522,25 +672,25 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
                     for c in gone:
                         pool.skip("offline", c.name)
         found += items
-    # One file given twice (a folder and a collection holding it) counts once.
-    unique: dict[str, Candidate] = {}
-    for c in found:
-        unique.setdefault(c.path, c)
-    found = list(unique.values())
-    classed = []
-    for c in found:
-        ext = Path(c.name).suffix.lower()
-        if ext not in AUDIO_EXTS:
-            if ext in OTHER_AUDIO:
-                pool.skip("unsupported", c.name)
-            continue
-        if c.kind is None:
-            pool.skip("unclassified", c.name)
-        elif c.known_seconds is not None and c.known_seconds > MAX_SECONDS:
-            pool.skip("long", c.name)
-        else:
-            classed.append(c)
-    todo, over = _take_turns(classed, MAX_FILES)
+        # One file given twice (a folder and a collection holding it) counts once.
+        unique: dict[str, Candidate] = {}
+        for c in found:
+            unique.setdefault(c.path, c)
+        found = list(unique.values())
+        classed = []
+        for c in found:
+            ext = Path(c.name).suffix.lower()
+            if ext not in AUDIO_EXTS:
+                if ext in OTHER_AUDIO:
+                    pool.skip("unsupported", c.name)
+                continue
+            if c.kind is None:
+                pool.skip("unclassified", c.name)
+            elif c.known_seconds is not None and c.known_seconds > MAX_SECONDS:
+                pool.skip("long", c.name)
+            else:
+                classed.append(c)
+        todo, over = _take_turns(classed, MAX_FILES)
     for c in over:
         pool.skip("over_cap", c.name)
     if not todo:
@@ -622,8 +772,7 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
         )
     if denied:
         pool.warnings.append(
-            f"macOS didn't let Roughcut read {len(denied)} sound effect{'s' if len(denied) != 1 else ''} (in {os.path.dirname(denied[0].path)}): "
-            "Privacy & Security may be asking for access to that folder or network volume. Allow it, then build again."
+            f"macOS didn't let Roughcut read {len(denied)} sound effect{'s' if len(denied) != 1 else ''} (in {os.path.dirname(denied[0].path)}). {PRIVACY_HINT}"
         )
     pool.sounds.sort(key=lambda s: s.path)
     width = max(2, len(str(len(pool.sounds))))
@@ -638,6 +787,11 @@ def build_pool(src: Sources, cache: Cache, *, workers: int = 4) -> Pool:
     if pool.skipped.get("late"):
         pool.notes.append(f"{pool.skipped['late']['count']} sound effects weren't read in the {POOL_SECONDS:g} s a run gives them; the next run reads more (each one is cached once read).")
     return pool
+
+
+def _some(names: list[str]) -> str:
+    """A few names for a warning: 'UI, Whooshes and 3 more'."""
+    return ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
 
 
 def _skipped_text(pool: Pool) -> str:

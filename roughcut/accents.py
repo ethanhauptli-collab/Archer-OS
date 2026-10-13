@@ -32,7 +32,7 @@ from fractions import Fraction
 
 from . import timecode as tc
 from .analyze import Analysis, Clip
-from .sfx import Pool, Sound, frames_of
+from .sfx import CLASSES, Pool, Sound, frames_of
 from .timeline import DECLICK, DUCK_GAP, PEAK_CEILING, REPLAY_SECONDS, ConnectedClip, Timeline, _is_speech, _round_db, _samples
 
 AMOUNTS = ("none", "soft", "full")
@@ -140,7 +140,9 @@ def _word_spans(tl: Timeline, analysis: Analysis) -> list[tuple[int, int]]:
             seg = analysis.segment(seg_id)
             if seg is None:
                 continue
-            spans = [(w.start, w.end) for w in seg.words] or [(seg.start, seg.end)]
+            # A line the transcript has, without its words timed, sounds over its span; one with no text at all (a build with
+            # no transcriber) is nobody speaking.
+            spans = [(w.start, w.end) for w in seg.words] or ([(seg.start, seg.end)] if seg.text.strip() else [])
             for s, e in spans:
                 ws, we = Fraction(s).limit_denominator(1000000), Fraction(e).limit_denominator(1000000)
                 if we <= a or ws >= b:
@@ -202,20 +204,24 @@ def place(
 ) -> dict:
     """Put the pool's accents on `tl` (replacing any placed before). `heuristic`: a cut made without AI gets no more than soft.
 
-    Returns what didn't get one: {"no_sound": {class: events}} for a class the pool has none of, and
+    Returns what didn't get one: {"no_sound": {class: events}} for a class the pool has none of,
+    {"too_short": {class: events}} for a class whose sounds are all shorter than a frame, and
     {"replayed": n} for events whose class had no sound left that hadn't played in the last REPLAY_SECONDS.
     """
     clear(tl)
-    missed: dict = {"no_sound": {}, "replayed": 0}
+    missed: dict = {"no_sound": {}, "replayed": 0, "too_short": {}}
     if pool is None or not pool.sounds or not tl.spine:
         return missed
     if heuristic and amount == "full":
         amount = "soft"
     fd = tl.frame_duration
+    usable = {k: [s for s in pool.of(k) if frames_of(s, fd) >= 1] for k in CLASSES}  # a sound under one frame can't be placed at this rate
     found = []
     for e in events(tl, analysis, amount, graphic_kinds):
-        if pool.of(e.kind):
+        if usable[e.kind]:
             found.append(e)
+        elif pool.of(e.kind):
+            missed["too_short"][e.kind] = missed["too_short"].get(e.kind, 0) + 1
         else:
             missed["no_sound"][e.kind] = missed["no_sound"].get(e.kind, 0) + 1
     words = _word_spans(tl, analysis)
@@ -226,7 +232,7 @@ def place(
     played: list[tuple[int, str]] = []
     rows: dict[tuple[str, float], dict] = {}
     for e in choose(found, fd):
-        sounds = pool.of(e.kind)
+        sounds = usable[e.kind]
         turn = turns[e.kind]
         turns[e.kind] += 1
         pick = span = None
