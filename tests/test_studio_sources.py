@@ -167,7 +167,7 @@ def test_a_catalog_row_studio_refuses_stops_its_review_of_any_file(fake):
     ])
     xml = fcpxml([(CUT[0], {})])
     record = studio.match_media(xml)
-    assert "Unsafe source path" in record["refused"] and record["files"][CUT[0]]["status"] == "matched"
+    assert "stops on any file" in record["refused"] and record["files"][CUT[0]]["status"] == "matched"
     text = "\n".join(studio_section(record, studio.cut_projects(xml)[0]))
     assert "**Studio's Project history review would refuse this file:**" in text and "Credits" in text
 

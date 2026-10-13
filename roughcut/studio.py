@@ -1366,7 +1366,7 @@ def _dot(segment: str) -> int:
 def file_url_path(url: str) -> str | None:
     """The local path Studio's review reads from a media-rep src: a file URL with no host (or localhost), its dot
     segments resolved and each segment percent-decoded, as a URL parser and Rust's `Url::to_file_path` do; None for
-    anything else, which Studio reports as "Only exact local file URLs can match the catalog"."""
+    anything else, which Studio can't match."""
     from urllib.parse import unquote_to_bytes
 
     url = url.strip("".join(chr(c) for c in range(0x21))).replace("\t", "").replace("\n", "").replace("\r", "")
@@ -1463,14 +1463,14 @@ class _Walk:
         if rid is not None and tag in _REFERS:
             resource = self.resources.get(rid)
             if resource is None:
-                self.references[(rid, "", "Timeline reference has no resource.")] = None
+                self.references[(rid, "", "a clip refers to a resource the file doesn't have")] = None
                 return
             if resource.tag == "asset":
                 srcs = [c.get("src") for c in resource if c.tag == "media-rep" and c.get("kind") == "original-media" and c.get("src") is not None]
                 if resource.get("src") is not None:
                     srcs.append(resource.get("src"))
                 if not srcs:
-                    self.references[(rid, "", "Referenced asset has no original media URL.")] = None
+                    self.references[(rid, "", "its asset names no original media file")] = None
                 for src in srcs:
                     self.references[(rid, src, "")] = None
             elif resource.tag == "media":
@@ -1479,16 +1479,16 @@ class _Walk:
                 self.active.add(rid)
                 sequence = next((c for c in resource if c.tag == "sequence"), None)
                 if any(c.tag == "timeMap" for c in node):
-                    self.references[(rid, "", "Retimed nested media needs manual usage confirmation.")] = None
+                    self.references[(rid, "", "a retimed compound clip, which Studio leaves for you to confirm by hand")] = None
                 elif sequence is not None:
                     start = next((s for s in (_seconds(node.get("start")), _seconds(sequence.get("start"))) if s is not None), 0.0)
                     d = _seconds(node.get("duration"))
                     d = _seconds(sequence.get("duration")) if d is None else d
                     self.walk(sequence, None if d is None else _window(start, d, window, _seconds(node.get("offset"))), depth + 1)
                 elif any(c.tag == "multicam" for c in resource):
-                    self.references[(rid, "", "Multicam timing and component selection need manual usage confirmation.")] = None
+                    self.references[(rid, "", "a multicam clip, which Studio leaves for you to confirm by hand")] = None
                 else:
-                    self.references[(rid, "", "Referenced media has no supported sequence or multicam timeline.")] = None
+                    self.references[(rid, "", "a compound clip with no timeline Studio reads")] = None
                 self.active.discard(rid)
         for child in node:
             if child.tag in _NOT_WALKED:
@@ -1529,7 +1529,7 @@ class ReviewedProject:
                 out.append((src, why))
                 continue
             path = file_url_path(src)
-            out.append((path, "") if path is not None else (src, "Only exact local file URLs can match the catalog."))
+            out.append((path, "") if path is not None else (src, "not a local file URL, so Studio can't match it"))
         return list(dict.fromkeys(out))
 
 
@@ -1616,7 +1616,7 @@ def mappings(con: sqlite3.Connection) -> tuple[dict[str, dict[int, str]], str | 
         if path is None:
             refused = refused or (
                 f"Studio's catalog has an item ({name}) whose path it refuses, so its Project history review stops on any file "
-                "(\"Unsafe source path in catalog history\") until that item is fixed or removed in Studio"
+                "until that item is fixed or removed in Studio"
             )
             continue
         paths.setdefault(path, {})[int(aid)] = str(name)
