@@ -156,13 +156,24 @@ PLAN_SCHEMA: dict = {
                 "callouts, kinetic captions). false when it turns them down or doesn't mention them."
             ),
         },
+        "sfx": {
+            "type": "string",
+            "enum": ["none", "soft", "full", "unspecified"],
+            "description": (
+                "Sound-effect accents the software adds from the editor's sounds (whooshes at section changes, pops and hits as "
+                "graphics land, risers). none: the brief turns them down ('no sound effects', 'no whooshes'). soft: it asks for a few "
+                "or subtle ones. full: it asks for lots, punchy sound design, whooshes on the B-roll or risers. unspecified: it doesn't "
+                "mention sound effects."
+            ),
+        },
     },
     "required": [
-        "title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings", "pacing", "punch_ins", "graphics_asked",
+        "title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings", "pacing", "punch_ins", "graphics_asked", "sfx",
     ],
     "additionalProperties": False,
 }
 PACINGS = ("tight", "medium", "loose")  # the plan's pacing when the brief says one ("unspecified" otherwise)
+SFX_AMOUNTS = ("none", "soft", "full")  # the plan's sfx when the brief says one ("unspecified" otherwise)
 
 
 @dataclass
@@ -270,6 +281,7 @@ class Plan:
     pacing: str = "unspecified"  # tight / medium / loose / unspecified
     punch_ins: str = "unspecified"  # on / off / unspecified
     graphics_asked: bool = False
+    sfx: str = "unspecified"  # sound-effect accents: none / soft / full / unspecified
 
     def to_json(self) -> dict:
         return {
@@ -302,6 +314,7 @@ class Plan:
             "pacing": self.pacing,
             "punch_ins": self.punch_ins,
             "graphics_asked": self.graphics_asked,
+            "sfx": self.sfx,
         }
 
 
@@ -496,6 +509,9 @@ def normalize(
     punch = ("on" if punch else "off") if isinstance(punch, bool) else str(punch or "").strip().lower()
     plan.punch_ins = punch if punch in ("on", "off") else "unspecified"
     plan.graphics_asked = raw.get("graphics_asked") is True
+    sfx = raw.get("sfx")
+    sfx = ("soft" if sfx else "none") if isinstance(sfx, bool) else str(sfx or "").strip().lower()
+    plan.sfx = sfx if sfx in SFX_AMOUNTS else "unspecified"
     graphics = [
         dict(g, segment=lines.replaced.get(str(g.get("segment") or "").strip().upper(), g.get("segment"))) if isinstance(g, dict) else g
         for g in raw.get("graphics") or []

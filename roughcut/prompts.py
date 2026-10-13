@@ -85,9 +85,11 @@ air; loose for let it breathe, slow or reflective; medium for a natural pace; un
 doesn't say ("not too tight" isn't tight, and "a tight deadline" or "tight shots" aren't about \
 pacing). "punch_ins": on only when it asks for punch-ins (alternating zooms) at the jump cuts \
 throughout, not for a one-off reframe of a moment; off when it turns them down; otherwise \
-unspecified. "graphics_asked": whether it asks for on-screen graphics, titles, names or text. When \
-there is a <preset_brief>, the editor's own <brief> wins where they differ, and only the editor's \
-own brief counts for graphics_asked.
+unspecified. "graphics_asked": whether it asks for on-screen graphics, titles, names or text. "sfx": \
+the sound-effect accents the software adds (whooshes, risers, pops, hits): none when the brief turns \
+them down, soft for a few or subtle ones, full for lots or punchy sound design; unspecified unless it \
+asks for or against sound effects. When there is a <preset_brief>, the editor's own <brief> wins \
+where they differ, and only the editor's own brief counts for graphics_asked.
 
 Name sections the way an editor labels a timeline ("Cold open", "Drive up", "The summit", \
 "Wrap"). Use cut_notes to summarize briefly what you left out and why.

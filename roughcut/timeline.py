@@ -79,7 +79,7 @@ class ConnectedClip:
     frames: int
     start: int  # absolute timeline frame
     lane: int
-    kind: str  # "broll" | "music"
+    kind: str  # "broll" | "music" | "graphic" | "sfx" (a sound-effect accent, accents.py)
     volume_db: float | None = None
     note: str = ""
     fade_in: Fraction = Fraction(0)
@@ -111,6 +111,7 @@ class Timeline:
     target_seconds: float | None = None  # the length the brief asked for
     review: "Review | None" = None  # length vs target, uncovered jump cuts, fill, repeated stills
     dead_air: tuple[float, float] | None = None  # the rough cut's: (talking footage, its stringout) seconds, from make_timelines
+    accents: list[dict] = field(default_factory=list)  # the sound-effect accents placed (accents.place), for the paper edit
 
     @property
     def total_frames(self) -> int:

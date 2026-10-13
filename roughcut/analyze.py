@@ -23,6 +23,7 @@ ROLE_LABELS = {
     "music": "Music & Audio",
     "still": "Stills",
     "graphic": "Graphics",
+    "sfx": "Sound Effects",
 }
 
 

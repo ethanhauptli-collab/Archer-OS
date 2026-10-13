@@ -49,6 +49,8 @@ def check_invariants(path: Path) -> dict:
                     c_off = T(child.get("offset"))
                     assert start <= c_off < start + dur, f"connected {child.get('name')} outside its parent"
                     assert child.get("lane") not in (None, "0")
+                    # Whole frames (B-roll, music, graphics, sound-effect accents), never reading past their media.
+                    assert (T(child.get("duration")) / fd).denominator == 1, f"connected {child.get('name')} isn't whole frames"
                     _check_source_range(child, assets)
                 elif child.tag in ("marker", "chapter-marker"):
                     assert start <= T(child.get("start")) < start + dur, "marker outside its parent"

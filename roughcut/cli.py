@@ -67,6 +67,18 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
         help="alternate a 112%% punch-in at each jump cut no B-roll covers (default: when the planner reads the brief asking for it, e.g. 'punch in on jump cuts')",
     )
     g.add_argument("--fill", action=argparse.BooleanOptionalAction, help="cover narration the plan left without picture (default: on; --no-fill leaves it)")
+    fx = p.add_argument_group("sound effects (render and revise: the earlier run's sounds, saved with it, unless given)")
+    fx.add_argument(
+        "--sfx", action="append", metavar="PATH",
+        help="sound effects to accent the cut with: an audio file or a folder (its subfolders too). Whooshes at section changes, "
+        "pops and hits as graphics land (more when the brief asks for lots), by the words in the file names. Repeat for more",
+    )
+    fx.add_argument(
+        "--sfx-from", action="append", metavar="NAME",
+        help="sound effects from a Venture Studio collection by name (\"kit:NAME\" for a kit, \"collection:NAME\" when both have it), "
+        "or a kit file Studio exported (.json). Read only. Repeat for more",
+    )
+    fx.add_argument("--no-sfx", action="store_true", help="no sound-effect accents, even if a preset or the earlier run has them")
     p.add_argument("--name", help="project/event name (default: folder name)")
     p.add_argument("--open", action="store_true", help="open the new cut in Final Cut Pro when it's done (Mac)")
     p.add_argument("--progress-json", action="store_true", help="emit JSON-lines progress on stdout (used by the Mac app)")
@@ -107,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
     ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask anything: take the default model (Opus) and the default output folder, even inside a Venture Studio library")
+    b.add_argument("--preset-sfx-from", action="append", default=[], help=argparse.SUPPRESS)  # a preset's --sfx-from: never stops the build
     b.add_argument(
         "--music", action="append", default=[], metavar="FILE",
         help="a song to lay under the cut (from anywhere, e.g. Downloads): not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more",
@@ -188,6 +201,10 @@ def _apply_preset(args, argv: list[str]):
         args = build_parser().parse_args(argv[: k + 1] + flags(preset, args.command) + argv[k + 1 :])
         if args.command == "build" and typed.graphics_look:
             args.graphics_look = typed.graphics_look  # yours replace the preset's approved designs
+        if args.command == "build" and typed.sfx:
+            args.sfx = typed.sfx  # yours replace the preset's sound effects
+        if args.command == "build" and typed.sfx_from:
+            args.preset_sfx_from = []
         skipped = ""
         if args.command == "build" and args.graphics and not typed.graphics:
             if args.provider == "none":
@@ -748,6 +765,16 @@ def _run(args, json_mode: bool) -> int:
     }
     if str(args.format or "").strip().lower() in FORMAT_FROM_FOOTAGE:
         given["format"] = None  # given, and it means "the footage's own format", e.g. after a vertical build
+    # Sound effects: new ones for a re-cut or revision replace the run's saved pool (and turn accents back on).
+    sfx_names = list(getattr(args, "preset_sfx_from", None) or []) + list(args.sfx_from or [])
+    if args.sfx:
+        given["sfx"] = _sfx_paths(args.sfx)
+    if sfx_names:
+        given["sfx_from"] = _sfx_names(sfx_names)
+    if args.no_sfx:
+        given["sfx_off"] = True
+    elif args.sfx or sfx_names:
+        given["sfx_off"] = False
     if args.dialogue_level == LEVEL_OFF:
         given["dialogue_level"] = None  # given: keep clip levels as recorded
     common = dict(name=args.name, **given)
@@ -821,6 +848,7 @@ def _run(args, json_mode: bool) -> int:
                 graphics_logo=args.graphics_logo,
                 graphics_look=tuple(args.graphics_look or ()),
                 music=[Path(p).expanduser() for p in args.music],
+                sfx_named=_sfx_names(args.sfx_from or []),  # typed (or sent by the app): one Studio doesn't have stops the build
                 **common,
             )
             result = build(opts)
@@ -897,6 +925,23 @@ def _run(args, json_mode: bool) -> int:
     return 3 if result.fell_back else 0
 
 
+def _sfx_paths(values) -> tuple[str, ...]:
+    """--sfx paths made absolute by their spelling only: a folder on a share that's asleep is never touched here."""
+    return tuple(dict.fromkeys(os.path.normpath(str(Path(str(v).strip()).expanduser().absolute())) for v in values or [] if str(v).strip()))
+
+
+def _sfx_names(values) -> tuple[str, ...]:
+    """--sfx-from values: Studio names as typed, kit files made absolute (so a re-cut from another folder finds them)."""
+    from .sfx import is_kit_file
+
+    out = []
+    for v in values or []:
+        v = str(v).strip()
+        if v:
+            out.append(os.path.normpath(str(Path(v).expanduser().absolute())) if is_kit_file(v) else v)
+    return tuple(dict.fromkeys(out))
+
+
 def summary_lines(summary: dict) -> list[str]:
     """What made it into the cut, what was left out, and what the model calls cost: before opening the report."""
     from .providers import describe_cost
@@ -922,6 +967,11 @@ def summary_lines(summary: dict) -> list[str]:
             if g["rendered"] < g["placed"]:
                 why.append(f"{g['placed'] - g['rendered']} didn't design or render")
             (left if why else made).append(text + (f" ({'; '.join(why)}; see Warnings)" if why else ""))
+    fx = summary.get("sfx")
+    if fx and fx.get("accents"):
+        from .accents import describe
+
+        made.append(f"sound effects {fx['accents']} ({describe(fx.get('by_kind') or {})})")
     skipped = summary.get("skipped") or {}
     files = skipped.get("files") or []
     if files:

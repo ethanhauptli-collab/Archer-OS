@@ -89,7 +89,10 @@ class _Resources:
         if m.has_audio:
             attrs.update(hasAudio="1", audioSources="1", audioChannels=str(m.audio_channels or 2), audioRate=str(m.audio_rate or 48000))
         asset = ET.SubElement(self.el, "asset", attrs)
-        ET.SubElement(asset, "media-rep", {"kind": "original-media", "src": Path(m.path).resolve().as_uri()})
+        # A sound effect's path was made absolute when its pool was read, and may sit on a network share
+        # that's asleep now: resolving it again could wait on the share for good.
+        src = Path(m.path) if clip.role == "sfx" and Path(m.path).is_absolute() else Path(m.path).resolve()
+        ET.SubElement(asset, "media-rep", {"kind": "original-media", "src": src.as_uri()})
         self.assets[clip.id] = rid
         return rid
 
@@ -111,11 +114,13 @@ def _roles(clip: Clip, use: str, note: str = "") -> tuple[str | None, str | None
 
     `use` is "speech" (a story line in the main storyline, whatever the clip
     was classified as), "spine", "broll" (connected cutaway), "music",
-    "graphic" or "browser". None leaves Final Cut's default.
+    "graphic", "sfx" (a sound-effect accent) or "browser". None leaves Final Cut's default.
     """
     m = clip.media
     if use == "graphic" or clip.role == "graphic":
         return "titles.Graphics", None
+    if use == "sfx" or clip.role == "sfx":
+        return None, "effects.SFX"
     if use == "music":
         return None, "music.Music Bed"
     if use == "speech":
