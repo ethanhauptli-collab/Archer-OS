@@ -95,10 +95,10 @@ Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherev
 |---|---|
 | `<name> vN.fcpxml` | The newest cut: an event with keyworded clips, the **Rough Cut vN** project and the **Stringout vN** project. Import it with File → Import → XML… |
 | `<name> vN.srt` | Captions for the cut: what's said on camera and in narration, timed to the cut on whole frames, without ums, at most two lines of 42 characters (a comma starts the next caption only when the rest of the sentence won't fit in this one, a sentence's last word or two never stand alone, and "Jr." or "Dr." inside a sentence doesn't end the caption). When Claude plans the cut, names the transcript misspells are written as your brief spells them, here and in the graphics; a cut made without AI (or the stringout fallback) keeps the transcript's spellings. In Final Cut, with the project open: File > Import > Captions. Each version has its own |
-| `edit_report.html` | The paper edit as a page to read or print: sections, every line used, B-roll and why, alternate takes, YouTube chapters (with a Copy button), what was cut and why, levels, a cut check against your target length, and warnings. `edit_report.md` is the same in Markdown |
+| `edit_report.html` | The paper edit as a page to read or print: sections, every line used, B-roll and why, alternate takes, YouTube chapters (with a Copy button), what was cut and why, the sound effects placed, levels, the Venture Studio section (credits for the Studio songs and sounds the cut uses, and what Studio's review should match), a cut check against your target length, and warnings. `edit_report.md` is the same in Markdown |
 | `history/` | The last five earlier versions, each with its own FCPXML, plan and paper edit. Earlier projects you imported keep working |
 | `graphics/` | Each graphic as an editable `.html` design and a rendered `.mov`, plus `preview.html` showing every graphic over the shot it sits on |
-| `plan.json`, `analysis.json`, `prompt.md` | The plan with the run's settings, the transcripts and clip data, and the exact prompt Claude saw |
+| `plan.json`, `analysis.json`, `prompt.md` | The plan with the run's settings (the sound-effect pool and the Venture Studio check included, so `render` and `revise` need neither the share nor Studio), the transcripts and clip data, and the exact prompt Claude saw |
 | `result.json`, `versions.json` | The run summary and the list of versions (the app reads these) |
 | `roughcut.log` | Every step of every run with times, ending in FINISHED or STOPPED and why |
 
