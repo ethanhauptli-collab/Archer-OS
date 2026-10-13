@@ -341,13 +341,47 @@ final class RevisionTests: XCTestCase {
         XCTAssertFalse(ReviseOptions.usableRedesign(true, for: nonePlanned))
     }
 
-    func testReviseStartsWithNotesPicturesOrTheRedesign() {
+    func testReviseStartsWithNotesOrPicturesButNeverOnTheRedesignAlone() {
         let picture = [URL(fileURLWithPath: "/p/look.png")]
-        XCTAssertFalse(ReviseOptions.canStart(notes: "", references: [], redesign: false))
-        XCTAssertFalse(ReviseOptions.canStart(notes: " \n ", references: [], redesign: false))
-        XCTAssertTrue(ReviseOptions.canStart(notes: "tighter hook", references: [], redesign: false))
-        XCTAssertTrue(ReviseOptions.canStart(notes: "", references: picture, redesign: false))  // the CLI takes pictures alone
-        XCTAssertTrue(ReviseOptions.canStart(notes: "", references: [], redesign: true))  // and the redesign alone
+        XCTAssertFalse(ReviseOptions.canStart(notes: "", references: []))
+        XCTAssertFalse(ReviseOptions.canStart(notes: " \n ", references: []))
+        XCTAssertTrue(ReviseOptions.canStart(notes: "tighter hook", references: []))
+        XCTAssertTrue(ReviseOptions.canStart(notes: "", references: picture))  // the CLI takes pictures alone
+        XCTAssertTrue(ReviseOptions.canStart(notes: "bolder titles", references: picture))
+        // "Redesign the graphics" changes what notes or pictures do; with neither there is nothing to ask the AI.
+        XCTAssertTrue(ReviseOptions.redesignHint.contains("hand edits included"))
+        XCTAssertTrue(ReviseOptions.redesignHint.contains("version history"))
+    }
+
+    func testTheRedesignSwitchComesOnWithAPictureAndGoesBackOffWithTheLastOne() {
+        var redesign = RedesignSwitch()
+        XCTAssertFalse(redesign.isOn)
+        redesign.pictureAdded()
+        XCTAssertTrue(redesign.isOn)
+        redesign.picturesChanged(remaining: 2)  // one of several removed: still wanted
+        XCTAssertTrue(redesign.isOn)
+        redesign.picturesChanged(remaining: 0)  // the last one: it was only on for the picture
+        XCTAssertFalse(redesign.isOn)
+
+        // Switched on by hand, it stays on whatever happens to the pictures...
+        redesign.set(true)
+        redesign.pictureAdded()
+        redesign.picturesChanged(remaining: 0)
+        XCTAssertTrue(redesign.isOn)
+        // A picture added after the editor switched it off asks for it again.
+        redesign.set(false)
+        XCTAssertFalse(redesign.isOn)
+        redesign.pictureAdded()
+        XCTAssertTrue(redesign.isOn)
+        // Touching it after a picture put it on makes it the editor's choice.
+        redesign.set(true)
+        redesign.picturesChanged(remaining: 0)
+        XCTAssertTrue(redesign.isOn)
+
+        redesign.reset()
+        XCTAssertEqual(redesign, RedesignSwitch())
+        redesign.picturesChanged(remaining: 0)  // nothing to take back
+        XCTAssertFalse(redesign.isOn)
     }
 
     func testReviseOfACutMadeWithoutAIKeepsThePlannerFlagsBeforeThePictures() throws {

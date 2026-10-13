@@ -57,7 +57,7 @@ final class ProgressEventTests: XCTestCase {
         let changed = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":1,"items":["Length: 0:30 → 0:20 (−0:10)","Graphics: 2 redesigned (every graphic is designed again)"],"unchanged":false}"#))?.result)
         XCTAssertEqual(changed.changes, RunChanges(fromVersion: 1, items: ["Length: 0:30 → 0:20 (−0:10)", "Graphics: 2 redesigned (every graphic is designed again)"], unchanged: false))
 
-        let same = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":1,"items":["This version plays the same lines, B-roll and graphics as v1. If you meant how the graphics look, attach reference images or tick Redesign graphics."],"unchanged":true}"#))?.result)
+        let same = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":1,"items":["This version plays the same lines, B-roll and graphics as v1. If you meant how the graphics look, attach reference images or turn on Redesign the graphics (Terminal: --graphics-ref IMAGE or --redesign-graphics)."],"unchanged":true}"#))?.result)
         XCTAssertEqual(same.changes?.unchanged, true)
         XCTAssertEqual(same.changes?.items.count, 1)
 
@@ -107,6 +107,21 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertEqual(same.highlighted, "This version plays the same lines as v1. Try X.")
         XCTAssertEqual(same.bullets, ["Another thing to try"])
         XCTAssertEqual(RunChanges(items: ["Only line"], unchanged: true).bullets, [])
+
+        // Advice listed beside it never takes its place, whichever comes first (the CLI puts the sentence first).
+        let advice = "Your notes ask for graphics, but motion graphics are off for this cut, so the revision has none."
+        let sentence = "This version plays the same lines and B-roll as v1. Motion graphics are off for this cut: turn them on to add or change them."
+        let first = RunChanges(fromVersion: 1, items: [sentence, advice], unchanged: true)
+        XCTAssertEqual(first.highlighted, sentence)
+        XCTAssertEqual(first.bullets, [advice])
+        let second = RunChanges(fromVersion: 1, items: [advice, sentence], unchanged: true)
+        XCTAssertEqual(second.highlighted, sentence)
+        XCTAssertEqual(second.bullets, [advice])
+        let sameCut = RunChanges(fromVersion: 2, items: ["Fades: on → off", "This is the same cut as v2."], unchanged: true)
+        XCTAssertEqual(sameCut.highlighted, "This is the same cut as v2.")
+        XCTAssertEqual(sameCut.bullets, ["Fades: on → off"])
+        // A change never highlights anything, whatever it says.
+        XCTAssertNil(RunChanges(items: [sentence], unchanged: false).highlighted)
 
         // Nothing to say, no box; a folder that doesn't say its earlier version has no comparison line.
         XCTAssertFalse(RunChanges().hasContent)

@@ -11,12 +11,11 @@ struct ResultView: View {
     @State private var recutPunchIn: Bool? = nil
     @State private var showWarnings = false
 
-    /// Revise has something to go on: notes, reference pictures, or a redesign of the graphics.
+    /// Revise has something to say: notes or reference pictures ("Redesign the graphics" only changes what they do).
     private var canRevise: Bool {
         ReviseOptions.canStart(
             notes: model.reviseNotes,
-            references: ReviseOptions.usableReferences(model.reviseReferences, for: result),
-            redesign: ReviseOptions.usableRedesign(model.reviseRedesign, for: result)
+            references: ReviseOptions.usableReferences(model.reviseReferences, for: result)
         ) && ReviseOptions.lengthProblem(model.reviseTarget) == nil
     }
 
@@ -196,17 +195,29 @@ struct ResultView: View {
                                 .frame(maxWidth: 420)
                             }
                             if ReviseOptions.acceptsReferences(result) {
-                                ReferenceImagesWell(references: $model.reviseReferences) {
-                                    // A picture is asked to be matched: the graphics are designed again from it.
-                                    if ReviseOptions.canRedesign(result) {
-                                        model.reviseRedesign = true
+                                ReferenceImagesWell(
+                                    references: $model.reviseReferences,
+                                    onAdded: {
+                                        // A picture is asked to be matched: the graphics are designed again from it.
+                                        if ReviseOptions.canRedesign(result) {
+                                            model.reviseRedesign.pictureAdded()
+                                        }
+                                    },
+                                    onRemoved: {
+                                        model.reviseRedesign.picturesChanged(remaining: model.reviseReferences.count)
                                     }
-                                }
+                                )
+                                Text(ReferenceImages.earlierPicturesHint)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                             if ReviseOptions.canRedesign(result) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Toggle("Redesign the graphics", isOn: $model.reviseRedesign)
-                                    Text("Notes about how graphics look are applied when this is on; the AI also decides from your words.")
+                                    Toggle(
+                                        "Redesign the graphics",
+                                        isOn: Binding(get: { model.reviseRedesign.isOn }, set: { model.reviseRedesign.set($0) })
+                                    )
+                                    Text(ReviseOptions.redesignHint)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

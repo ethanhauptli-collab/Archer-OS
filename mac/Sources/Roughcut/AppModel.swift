@@ -56,8 +56,8 @@ final class AppModel {
     var reviseProvider: ModelProvider = .anthropic
     /// Pictures of the look wanted for the graphics, for this revision only (the build form's are `options.graphicsReferences`).
     var reviseReferences: [URL] = []
-    /// Design every graphic again with this revision. Off until asked; adding a picture asks.
-    var reviseRedesign = false
+    /// Design every graphic again with this revision. Off until asked; adding a picture asks (and removing the last one takes that back).
+    var reviseRedesign = RedesignSwitch()
 
     // Finished runs, newest first
     private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
@@ -164,10 +164,10 @@ final class AppModel {
     func revise(_ result: RunResult) {
         guard let cli = resolveCLI() else { return }
         let text = reviseNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Pictures and the redesign count only for a cut with graphics; any of them can stand in for notes.
+        // Pictures and the redesign count only for a cut with graphics; pictures can stand in for notes, the redesign can't.
         let references = ReviseOptions.usableReferences(reviseReferences, for: result)
-        let redesign = ReviseOptions.usableRedesign(reviseRedesign, for: result)
-        guard ReviseOptions.canStart(notes: text, references: references, redesign: redesign), ReviseOptions.lengthProblem(reviseTarget) == nil else { return }
+        let redesign = ReviseOptions.usableRedesign(reviseRedesign.isOn, for: result)
+        guard ReviseOptions.canStart(notes: text, references: references), ReviseOptions.lengthProblem(reviseTarget) == nil else { return }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-notes-\(UUID().uuidString).txt")
         do {
             try text.write(to: file, atomically: true, encoding: .utf8)
@@ -289,7 +289,7 @@ final class AppModel {
                 reviseNotes = ""  // they're in this version now (and in its paper edit)
                 reviseTarget = ""
                 reviseReferences = []  // the CLI stored them with this version
-                reviseRedesign = false
+                reviseRedesign.reset()
             }
             show(result)
         case .returned(let source, let problem):
@@ -308,7 +308,7 @@ final class AppModel {
             reviseNotes = ""
             reviseTarget = ""
             reviseReferences = []
-            reviseRedesign = false
+            reviseRedesign.reset()
             reviseProvider = ReviseOptions.defaultProvider(form: options, doctor: doctor)
             draftFolder = result.outDir
         }

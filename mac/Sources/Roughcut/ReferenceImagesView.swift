@@ -10,6 +10,8 @@ struct ReferenceImagesWell: View {
     @Binding var references: [URL]
     /// Called after pictures were added (the Revise box turns "Redesign the graphics" on).
     var onAdded: () -> Void = {}
+    /// Called after a picture was removed (the Revise box turns it off again when the last one goes).
+    var onRemoved: () -> Void = {}
 
     @State private var note: String?
     @State private var targeted = false
@@ -88,15 +90,19 @@ struct ReferenceImagesWell: View {
     }
 
     private func paste() {
-        let pasted = ReferenceFiles.fromPasteboard()
-        add(pasted.urls, message: pasted.note)
+        let room = ReferenceImages.room(in: references)
+        Task { @MainActor in
+            let pasted = await ReferenceFiles.fromPasteboard(room: room)
+            add(pasted.urls, message: pasted.note)
+        }
     }
 
     /// Picture files and pictures dragged out of other apps are added; any other item is ignored, with a note.
     private func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
+        let room = ReferenceImages.room(in: references)
         Task { @MainActor in
-            let dropped = await ReferenceFiles.gather(providers)
+            let dropped = await ReferenceFiles.gather(providers, room: room)
             add(dropped.urls, message: dropped.note)
         }
         return true
@@ -116,6 +122,7 @@ struct ReferenceImagesWell: View {
     private func remove(_ url: URL) {
         references.removeAll { $0 == url }
         note = nil
+        onRemoved()
     }
 }
 

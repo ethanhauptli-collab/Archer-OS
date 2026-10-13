@@ -105,24 +105,100 @@ final class ReferenceImagesTests: XCTestCase {
         XCTAssertEqual(ReferenceImages.restoring(many).count, 8)
     }
 
+    private let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3])
+
     func testPastedBitmapsAreKeptInAFolderMadeOnDemand() throws {
         let base = try scratchFolder()
         let folder = ReferenceImages.storeFolder(base: base)
         XCTAssertEqual(folder.path, base.appendingPathComponent("Roughcut/References").path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))  // nothing is made until a picture is pasted
 
-        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3])
-        let first = try ReferenceImages.store(png: png, in: folder, now: Date(timeIntervalSince1970: 1_700_000_000))
-        let second = try ReferenceImages.store(png: png, in: folder, now: Date(timeIntervalSince1970: 1_700_000_000))
+        let first = try ReferenceImages.store(pngBytes, ext: "png", in: folder, now: Date(timeIntervalSince1970: 1_700_000_000))
         XCTAssertEqual(first.deletingLastPathComponent().path, folder.path)
         XCTAssertEqual(first.pathExtension, "png")
         XCTAssertTrue(first.lastPathComponent.hasPrefix("pasted-"))
-        XCTAssertEqual(try Data(contentsOf: first), png)
-        XCTAssertNotEqual(first, second)  // two pastes in one second are two files
+        XCTAssertEqual(first.deletingPathExtension().lastPathComponent.count, "pasted-".count + 16)  // 16 hex digits of the bytes
+        XCTAssertEqual(try Data(contentsOf: first), pngBytes)
         XCTAssertTrue(ReferenceImages.isPicture(first))
 
         // The system default is under Application Support.
         XCTAssertTrue(ReferenceImages.storeFolder().path.hasSuffix("/Roughcut/References"))
+    }
+
+    func testTheSamePictureKeptTwiceIsOneFileAndOtherPicturesAreOthers() throws {
+        let folder = ReferenceImages.storeFolder(base: try scratchFolder())
+        let first = try ReferenceImages.store(pngBytes, ext: "png", in: folder, now: Date(timeIntervalSince1970: 1_700_000_000))
+        // Pasting the screenshot again (a day later) is the same file, with its 30 days started over...
+        let later = Date(timeIntervalSince1970: 1_700_086_400)
+        let again = try ReferenceImages.store(pngBytes, ext: "png", in: folder, now: later)
+        XCTAssertEqual(first, again)
+        let modified = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: again.path)[.modificationDate] as? Date)
+        XCTAssertEqual(modified.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 1)
+        // ...and the list takes it once.
+        XCTAssertEqual(ReferenceImages.adding([again], to: [first]).list, [first])
+        XCTAssertEqual(ReferenceImages.adding([again], to: [first]).added, 0)
+        // Other bytes, another file; the same bytes under another kind are another file too.
+        let other = try ReferenceImages.store(Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9]), ext: "png", in: folder)
+        XCTAssertNotEqual(first, other)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path).count, 2)
+    }
+
+    func testAJPEGIsKeptAsAJPEGAndAnythingOverTheCLIsLimitIsRefused() throws {
+        let folder = ReferenceImages.storeFolder(base: try scratchFolder())
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0, 4, 5, 6])
+        XCTAssertEqual(ReferenceImages.pictureKind(of: jpeg), "jpg")
+        let kept = try ReferenceImages.store(jpeg, ext: "jpg", in: folder)
+        XCTAssertEqual(kept.pathExtension, "jpg")
+        XCTAssertEqual(try Data(contentsOf: kept), jpeg)  // the bytes as they were: no re-encoding
+
+        let limit = ReferenceImages.maxBytes
+        XCTAssertEqual(limit, 40 * 1024 * 1024)  // the CLI's references.MAX_SOURCE_BYTES
+        XCTAssertNoThrow(try ReferenceImages.store(Data(count: limit), ext: "bmp", in: folder))
+        XCTAssertThrowsError(try ReferenceImages.store(Data(count: limit + 1), ext: "bmp", in: folder)) { error in
+            XCTAssertEqual(error as? ReferenceImages.StoreError, .tooLarge(megabytes: 41))
+            XCTAssertEqual(error.localizedDescription, "That picture is 41 MB, and Roughcut uses pictures up to 40 MB, so it wasn't added.")
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path).count, 2)  // the refused one wasn't written
+    }
+
+    func testPicturesAreRecognisedByTheirFirstBytes() {
+        func text(_ value: String) -> [UInt8] { Array(value.utf8) }
+        func kind(_ parts: [UInt8]...) -> String? { ReferenceImages.pictureKind(of: Data(parts.flatMap { $0 })) }
+        XCTAssertEqual(kind([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0]), "png")
+        XCTAssertEqual(kind([0xFF, 0xD8, 0xFF, 0xDB]), "jpg")
+        XCTAssertEqual(kind(text("GIF89a"), [1, 2]), "gif")
+        XCTAssertEqual(kind(text("GIF87a")), "gif")
+        XCTAssertEqual(kind(text("RIFF"), [1, 2, 3, 4], text("WEBPVP8 ")), "webp")
+        XCTAssertNil(kind(text("RIFF"), [1, 2, 3, 4], text("WAVEfmt ")))  // a RIFF that isn't a picture
+        XCTAssertEqual(kind([0x49, 0x49, 0x2A, 0x00, 8]), "tiff")
+        XCTAssertEqual(kind([0x4D, 0x4D, 0x00, 0x2A, 0]), "tiff")
+        XCTAssertEqual(kind(text("BM"), [0, 0]), "bmp")
+        XCTAssertEqual(kind([0, 0, 0, 0x18], text("ftypheic"), [0, 0]), "heic")
+        XCTAssertEqual(kind([0, 0, 0, 0x18], text("ftypmif1"), [0, 0]), "heic")
+        XCTAssertNil(kind([0, 0, 0, 0x18], text("ftypmp42"), [0, 0]))  // a video
+        XCTAssertNil(kind(text("hello, not a picture")))
+        XCTAssertNil(kind([]))
+        XCTAssertNil(kind([0xFF, 0xD8]))  // too short to be anything
+    }
+
+    func testAFullListSaysSoBeforeAnythingIsSavedAndNotesDontNameGeneratedFiles() {
+        XCTAssertEqual(ReferenceImages.room(in: []), 8)
+        XCTAssertEqual(ReferenceImages.room(in: pictures(5)), 3)
+        XCTAssertEqual(ReferenceImages.room(in: pictures(8)), 0)
+        XCTAssertEqual(ReferenceImages.room(in: pictures(8) + pictures(2, in: "/other")), 0)
+        XCTAssertEqual(ReferenceImages.fullNote, "Only 8 reference images are used, so that picture wasn't added. Remove one to make room.")
+        // A stored bitmap that still gets refused is "a pasted picture", not a name nobody saw.
+        let stored = URL(fileURLWithPath: "/Users/you/Library/Application Support/Roughcut/References/pasted-0123456789abcdef.png")
+        let ninth = ReferenceImages.adding([stored], to: pictures(8))
+        XCTAssertEqual(ninth.note, "Only 8 reference images are used, so a pasted picture wasn't added. Remove one to make room.")
+        let mixed = ReferenceImages.adding([stored, URL(fileURLWithPath: "/y/ninth.png")], to: pictures(8))
+        XCTAssertEqual(mixed.note, "Only 8 reference images are used, so a pasted picture, ninth.png weren't added. Remove one to make room.")
+    }
+
+    func testTheCaptionsSayWhereThePicturesGo() {
+        XCTAssertTrue(ReferenceImages.caption.hasPrefix("Show the look you want: screenshots, other videos' titles, brand sheets. Roughcut matches the style, not the content."))
+        XCTAssertTrue(ReferenceImages.caption.contains("sent to the AI model that designs your graphics"))  // they leave the Mac
+        XCTAssertTrue(ReferenceImages.earlierPicturesHint.contains("adding pictures replaces them"))
     }
 
     func testOldPicturesNobodyUsesAreRemoved() throws {

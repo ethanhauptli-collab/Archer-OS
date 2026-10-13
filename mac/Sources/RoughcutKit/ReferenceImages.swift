@@ -5,7 +5,9 @@ import Foundation
 /// This is the app's side of `roughcut/references.py`: which files the lists take, how many, where a
 /// pasted bitmap is kept and when it goes. Reading a picture, converting it and everything that can go
 /// wrong with one is the CLI's job (it leaves a bad picture out with a warning naming its file).
-/// The pictures are the editor's private ones: the app passes their paths to the CLI and nothing else.
+/// The pictures are the editor's private ones: the app passes their paths to the CLI and nothing else, and the
+/// CLI shows them to the model that designs the graphics (Claude through the plan or API key, or the model chosen) and
+/// nowhere else. The app itself only decodes a picture to draw its thumbnail, and keeps a copied bitmap for 30 days.
 public enum ReferenceImages {
     /// The CLI uses at most this many (`references.MAX_REFERENCES`); the rest it leaves out with a warning.
     public static let maxCount = 8
@@ -16,8 +18,24 @@ public enum ReferenceImages {
     /// Pasted and dropped bitmaps are kept this many days once no list uses them.
     public static let keepDays = 30
 
+    /// The CLI leaves out a picture larger than this (`references.MAX_SOURCE_BYTES`).
+    public static let maxBytes = 40 * 1024 * 1024
+
     /// The line under a references row.
-    public static let caption = "Show the look you want: screenshots, other videos' titles, brand sheets. Roughcut matches the style, not the content."
+    public static let caption = "Show the look you want: screenshots, other videos' titles, brand sheets. Roughcut matches the style, not the content. The pictures are sent to the AI model that designs your graphics, and nowhere else."
+
+    /// What the Revise box says about the pictures a cut already has: they stay in use until others replace them.
+    public static let earlierPicturesHint = "Without new pictures, the ones this cut already has are used again; adding pictures replaces them."
+
+    /// Said when a list is full and something else is offered (a pasted bitmap isn't even saved then).
+    public static var fullNote: String {
+        "Only \(maxCount) reference images are used, so that picture wasn't added. Remove one to make room."
+    }
+
+    /// How many more pictures `list` takes.
+    public static func room(in list: [URL]) -> Int {
+        max(0, maxCount - list.count)
+    }
 
     private static let junkNames: Set<String> = [".DS_Store", ".localized", "Icon\r"]
 
@@ -59,9 +77,9 @@ public enum ReferenceImages {
                 continue
             }
             if !isPicture(clean) {
-                notPictures.append(clean.lastPathComponent)
+                notPictures.append(shownName(clean))
             } else if result.count >= maxCount {
-                pastTheLimit.append(clean.lastPathComponent)
+                pastTheLimit.append(shownName(clean))
             } else {
                 result.append(clean)
                 taken.insert(clean.path)
@@ -78,6 +96,11 @@ public enum ReferenceImages {
             notes.append("Only \(maxCount) reference images are used, so \(named(pastTheLimit)) \(one ? "wasn't" : "weren't") added. Remove one to make room.")
         }
         return Addition(list: result, added: added, note: notes.isEmpty ? nil : notes.joined(separator: " "))
+    }
+
+    /// A file's name for a note; a bitmap this app stored (a generated name) is "a pasted picture".
+    static func shownName(_ url: URL) -> String {
+        url.lastPathComponent.hasPrefix(pastedPrefix) ? "a pasted picture" : url.lastPathComponent
     }
 
     /// "a.png", "a.png, b.png, c.png", "a.png, b.png, c.png and 2 more".
@@ -106,15 +129,64 @@ public enum ReferenceImages {
         return support.appendingPathComponent("Roughcut", isDirectory: true).appendingPathComponent("References", isDirectory: true)
     }
 
-    /// Writes a pasted bitmap (already PNG) into `folder`, which is created on demand. Returns the new file.
-    public static func store(png: Data, in folder: URL, now: Date = Date()) throws -> URL {
+    static let pastedPrefix = "pasted-"
+
+    /// The file extension a picture's bytes say it should be kept under ("png", "jpg", "gif", "webp", "bmp", "heic", "tiff"),
+    /// or nil when they are none of the kinds the CLI reads.
+    public static func pictureKind(of data: Data) -> String? {
+        let head = [UInt8](data.prefix(32))
+        func starts(_ pattern: [UInt8], at offset: Int = 0) -> Bool {
+            head.count >= offset + pattern.count && Array(head[offset..<(offset + pattern.count)]) == pattern
+        }
+        let text = { (value: String) -> [UInt8] in Array(value.utf8) }
+        if starts([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return "png" }
+        if starts([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if starts(text("GIF87a")) || starts(text("GIF89a")) { return "gif" }
+        if starts(text("RIFF")) && starts(text("WEBP"), at: 8) { return "webp" }
+        if starts([0x49, 0x49, 0x2A, 0x00]) || starts([0x4D, 0x4D, 0x00, 0x2A]) { return "tiff" }
+        if starts(text("BM")) { return "bmp" }
+        if starts(text("ftyp"), at: 4), head.count >= 12 {
+            let brand = String(decoding: head[8..<12], as: UTF8.self)
+            if ["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1"].contains(brand) { return "heic" }
+        }
+        return nil
+    }
+
+    /// What can go wrong keeping a bitmap.
+    public enum StoreError: Error, Equatable, LocalizedError {
+        /// More than `maxBytes`: the CLI would leave it out (silently from the user's point of view), so it isn't kept.
+        case tooLarge(megabytes: Int)
+
+        public var errorDescription: String? {
+            switch self {
+            case .tooLarge(let megabytes):
+                return "That picture is \(megabytes) MB, and Roughcut uses pictures up to \(ReferenceImages.maxBytes / 1024 / 1024) MB, so it wasn't added."
+            }
+        }
+    }
+
+    /// A short, stable name for some bytes (FNV-1a, 64 bit): the same picture pasted twice is the same file.
+    static func fingerprint(_ data: Data) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    /// Keeps a pasted or dropped bitmap, as it is, in `folder` (created on demand) as `pasted-<fingerprint>.<ext>`.
+    /// The same bytes are the same file (and its 30 days start again), so pasting a screenshot twice adds it once.
+    /// Throws `StoreError.tooLarge` over `maxBytes`. Returns the file.
+    public static func store(_ data: Data, ext: String, in folder: URL, now: Date = Date()) throws -> URL {
+        guard data.count <= maxBytes else { throw StoreError.tooLarge(megabytes: (data.count + 1024 * 1024 - 1) / 1024 / 1024) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let stamp = DateFormatter()
-        stamp.locale = Locale(identifier: "en_US_POSIX")
-        stamp.dateFormat = "yyyyMMdd-HHmmss"
-        let unique = UUID().uuidString.prefix(8).lowercased()
-        let file = folder.appendingPathComponent("pasted-\(stamp.string(from: now))-\(unique).png")
-        try png.write(to: file, options: .atomic)
+        let file = folder.appendingPathComponent("\(pastedPrefix)\(fingerprint(data)).\(ext)")
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path), (attributes[.size] as? NSNumber)?.intValue == data.count {
+            try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+            return file
+        }
+        try data.write(to: file, options: .atomic)
         return file
     }
 

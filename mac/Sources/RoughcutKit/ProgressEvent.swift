@@ -124,14 +124,24 @@ public struct RunChanges: Codable, Equatable, Sendable {
         fromVersion.map { "Compared with version \($0)" }
     }
 
-    /// The sentence to set apart when nothing a viewer would see changed (it says so, and what to try instead).
-    public var highlighted: String? {
-        unchanged ? items.first : nil
+    /// Which item says nothing a viewer would see changed: the CLI puts it first, but any advice listed beside it
+    /// must not take its place, so it is looked for by what it says, and the first item stands in for one worded otherwise.
+    private var leadIndex: Int? {
+        guard unchanged, !items.isEmpty else { return nil }
+        return items.firstIndex { $0.hasPrefix("This version plays") || $0.hasPrefix("This is the same cut") } ?? 0
     }
 
-    /// The items to bullet: all of them, or what follows the highlighted one.
+    /// The sentence to set apart when nothing a viewer would see changed (it says so, and what to try instead).
+    public var highlighted: String? {
+        leadIndex.map { items[$0] }
+    }
+
+    /// The items to bullet: all of them, or the rest after the highlighted one.
     public var bullets: [String] {
-        unchanged ? Array(items.dropFirst()) : items
+        guard let lead = leadIndex else { return items }
+        var rest = items
+        rest.remove(at: lead)
+        return rest
     }
 
     /// There is something to show.

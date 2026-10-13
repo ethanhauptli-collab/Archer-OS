@@ -126,10 +126,14 @@ public struct ReviseOptions: Equatable, Sendable {
         wanted && canRedesign(result)
     }
 
-    /// Revise needs something to go on: notes, pictures, or a redesign of the graphics (the CLI takes any of them alone).
-    public static func canStart(notes: String, references: [URL], redesign: Bool) -> Bool {
-        !notes.trimmed.isEmpty || !references.isEmpty || redesign
+    /// Revise needs something to say: notes, or pictures (the CLI takes either alone). "Redesign the graphics" is only a
+    /// modifier of them: on its own it would re-plan the whole cut for nothing the editor asked for.
+    public static func canStart(notes: String, references: [URL]) -> Bool {
+        !notes.trimmed.isEmpty || !references.isEmpty
     }
+
+    /// Under "Redesign the graphics": what it does, and what it replaces.
+    public static let redesignHint = "Notes about how graphics look are applied when this is on; the AI also decides from your words. Every graphic is designed again, hand edits included; the earlier designs stay in the version history."
 
     /// A revision of `result`. A cut a model planned is re-planned by that model. One made without AI
     /// has none to reuse (the CLI would fall back to the API key), so `provider` re-plans it, with
@@ -207,6 +211,42 @@ public struct ReviseOptions: Equatable, Sendable {
             args.append("--redesign-graphics")
         }
         return args
+    }
+}
+
+/// The Revise box's "Redesign the graphics" switch. Adding a picture turns it on (the graphics are designed again from
+/// it); it goes off again when the last picture is removed, unless the editor has touched the switch since.
+public struct RedesignSwitch: Equatable, Sendable {
+    public private(set) var isOn = false
+    /// On only because a picture was added.
+    public private(set) var byPicture = false
+
+    public init() {}
+
+    /// The editor set the switch.
+    public mutating func set(_ on: Bool) {
+        isOn = on
+        byPicture = false
+    }
+
+    /// A picture was added to the Revise box.
+    public mutating func pictureAdded() {
+        guard !isOn else { return }
+        isOn = true
+        byPicture = true
+    }
+
+    /// Pictures were removed; `remaining` are left.
+    public mutating func picturesChanged(remaining: Int) {
+        guard remaining == 0, byPicture else { return }
+        isOn = false
+        byPicture = false
+    }
+
+    /// Back to off: after a revision, and for another cut.
+    public mutating func reset() {
+        isOn = false
+        byPicture = false
     }
 }
 
