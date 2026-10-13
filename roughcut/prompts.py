@@ -202,6 +202,31 @@ def _clip_header(clip: Clip, analysis: Analysis | None = None) -> str:
     return ", ".join(bits)
 
 
+LIBRARY_TAGS_MAX = 12
+LIBRARY_TEXT_MAX = 160
+
+
+def _capped(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def library_line(info: dict) -> str:
+    """A Venture Studio song's line in the media block: what the owner's library says about it, capped and in a fixed
+    order (the media block must read the same every time, for prompt caching)."""
+    bits = []
+    if info.get("favorite"):
+        bits.append("a favorite")
+    tags = [_capped(t, 40) for t in info.get("tags") or [] if str(t).strip()][:LIBRARY_TAGS_MAX]
+    if tags:
+        bits.append("tags: " + ", ".join(tags))
+    if info.get("notes"):
+        bits.append("notes: " + _capped(info["notes"], LIBRARY_TEXT_MAX))
+    if info.get("provider"):
+        bits.append("from " + _capped(info["provider"], 60))
+    return "Venture Studio song" + (": " + "; ".join(bits) if bits else "") + ". A candidate for the music bed: cue it in music if it suits the brief."
+
+
 def render_media(analysis: Analysis, style: "Style") -> str:
     """The media inventory the planner reads. Deterministic for a given analysis and style.
 
@@ -223,6 +248,8 @@ def render_media(analysis: Analysis, style: "Style") -> str:
     ]
     for clip in clips:
         lines.append("## " + _clip_header(clip, analysis))
+        if clip.library:
+            lines.append(library_line(clip.library))
         if clip.visual and clip.visual.get("description"):
             v = clip.visual
             tags = ", ".join(v.get("tags", []))

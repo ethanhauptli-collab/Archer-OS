@@ -548,6 +548,123 @@ def music_problem(song: Path | str) -> str | None:
     return None
 
 
+def studio_song_problem(song: Path | str) -> str | None:
+    """music_problem for a Venture Studio song, given a deadline: its library folder may be a share that stopped answering."""
+    from .studio import reachable
+
+    path = Path(song)
+    if path.suffix.lower() not in AUDIO_EXTS:
+        return f"--music {song}: not an audio file roughcut reads ({' '.join(sorted(AUDIO_EXTS))})"
+    why = reachable(str(path))
+    return f"--music {song}: {why}" if why else None
+
+
+def _still_there(clip) -> bool | None:
+    """Whether a clip's file is where it was read; None when its network folder (a Studio song's) doesn't answer in time."""
+    if not clip.library:
+        return Path(clip.media.path).exists()
+    from .studio import FILE_SECONDS
+    from .textio import Stalled, bounded
+
+    try:
+        return bool(bounded(Path(clip.media.path).exists, seconds=FILE_SECONDS))
+    except Stalled:
+        return None
+
+
+MUSIC_PROBES = 6  # --music-from songs whose length Studio hasn't measured: at most this many are measured here
+MUSIC_PROBE_SECONDS = 15.0  # each, with this deadline (a network share can stop answering)
+
+
+def studio_music(opts: Options) -> tuple[Options, list[str]]:
+    """--music-from: up to `music_max` Venture Studio songs from a collection or kit join --music as candidates the
+    planner can cue, after every --music typed (which keeps its place first, so it plays when the plan cues none).
+
+    Ranked favorites first, then by the tags and name words the brief also uses, then by name. Songs only: a length
+    Studio knows of 45 s or more, else measured here (with a deadline, for at most a few, skipping names that sound
+    like sound effects). Returns the options and the warnings for the paper edit. Never stops the run: an
+    unavailable Studio, snapshot, collection or share is a warning, and the cut is built without its songs.
+    """
+    source = (opts.music_from or "").strip()
+    if not source or opts.music_max <= 0:
+        return opts, []
+    from . import studio
+    from .analyze import probe_cached
+    from .textio import Stalled, bounded
+
+    def without(why: str) -> tuple[Options, list[str]]:
+        line = f"--music-from {source}: {why}; this cut is built without its songs."
+        log(line)
+        return opts, [line]
+
+    try:
+        collection, kit = studio.music_source(source, cache_dir=opts.cache_dir)
+        listing = studio.music_listing(collection=collection, kit=kit, cache_dir=opts.cache_dir)
+    except studio.StudioUnavailable as e:
+        return without("Venture Studio isn't installed on this Mac" if e.silent else e.reason)
+    except Exception as e:  # noqa: BLE001 - Studio never stops a run
+        return without(f"couldn't read Venture Studio: {e}")
+    for note in listing.notes:
+        log(note)
+    have = {str(Path(p)) for p in opts.music}
+    cache = Cache(opts.cache_dir or default_cache_dir())
+    picked: list[tuple[str, dict]] = []
+    probes, stalled = 0, None
+    for row in studio.rank_songs([r for r in listing.rows if r["usable"]], opts.context):
+        if len(picked) >= opts.music_max:
+            break
+        path = str(Path(row["path"]))
+        if path in have:
+            continue
+        seconds = row["seconds"]
+        if seconds is not None and seconds < studio.MUSIC_SECONDS:
+            continue  # a sound effect or a sting, by the length Studio measured
+        if seconds is None and (probes >= MUSIC_PROBES or studio.music_guess(f"{row['name']} {row['file']}", None, row["tags"]) == "sfx"):
+            continue
+        why = studio.reachable(path)
+        if why:
+            if "didn't answer" in why:
+                stalled = why
+                break  # the share stopped answering: the rest are on it too
+            log(f"--music-from {source}: {row['file']} left out: {why}")
+            continue
+        if seconds is None:
+            probes += 1
+            try:
+                seconds = float(bounded(probe_cached, Path(path), cache, seconds=MUSIC_PROBE_SECONDS, what=f"reading {row['file']}").duration)
+            except Stalled:
+                stalled = f"its network folder didn't answer in {MUSIC_PROBE_SECONDS:g} s"
+                break
+            except Exception as e:  # noqa: BLE001 - an unreadable file is skipped
+                log(f"--music-from {source}: {row['file']} left out: {e}")
+                continue
+            if seconds < studio.MUSIC_SECONDS:
+                continue
+        info = {
+            "studio_id": row["id"], "title": row["name"], "provider": row["provider"], "license": row["license"], "tags": row["tags"],
+            "notes": row["notes"], "favorite": row["favorite"], "from": f"--music-from {source}",
+        }
+        picked.append((path, info))
+    warnings = []
+    if stalled:
+        warnings.append(f"--music-from {source}: stopped adding Studio songs: {stalled}.")
+        log(warnings[-1])
+    if not picked:
+        if not warnings:
+            warnings.append(f"--music-from {source}: no songs found in {listing.source} (Studio audio of 45 s or more that Roughcut reads).")
+            log(warnings[-1])
+        return opts, warnings
+    log(
+        f"--music-from {source}: {len(picked)} Studio song{'s' if len(picked) != 1 else ''} the plan can cue, from {listing.source}: "
+        + ", ".join(info["title"] for _, info in picked)
+    )
+    opts = replace(
+        opts, music=list(opts.music) + [Path(p) for p, _ in picked], music_library={**opts.music_library, **dict(picked)},
+        studio_kit=str(listing.kit_file) if listing.kit_file else opts.studio_kit,
+    )
+    return opts, warnings
+
+
 def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
     """Clips a cut uses whose files are gone from where the footage was read.
 
@@ -555,27 +672,48 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
     footage folder would otherwise only show up as missing media in Final Cut.
     """
     used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
-    gone = [c for c in analysis.clips if c.id in used and not Path(c.media.path).exists()]
+    there = {c.id: _still_there(c) for c in analysis.clips if c.id in used}
+    gone = [c for c in analysis.clips if there.get(c.id) is False]
+    silent = [c for c in analysis.clips if c.id in there and there[c.id] is None]
+    out = [
+        f"{c.media.name} (a Venture Studio song) couldn't be checked: its network folder didn't answer. If it's still offline when "
+        "you open the cut, Final Cut shows it as missing media until the share is back."
+        for c in silent
+    ]
     if not gone:
-        return []
+        return out
     named = "; ".join(f"{c.media.name} ({'the music bed, ' if c.music_bed else ''}was at {c.media.path})" for c in gone[:3])
     more = f" and {len(gone) - 3} more" if len(gone) > 3 else ""
     return [
         f"{len(gone)} file{'s' if len(gone) != 1 else ''} this cut uses {'are' if len(gone) != 1 else 'is'} no longer where the footage was read: "
         f"{named}{more}. Final Cut will show {'them' if len(gone) != 1 else 'it'} as missing media: put {'them' if len(gone) != 1 else 'it'} back, "
         "or relink in Final Cut (File > Relink Files)."
-    ]
+    ] + out
 
 
 def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None) -> Analysis:
     """Scan, probe, map silence and transcribe. `skipped` collects the names of files that couldn't be read."""
     require_tools()
     progress.stage("scan", "Finding media")
+    library = {str(Path(p)): info for p, info in (opts.music_library or {}).items()}
+    music, studio_songs, dropped = [], [], []
     for song in opts.music:
-        problem = music_problem(song)
-        if problem:
-            raise RoughcutError(problem)
-    files = scan(list(opts.inputs) + list(opts.music), exclude=[out_dir])
+        if str(Path(song)) in library:
+            # A Venture Studio song: checked with a deadline, and left out (never a stopped run) once the run has started.
+            problem = studio_song_problem(song)
+            if problem:
+                dropped.append(f"{problem}; left out of the music bed")
+                log(dropped[-1])
+                continue
+            studio_songs.append(Path(song))
+        else:
+            problem = music_problem(song)
+            if problem:
+                raise RoughcutError(problem)
+        music.append(song)
+    files = scan(list(opts.inputs) + [m for m in music if str(Path(m)) not in library], exclude=[out_dir])
+    seen = {str(f) for f in files}
+    files += [p for p in studio_songs if str(p) not in seen]  # as Studio has them: never resolved, which would touch the share
     if not files:
         raise RoughcutError("No media files found. Supported: video (.mov .mp4 ...), audio (.wav .m4a ...) and images.")
     log(f"found {len(files)} media files")
@@ -593,11 +731,15 @@ def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None)
         prefer_vertical = h > w
     analysis = analyze(
         files, transcriber=transcriber, cache=cache, transcript_dirs=opts.transcript_dirs, workers=opts.workers, prefer_vertical=prefer_vertical,
-        music=opts.music,
+        music=music, library={p: info for p, info in library.items() if Path(p) in studio_songs},
     )
+    analysis.warnings += dropped
     if skipped is not None:
-        read = {Path(c.media.path).resolve() for c in analysis.clips}
-        skipped += [f.name for f in files if Path(f).resolve() not in read]
+        def where(p) -> str:
+            return str(Path(p)) if str(Path(p)) in library else str(Path(p).resolve())
+
+        read = {where(c.media.path) for c in analysis.clips}
+        skipped += [f.name for f in files if where(f) not in read]
     return analysis
 
 
@@ -858,13 +1000,14 @@ def build(opts: Options) -> Result:
         if problem:
             raise RoughcutError(problem)
 
+    opts, music_notes = studio_music(opts)  # --music-from: Studio songs as candidates (never stops the run)
     skipped_files: list[str] = []
     analysis = run_analysis(opts, out_dir, skipped=skipped_files)
     timings["analysis"] = time.monotonic() - t_start
     visual_log = None
 
     usage = []
-    extra_warnings: list[str] = [studio_warning] if studio_warning else []
+    extra_warnings: list[str] = ([studio_warning] if studio_warning else []) + music_notes
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision

@@ -343,6 +343,18 @@ def _refs(plan: Plan) -> list[str]:
     return [i.ref for s in plan.sections for i in s.items]
 
 
+def played_songs(plan: Plan, analysis: Analysis) -> list[str]:
+    """The songs a plan's cut plays, in cue order: its music cues, or the --music song that runs under the whole cut when it cues none."""
+    from .timeline import _music_cues
+
+    names = []
+    for cue in _music_cues(plan, analysis, True, []):
+        clip = analysis.clip(cue.clip_id)
+        if clip is not None and clip.media.name not in names:
+            names.append(clip.media.name)
+    return names
+
+
 def describe_changes(previous: Plan, revised: Plan, analysis: Analysis, *, before_seconds: float | None, after_seconds: float, previous_version: int | None) -> list[str]:
     """A deterministic list of what the revision changed, for the paper edit."""
     L = []
@@ -381,7 +393,10 @@ def describe_changes(previous: Plan, revised: Plan, analysis: Analysis, *, befor
         L.append(f"- B-roll shots: {b_old} → {b_new}")
     if len(previous.graphics) != len(revised.graphics):
         L.append(f"- Graphics: {len(previous.graphics)} → {len(revised.graphics)}")
-    if len(previous.music) != len(revised.music):
+    songs_before, songs_after = played_songs(previous, analysis), played_songs(revised, analysis)
+    if songs_before != songs_after:
+        L.append(f"- Music: {', '.join(songs_before) or 'none'} → {', '.join(songs_after) or 'none'}")
+    elif len(previous.music) != len(revised.music):
         L.append(f"- Music cues: {len(previous.music)} → {len(revised.music)}")
     if len(L) == (1 if before_seconds is not None else 0):
         L.append("- No lines added or removed")

@@ -764,10 +764,119 @@ def song(con: sqlite3.Connection, asset_id: int) -> Asset:
     return found[0]
 
 
-def reachable(path: str, seconds: float = FILE_SECONDS) -> str | None:
+@dataclass
+class Listing:
+    """Studio audio for a music bed (`roughcut studio music`, --music-from): rows, and what they came from."""
+
+    rows: list[dict]
+    source: str  # "the catalog snapshot from 12 Oct 21:04 (14 h old)", or "the kit 'Promo kit'"
+    kit_file: Path | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+def _kit_rows(kit: Kit, words=()) -> list[dict]:
+    tokens = [t.lower() for t in search_tokens(words)]
+    rows = []
+    for item in kit.items:
+        if item.kind and item.kind != "audio":
+            continue
+        row = kit_audio_row(item)
+        text = f"{item.name} {item.path} {item.provider} {item.license}".lower()
+        if all(t in text for t in tokens):
+            rows.append(row)
+    return rows
+
+
+def music_listing(
+    words=(), *, collection: str | None = None, kit: str | None = None, favorites: bool = False,
+    folder: Path | None = None, cache_dir: Path | None = None, now: float | None = None,
+) -> Listing:
+    """Studio's standalone audio, by collection, kit (its name in the catalog, or a kit file the owner exported),
+    favorites and search words, from the snapshot copy: no file on a library folder is touched."""
+    if kit is not None and is_kit_file(kit):
+        if collection is not None or favorites:
+            raise StudioUnavailable("a kit file has no collections or favorites: give the kit file alone")
+        loaded = load_kit(kit)
+        exported = f", exported {_when(loaded.exported_at)}" if loaded.exported_at else ""
+        held = [f"{name}: {why}" for name, why in loaded.held_back]
+        return Listing(_kit_rows(loaded, words), f"the kit {loaded.name!r}{exported}", loaded.file, held)
+    copy = newest_copy(folder, cache_dir)
+    with catalog(copy) as con:
+        found = standalone_audio(con, words=words, collection=collection, kit=kit, favorites=favorites)
+    rows = sorted((audio_row(a) for a in found), key=lambda r: (r["name"].casefold(), r["id"]))
+    snap = copy.snapshot
+    return Listing(rows, f"the catalog snapshot from {snap.when()} ({_age(snap.age_hours(now))})", None, copy.notes(now))
+
+
+def music_source(name: str, *, folder: Path | None = None, cache_dir: Path | None = None) -> tuple[str | None, str | None]:
+    """(collection, kit) for --music-from NAME: "collection:NAME" or "kit:NAME", a kit file, or a name that is only
+    one of the two in the catalog (a name that's both must say which)."""
+    text = name.strip()
+    for prefix in ("collection:", "kit:"):
+        if text.lower().startswith(prefix):
+            value = text[len(prefix):].strip()
+            if not value:
+                raise StudioUnavailable(f"{text!r} names no {prefix[:-1]}")
+            return (value, None) if prefix == "collection:" else (None, value)
+    if is_kit_file(text):
+        return None, text
+    copy = newest_copy(folder, cache_dir)
+    with catalog(copy) as con:
+        is_collection = any(c.casefold() == text.casefold() for c in collections(con))
+        is_kit = any(k.casefold() == text.casefold() for k in kits(con))
+    if is_collection and is_kit:
+        raise StudioUnavailable(f"both a collection and a kit are named {text!r} in Venture Studio: say collection:{text} or kit:{text}")
+    if not (is_collection or is_kit):
+        raise StudioUnavailable(f"Venture Studio has no collection or kit named {text!r}")
+    return (text, None) if is_collection else (None, text)
+
+
+_STOP = {
+    "the", "and", "for", "with", "this", "that", "from", "are", "our", "you", "your", "its", "it's", "about", "into", "who", "what",
+    "when", "where", "will", "was", "were", "has", "have", "had", "not", "but", "all", "any", "can", "out", "use", "one", "more",
+    "keep", "make", "video", "promo", "cut", "edit", "clip", "clips", "line", "lines", "music", "song", "track", "audio",
+}
+
+
+def rank_songs(rows: list[dict], brief: str = "") -> list[dict]:
+    """Favorites first, then the most tags and name words the brief also uses, then by name (deterministic)."""
+    wanted = {w for w in re.findall(r"[^\W_]+", (brief or "").lower()) if len(w) >= 3} - _STOP
+
+    def hits(row: dict) -> int:
+        words = set(re.findall(r"[^\W_]+", " ".join([row.get("name") or "", row.get("file") or "", *(row.get("tags") or [])]).lower()))
+        return len(words & wanted)
+
+    return sorted(rows, key=lambda r: (not r.get("favorite"), -hits(r), (r.get("name") or "").casefold(), r.get("id") or 0))
+
+
+def listing_lines(listing: Listing) -> list[str]:
+    """`roughcut studio music`: a header with where the list is from, one song a line, and how to use one."""
+    lines = [f"Venture Studio audio from {listing.source}." + (" In Studio, Back up catalog now refreshes the snapshot." if listing.kit_file is None else "")]
+    lines += [f"! {n}" for n in listing.notes]
+    if not listing.rows:
+        return lines + ["No audio found."]
+    width = max(len(str(r["id"])) for r in listing.rows)
+    lines.append(f"{'ID':>{width}}  {'Length':>7}  {'Guess':<7}  Name (provider, license)  [tags]")
+    for r in listing.rows:
+        who = ", ".join(x for x in (r["provider"], r["license"]) if x)
+        tags = f"  [{', '.join(r['tags'])}]" if r["tags"] else ""
+        star = "* " if r["favorite"] else ""
+        usable = "" if r["usable"] else f"  (not usable: {r['why_not']})"
+        lines.append(f"{str(r['id']):>{width}}  {r['length']:>7}  {r['guess']:<7}  {star}{r['name']}" + (f" ({who})" if who else "") + tags + usable)
+    n = len(listing.rows)
+    first = next((r for r in listing.rows if r["usable"] and r["id"] is not None), None)
+    lines.append(f"{n} file{'s' if n != 1 else ''}; * = favorite; length ? = Studio hasn't measured it yet.")
+    if first is not None:
+        lines.append(f"Use one under a cut: roughcut build FOLDER --music studio:{first['id']}")
+    return lines
+
+
+def reachable(path: str, seconds: float | None = None) -> str | None:
     """None when `path` is a regular file reached with no link anywhere along it (Studio's own rule for handing
-    a file off); else why not. Given at most `seconds`: a network share that stops answering can't hold it."""
+    a file off); else why not. Given at most `seconds` (FILE_SECONDS): a network share that stops answering can't hold it."""
     from .textio import Stalled, bounded
+
+    seconds = FILE_SECONDS if seconds is None else seconds
 
     def check() -> str | None:
         try:
