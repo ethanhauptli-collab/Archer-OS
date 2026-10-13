@@ -11,6 +11,7 @@ that may stop a run.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 # macOS Finder/AppleDouble litter: "._clip.mov" resource-fork shadows and folder settings.
@@ -36,6 +37,35 @@ def run_text(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """
     kwargs.setdefault("capture_output", True)
     return subprocess.run(cmd, encoding="utf-8", errors="replace", **kwargs)
+
+
+class Stalled(Exception):
+    """A file or tool call that didn't finish in time: usually a network share that stopped answering."""
+
+
+def bounded(fn, *args, seconds: float, what: str = "", **kwargs):
+    """fn(*args, **kwargs), given at most `seconds`; raises Stalled after that, or what fn raised.
+
+    For anything that touches a network share (stat, exists, ffprobe, ffmpeg): a mounted share
+    that stops answering blocks those calls in the kernel, where no signal or subprocess timeout
+    reaches them, so the call runs in a daemon thread and is left behind if it never returns.
+    """
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as e:  # noqa: BLE001 - handed back to the caller
+            box["error"] = e
+
+    t = threading.Thread(target=run, daemon=True, name="bounded")
+    t.start()
+    t.join(max(0.0, seconds))
+    if t.is_alive():
+        raise Stalled(f"{what or getattr(fn, '__name__', 'a file operation')} didn't answer in {seconds:g} s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def decode_user_text(data: bytes) -> str:

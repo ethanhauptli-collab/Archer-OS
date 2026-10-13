@@ -156,3 +156,17 @@ def test_a_brief_file_in_windows_1252_reaches_the_plan(footage, tmp_path):
     out = tmp_path / "out"
     assert main(["build", str(footage), "-o", str(out), "--provider", "none", "--transcriber", "none",
                  "--cache-dir", str(tmp_path / "cache"), "--context-file", str(brief), "--no-menu"]) == 0
+
+
+def test_bounded_gives_up_on_a_call_that_never_returns():
+    import threading
+    import time
+
+    stuck = threading.Event()  # never set: a network share that stopped answering
+    t0 = time.monotonic()
+    with pytest.raises(textio.Stalled, match="stat didn't answer in 0.2 s"):
+        textio.bounded(stuck.wait, seconds=0.2, what="stat")
+    assert time.monotonic() - t0 < 2
+    assert textio.bounded(lambda a, b=0: a + b, 2, b=3, seconds=5) == 5
+    with pytest.raises(FileNotFoundError):  # what the call raised comes back as itself
+        textio.bounded(Path("/nonexistent/roughcut").stat, seconds=5)
