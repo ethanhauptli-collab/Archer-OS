@@ -202,6 +202,44 @@ def test_a_revision_keeps_what_both_features_saved_and_says_what_it_did_to_the_s
     assert "Pacing: medium → tight" in items
 
 
+def test_without_ai_the_same_studio_still_gives_the_sounds_and_the_song(footage, catalog, fake, tmp_path):
+    """--provider none: a stringout-style cut gets at most the soft accents, the first Studio song, and the credits."""
+    out, cache = tmp_path / "out", tmp_path / "cache"
+    assert main([
+        "build", str(footage / "talk.mov"), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", str(cache),
+        "--sfx-from", "Promo Sounds", "--music-from", "Promo Music",
+    ]) == 0
+    fcpxml = next(out.glob("*.fcpxml"))
+    validate_dtd(fcpxml)
+    check_invariants(fcpxml)
+    report = (out / "edit_report.md").read_text()
+    saved = json.loads((out / "plan.json").read_text())
+    assert saved["settings"]["sfx_amount"] == "soft" and saved["settings"]["sfx_pool"]["sounds"]
+    assert "Sunrise.m4a" in _studio_part(report) and "**Vendor A**, Standard license: " in _studio_part(report)
+    assert "Music: Sunrise.m4a (--music) runs under the whole cut" in report
+
+
+def test_sounds_picked_as_a_folder_in_the_library_are_credited_by_their_path(footage, catalog, fake, provider, tmp_path):
+    """Studio's review matches paths, not how Roughcut found a file: a plain --sfx folder inside a library, and a song
+    given by --music studio:ID, are counted and credited like the ones a collection named."""
+    out, cache = tmp_path / "out", tmp_path / "cache"
+    with untouched(fake.dir, catalog):
+        assert main([
+            "build", str(footage), "-o", str(out), "--name", "footage", *_args(footage, out, cache),
+            "--sfx", str(catalog / "Sound Effects" / "Accents"), "--music", "studio:4",
+        ]) == 0
+    root = ET.parse(next(out.glob("*.fcpxml"))).getroot()
+    heard = {Path(_path(_src(root, el))).name for el in _accents(root)}
+    assert heard
+    section = _studio_part((out / "edit_report.md").read_text())
+    n = len(heard) + 1
+    assert f"{n} Studio items in " in section
+    assert "Sunrise.m4a" in section and all(name in section for name in heard)
+    assert ("Vendor B" in section) == bool(heard & {"swoosh_fast_02.wav", "impact_hit_01.wav"})  # a credit for each file that played
+    # The sounds themselves carry no provider (they weren't named through Studio): the Sound effects table has no credits column.
+    assert "Provider and license" not in (out / "edit_report.md").read_text().split("## Sound effects")[1].split("\n## ")[0]
+
+
 # ---------------------------------------------------------------- what changed, in plain words
 
 
