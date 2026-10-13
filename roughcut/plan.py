@@ -156,9 +156,20 @@ PLAN_SCHEMA: dict = {
                 "callouts, kinetic captions). false when it turns them down or doesn't mention them."
             ),
         },
+        "redesign_graphics": {
+            "type": "string",
+            "enum": ["yes", "no", "unspecified"],
+            "description": (
+                "Only when revising a cut that has been made; always unspecified when planning a new cut. yes: the editor's notes "
+                "ask to change how the graphics look or move (style, colour, font, size, position, speed, 'make them bolder', 'like "
+                "this'), so every graphic is designed again. no: they only change what a graphic says, or ask to leave the graphics' "
+                "look alone. unspecified: they don't mention the graphics."
+            ),
+        },
     },
     "required": [
         "title", "logline", "sections", "alternates", "flags", "music", "cut_notes", "spellings", "pacing", "punch_ins", "graphics_asked",
+        "redesign_graphics",
     ],
     "additionalProperties": False,
 }
@@ -252,6 +263,15 @@ class GraphicSpec:
     direction: str = ""
 
 
+def spec_key(spec: GraphicSpec) -> tuple:
+    """What a design is made from: a graphic whose words, text, subtext or direction changed is designed again.
+    (Case and spacing of the words and the direction don't count; a name spelled another way does.)"""
+    return (
+        spec.kind, spec.segment, " ".join(spec.words.lower().split()), spec.text.strip(), spec.subtext.strip(),
+        " ".join(spec.direction.lower().split()),
+    )
+
+
 @dataclass
 class Plan:
     title: str
@@ -270,6 +290,7 @@ class Plan:
     pacing: str = "unspecified"  # tight / medium / loose / unspecified
     punch_ins: str = "unspecified"  # on / off / unspecified
     graphics_asked: bool = False
+    redesign_graphics: str = "unspecified"  # a revision's notes ask for another look for the graphics: yes / no / unspecified
 
     def to_json(self) -> dict:
         return {
@@ -302,6 +323,7 @@ class Plan:
             "pacing": self.pacing,
             "punch_ins": self.punch_ins,
             "graphics_asked": self.graphics_asked,
+            "redesign_graphics": self.redesign_graphics,
         }
 
 
@@ -496,6 +518,9 @@ def normalize(
     punch = ("on" if punch else "off") if isinstance(punch, bool) else str(punch or "").strip().lower()
     plan.punch_ins = punch if punch in ("on", "off") else "unspecified"
     plan.graphics_asked = raw.get("graphics_asked") is True
+    redesign = raw.get("redesign_graphics")
+    redesign = ("yes" if redesign else "no") if isinstance(redesign, bool) else str(redesign or "").strip().lower()
+    plan.redesign_graphics = redesign if redesign in ("yes", "no") else "unspecified"
     graphics = [
         dict(g, segment=lines.replaced.get(str(g.get("segment") or "").strip().upper(), g.get("segment"))) if isinstance(g, dict) else g
         for g in raw.get("graphics") or []

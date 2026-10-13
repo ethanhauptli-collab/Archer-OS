@@ -18,7 +18,10 @@ def _tc(frames: int, tl: Timeline) -> str:
 
 # Warnings about what the brief or the revise notes asked for that this cut doesn't do: also at the top
 # of the report and at the end of the CLI's output, not only in the Warnings.
-HEADLINE_WARNINGS = ("The brief asks for graphics", "Your notes ask for", "The output folder is inside the Venture Studio library")
+HEADLINE_WARNINGS = (
+    "The brief asks for graphics", "Your notes ask for", "The output folder is inside the Venture Studio library",
+    "The reference image", "Only 8 reference images", "Reference images are only used",  # a picture left out is easy to miss
+)
 
 
 def collapse_warnings(warnings: list[str]) -> list[str]:
@@ -81,6 +84,7 @@ def build_report(
     extra_warnings: list[str] | None = None,
     graphics: list | None = None,
     revision: list[str] | None = None,
+    graphics_refs: list[str] | None = None,
 ) -> str:
     raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role != "graphic")
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
@@ -182,6 +186,12 @@ def build_report(
         L += ["## Motion graphics", "", "Rendered clips and their HTML designs are in `graphics/`. Edit a design and run `roughcut render` to re-render just that one.", ""]
         if rendered:
             L += ["Open `graphics/preview.html` to watch each one over the shot it sits on.", ""]
+        if graphics_refs:  # file names only: the pictures are the editor's own, and stay in graphics/references/
+            L += [
+                "Reference images for the look, shown to the designer whenever graphics are designed (`graphics/references/`): "
+                + ", ".join(f"`{name}`" for name in graphics_refs) + ".",
+                "",
+            ]
         L += ["| Time | ID | Kind | On screen | File |", "|---|---|---|---|---|"]
         for g in graphics:
             text = g.spec.text + (f" / {g.spec.subtext}" if g.spec.subtext else "")

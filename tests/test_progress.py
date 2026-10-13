@@ -146,6 +146,7 @@ def test_done_payload_additions_keep_their_shape():
     assert set(r["skipped"]) == {"files", "plan_refs"}
     assert set(r["usage"]) == {"calls", "dollars", "by_purpose", "calls_by_purpose", "subscription_calls", "unpriced_calls"}
     assert r["cut"] == {"style": "medium", "format": None, "keep_fillers": False, "stringout": True, "punch_in": False}  # CutSettings in the app
+    assert r["changes"] is None or set(r["changes"]) == {"from_version", "items", "unchanged"}  # RunChanges in the app: null for a first build
 
 
 def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):

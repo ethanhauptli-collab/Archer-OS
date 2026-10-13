@@ -82,6 +82,8 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var cut: CutSettings?
     /// `<name> vN.srt` beside the Final Cut file: the cut's captions (nil when nothing in it is spoken, or from older CLIs).
     public var captions: String?
+    /// What a revision or re-cut changed from the version before (nil for a first build, and from older CLIs).
+    public var changes: RunChanges?
 
     /// No model planned this cut (`--provider none`, or the stringout fallback): `planned_by` names no "provider:model".
     public var madeWithoutAI: Bool { !plannedBy.contains(":") }
@@ -97,6 +99,21 @@ public struct RunResult: Codable, Equatable, Sendable {
             return URL(fileURLWithPath: reportHtml)
         }
         return reportURL
+    }
+}
+
+/// What a revision or re-cut changed from the version before (`result_summary`'s "changes"): plain sentences, ready to list.
+public struct RunChanges: Codable, Equatable, Sendable {
+    /// The version it was measured from (nil when the folder doesn't say).
+    public var fromVersion: Int?
+    public var items: [String]
+    /// Nothing a viewer would see changed. `items` then says so, with what to try instead.
+    public var unchanged: Bool
+
+    public init(fromVersion: Int? = nil, items: [String] = [], unchanged: Bool = false) {
+        self.fromVersion = fromVersion
+        self.items = items
+        self.unchanged = unchanged
     }
 }
 

@@ -62,6 +62,7 @@ from . import brand_fonts, ffmpeg_ops, progress
 from .analyze import ROLE_LABELS, Analysis, Clip, log
 from .captions import respell, respell_timed
 from .plan import DEFAULT_SECONDS, GraphicSpec
+from .references import ReferenceSet
 from .timeline import ConnectedClip, Timeline
 
 LEAD = 0.12  # a graphic starts animating in just before its words (never before the cut its words open)
@@ -80,6 +81,7 @@ STEP_TIMEOUT = 30.0  # loading the design, drawing a frame
 BUDGET_MIN, BUDGET_PER_FRAME = 120.0, 3.0  # a whole graphic: max(BUDGET_MIN, BUDGET_PER_FRAME x frames) seconds
 PROGRESS_EVERY = 30.0  # seconds between "frame n of N" lines on a long render
 REFERENCE_CHARS = 40_000  # longest finished design sent along as the reference for the other batches
+EDITOR_NOTES_CHARS = 4_000  # longest revision note sent to the designer as the editor's direction
 PICTURE_WIDTH = 512  # frame of the shot under each graphic, shown to the designer
 
 # On a vertical (9:16) video, Reels, TikTok and Shorts cover these strips of the frame with their
@@ -669,10 +671,11 @@ def _pictures(placed: list[PlacedGraphic], analysis: Analysis, workers: int = 4)
 def _design_request(
     placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     house_style: str = "", reference: tuple[str, str, str] | None = None, keep_out: dict[str, float] | None = None,
-    spellings: list[dict] | None = None,
+    spellings: list[dict] | None = None, editor_notes: str = "",
 ) -> str:
     """The design request for `placed`. Names in what's said and in the words a kinetic caption reveals are spelled as
-    the brief spells them (`spellings`, as the text already is); the timing note keeps the transcript's words."""
+    the brief spells them (`spellings`, as the text already is); the timing note keeps the transcript's words.
+    `editor_notes`: a revision's notes, when its graphics are all designed again: the editor's direction for them."""
     items = []
     for g in placed:
         seg = analysis.segment(g.spec.segment)
@@ -697,6 +700,11 @@ def _design_request(
         "<brief>\n" + (brief.strip() or "No brief given.") + "\n</brief>",
         "<style_direction>\n" + (style.strip() or "None given: use the default look.") + "\n</style_direction>",
     ]
+    if editor_notes.strip():
+        parts.append(
+            "<editor_direction>\nThe editor's notes for this revision, written about the whole cut. Follow what concerns how the "
+            "graphics look or move, and ignore the rest:\n" + editor_notes.strip()[:EDITOR_NOTES_CHARS] + "\n</editor_direction>"
+        )
     if house_style:
         parts.append("<design_system>\nAlready established for this video; match it exactly:\n" + house_style + "\n</design_system>")
     if reference:
@@ -715,6 +723,7 @@ def design(
     provider, placed: list[PlacedGraphic], analysis: Analysis, fd: Fraction, *, brief: str, style: str, width: int, height: int,
     warnings: list[str], batch: int = 4, workers: int = 3, keep_out: dict[str, float] | None = None,
     house_style: str = "", found: dict | None = None, spellings: list[dict] | None = None,
+    references: ReferenceSet | None = None, editor_notes: str = "",
 ) -> dict[str, str]:
     """HTML for each graphic, by ID.
 
@@ -722,13 +731,23 @@ def design(
     designed in parallel, each given that house style and one finished design to match.
     `house_style` is a design system already established for this video (a revision's new
     graphics match it); the one in use at the end goes into found["house_style"].
+    `references`: the editor's reference images, which every request carries before its text when the model
+    can look at images (said once when it can't). `editor_notes`: see _design_request.
     """
     from .providers import ImagePart, ProviderAuthError, ProviderError, TextPart
 
     html: dict[str, str] = {}
     if not placed:
         return html
-    pictures = _pictures(placed, analysis) if getattr(provider, "supports_vision", False) else {}
+    can_see = getattr(provider, "supports_vision", False)
+    pictures = _pictures(placed, analysis) if can_see else {}
+    if references and not can_see:
+        if not references.warned:
+            references.warned = True
+            who = getattr(provider, "model", "") or "The model"
+            warnings.append(f"{who} can't look at images, so the reference images were left out")
+            log("graphics: the model can't look at images; the reference images were left out")
+        references = None
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()
     tried = 0
@@ -738,9 +757,12 @@ def design(
     def ask(group: list[PlacedGraphic], house: str, reference: tuple[str, str, str] | None):
         request = _design_request(
             group, analysis, fd, brief=brief, style=style, width=width, height=height, house_style=house, reference=reference, keep_out=keep_out,
-            spellings=spellings,
+            spellings=spellings, editor_notes=editor_notes,
         )
         parts: list = []
+        if references:  # the look the editor wants, before anything else in the request
+            parts += [TextPart(references.intro()), *(ImagePart(data, "image/jpeg") for data in references.images)]
+            references.sent = True
         for g in group:  # the shot under each graphic, then the request
             if g.id in pictures:
                 parts += [TextPart(f"{g.id} sits over {g.over}"), ImagePart(pictures[g.id], "image/jpeg")]
@@ -1535,6 +1557,7 @@ def make(
     provider, specs: list[GraphicSpec], tl: Timeline, analysis: Analysis, out_dir: Path, *, brief: str, style: str, workers: int,
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
     house_style: str = "", planned: list[GraphicSpec] | None = None, spellings: list[dict] | None = None,
+    references: ReferenceSet | None = None, editor_notes: str = "",
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 
@@ -1545,6 +1568,7 @@ def make(
     `planned`: with saved designs, every graphic of the plan at its index (default: `specs`). The ones this cut
     doesn't place stay in graphics.json, with their designs, for the next re-cut to place again.
     `spellings`: the plan's name fixes, for the words the designer is shown.
+    `references`, `editor_notes`: the editor's reference images and a revision's notes, for the designer only (see design).
     """
     from .presets import design_style, inline_logo
 
@@ -1570,6 +1594,7 @@ def make(
         html = design(
             provider, placed, analysis, tl.frame_duration, brief=brief, style=design_style(style, logo, look), width=tl.width, height=tl.height,
             warnings=warnings, keep_out=keep_out, house_style=house_style, found=found, spellings=spellings,
+            references=references, editor_notes=editor_notes,
         )
         html = {k: inline_logo(v, logo) for k, v in html.items()}
     # Each design notes the timing it was made for (a new one: this cut's), and plays re-timed in a

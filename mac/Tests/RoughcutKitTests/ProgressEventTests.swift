@@ -46,6 +46,27 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertEqual(result.cut?.sequenceFormat, .auto)
         XCTAssertFalse(result.madeWithoutAI)
         XCTAssertEqual(result.captionsURL?.lastPathComponent, "Trip v1.srt")  // beside "Trip v1.fcpxml"
+        XCTAssertNil(result.changes)  // a first build changed nothing from an earlier version
+    }
+
+    func testWhatARevisionOrRecutChangedDecodes() throws {
+        func done(_ changes: String?) -> String {
+            let tail = changes.map { #","changes":\#($0)"# } ?? ""
+            return #"{"event":"done","result":{"title":"T","out_dir":"/o","fcpxml":"/o/T v2.fcpxml","report":"/o/edit_report.md","rough_seconds":20.5,"stringout_seconds":null,"edits":4,"broll":1,"sections":["A"],"planned_by":"anthropic:claude-opus-5-5","fell_back":false,"warnings":[],"version":2\#(tail)}}"#
+        }
+        let changed = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":1,"items":["Length: 0:30 → 0:20 (−0:10)","Graphics: 2 redesigned (every graphic is designed again)"],"unchanged":false}"#))?.result)
+        XCTAssertEqual(changed.changes, RunChanges(fromVersion: 1, items: ["Length: 0:30 → 0:20 (−0:10)", "Graphics: 2 redesigned (every graphic is designed again)"], unchanged: false))
+
+        let same = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":1,"items":["This version plays the same lines, B-roll and graphics as v1. If you meant how the graphics look, attach reference images or tick Redesign graphics."],"unchanged":true}"#))?.result)
+        XCTAssertEqual(same.changes?.unchanged, true)
+        XCTAssertEqual(same.changes?.items.count, 1)
+
+        let unknownVersion = try XCTUnwrap(JSONLines.event(from: done(#"{"from_version":null,"items":[],"unchanged":false}"#))?.result)
+        XCTAssertEqual(unknownVersion.changes, RunChanges(fromVersion: nil, items: [], unchanged: false))
+
+        // A first build, and a CLI from before the key existed, both have none.
+        XCTAssertNil(try XCTUnwrap(JSONLines.event(from: done("null"))?.result).changes)
+        XCTAssertNil(try XCTUnwrap(JSONLines.event(from: done(nil))?.result).changes)
     }
 
     func testUnknownStageStillDecodes() throws {

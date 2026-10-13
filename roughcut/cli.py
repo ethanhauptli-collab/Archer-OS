@@ -26,6 +26,10 @@ def _read(path: str | None) -> str:
 
 
 LEVEL_OFF = "off"  # --dialogue-level off: given, as opposed to left out (None)
+GRAPHICS_REF_HELP = (
+    "a picture of the look you want for the graphics (a screenshot, a mood board, a frame from a video): PNG, JPEG, WebP, GIF, TIFF, BMP "
+    "or HEIC, up to 8, shown to the designer only; repeat for more"
+)
 
 
 def _level(text: str) -> float | str:
@@ -117,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     gfx.add_argument("--graphics-style", default="", help="look for the graphics: brand colors, fonts, mood, e.g. 'one bold accent color, geometric sans, minimal'")
     gfx.add_argument("--graphics-logo", help="a PNG, SVG, JPEG or WebP logo the graphics may show")
     gfx.add_argument("--graphics-look", action="append", metavar="FILE", help="a graphic you approved (an .html from an earlier run's graphics folder) for new designs to match; repeat for more")
+    gfx.add_argument("--graphics-ref", action="append", default=[], metavar="IMAGE", help=GRAPHICS_REF_HELP)
     tr = b.add_argument_group("transcription")
     tr.add_argument("--transcriber", choices=["auto", "mlx", "faster-whisper", "none"], default="auto")
     tr.add_argument("--whisper-model", help="override the Whisper model")
@@ -148,6 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--model", help="model for the revision (default: the one that planned this cut)")
     rv.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="reasoning effort (default: the build's)")
     rv.add_argument("--graphics", action=argparse.BooleanOptionalAction, help="motion graphics (default: as in the build; unchanged ones are reused, not redesigned)")
+    rv.add_argument(
+        "--redesign-graphics", action="store_true",
+        help="design every graphic again, with these notes as the direction for the designer (also when the notes ask for a different look, or with --graphics-ref)",
+    )
+    rv.add_argument(
+        "--graphics-ref", action="append", default=[], metavar="IMAGE",
+        help=GRAPHICS_REF_HELP + "; replaces the run's earlier ones and designs every graphic again",
+    )
     rv.add_argument("--workers", type=int, default=4)
     _add_render_args(rv)
 
@@ -760,7 +773,7 @@ def _run(args, json_mode: bool) -> int:
             from .pipeline import revise
 
             notes = "\n\n".join(t.strip() for t in (args.notes, _read(args.notes_file)) if t.strip())
-            if not (notes or args.keep or args.avoid or args.target):
+            if not (notes or args.keep or args.avoid or args.target or args.redesign_graphics or args.graphics_ref):
                 raise ValueError('Say what to change, e.g.  roughcut revise <folder> "tighter hook, more drone over the intro"')
             model = args.model
             if model and args.provider in (None, "anthropic", "claude-code"):
@@ -770,7 +783,7 @@ def _run(args, json_mode: bool) -> int:
             result = revise(
                 Path(args.out_dir),
                 notes,
-                Options(inputs=[], workers=args.workers, **common),
+                Options(inputs=[], workers=args.workers, graphics_refs=tuple(args.graphics_ref), **common),
                 keep=args.keep,
                 avoid=args.avoid,
                 overrides=set(given),
@@ -779,6 +792,7 @@ def _run(args, json_mode: bool) -> int:
                 effort=args.effort,
                 target_seconds=parse_duration(args.target) if args.target else None,
                 graphics=args.graphics,
+                redesign_graphics=args.redesign_graphics,
             )
         else:
             out = Path(args.out) if args.out else None
@@ -820,6 +834,7 @@ def _run(args, json_mode: bool) -> int:
                 graphics_style=args.graphics_style,
                 graphics_logo=args.graphics_logo,
                 graphics_look=tuple(args.graphics_look or ()),
+                graphics_refs=tuple(args.graphics_ref),
                 music=[Path(p).expanduser() for p in args.music],
                 **common,
             )
@@ -870,6 +885,8 @@ def _run(args, json_mode: bool) -> int:
             if "planning failed" in w or "no usable sections" in w:
                 print(f"*** {w}")
     print(f"\nRough cut: {tl.review.length_line() if tl.review else seconds_to_clock(tl.seconds)} ({len(tl.spine)} edits, {sum(1 for c in tl.connected if c.kind == 'broll')} B-roll)")
+    for line in change_lines(result.changes):
+        print(line)
     if result.stringout is not None:
         print(f"Stringout: {seconds_to_clock(result.stringout.seconds)}")
     if result.dead_air and result.dead_air[0] > 0:
@@ -897,6 +914,20 @@ def _run(args, json_mode: bool) -> int:
     return 3 if result.fell_back else 0
 
 
+def change_lines(changes: dict | None) -> list[str]:
+    """What a revision or re-cut changed from the version before (result_summary's "changes"), for the end of the run."""
+    if not changes:
+        return []
+    was = f"v{changes['from_version']}" if changes.get("from_version") else "the previous cut"
+    items = [str(i) for i in changes.get("items") or []]
+    if changes.get("unchanged"):
+        lines = ["Nothing visible changed from " + was + ":"] + [f"  {i}" for i in items]
+        if any("attach reference images" in i for i in items):
+            lines.append("  In Terminal: --graphics-ref IMAGE (repeatable) or --redesign-graphics on `roughcut revise`.")
+        return lines
+    return [f"Changed from {was}:"] + [f"  - {i}" for i in items]
+
+
 def summary_lines(summary: dict) -> list[str]:
     """What made it into the cut, what was left out, and what the model calls cost: before opening the report."""
     from .providers import describe_cost
@@ -922,6 +953,16 @@ def summary_lines(summary: dict) -> list[str]:
             if g["rendered"] < g["placed"]:
                 why.append(f"{g['placed'] - g['rendered']} didn't design or render")
             (left if why else made).append(text + (f" ({'; '.join(why)}; see Warnings)" if why else ""))
+    refs = summary.get("references")
+    if refs:
+        n = refs["stored"]
+        pictures = f"{n} reference image{'s' if n != 1 else ''}"
+        if refs.get("unseen"):
+            left.append(f"{pictures} for the graphics (the model can't look at images)")
+        elif refs.get("used"):
+            made.append(f"{pictures} shown to the graphics designer")
+        else:
+            made.append(f"{pictures} saved for the graphics (none needed designing)")
     skipped = summary.get("skipped") or {}
     files = skipped.get("files") or []
     if files:
