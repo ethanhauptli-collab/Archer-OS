@@ -61,6 +61,12 @@ final class AppModel {
     // Presets from `roughcut preset list --json`
     private(set) var presets: [Preset] = []
 
+    // Venture Studio's audio for the Music bed (`roughcut studio music --json`), and what a drop or paste left out
+    private(set) var studioSongs: [StudioSong] = []
+    private(set) var studioSongsLoading = false
+    private(set) var studioSongsProblem: String?
+    var musicNote: String?
+
     // `roughcut update`
     private(set) var updating = false
     var updateOutput: String?
@@ -72,6 +78,7 @@ final class AppModel {
     private(set) var checkingSetup = false
 
     @ObservationIgnored private var process: CLIProcess?
+    @ObservationIgnored private var studioProcess: CLIProcess?
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var lastError: String?
     @ObservationIgnored private var lastResult: RunResult?
@@ -115,6 +122,58 @@ final class AppModel {
 
     func removeSource(_ url: URL) {
         options.sources.removeAll { $0 == url }
+    }
+
+    // MARK: Music bed
+
+    /// Adds the song files among `urls` to the Music bed; anything else goes nowhere, with a note. True when one was added.
+    @discardableResult
+    func addMusic(_ urls: [URL]) -> Bool {
+        let sorted = MusicFiles.sort(urls)
+        for url in sorted.songs where !options.music.contains(url) {
+            options.music.append(url)
+        }
+        musicNote = MusicFiles.leftOutNote(sorted.leftOut)
+        return !sorted.songs.isEmpty
+    }
+
+    /// Studio is on this Mac (doctor's word): the Music bed offers its songs.
+    var studioInstalled: Bool { doctor?.ventureStudio?.isInstalled ?? false }
+
+    /// Reads Studio's audio (`roughcut studio music --json`) without holding up the window: the CLI reads only its
+    /// catalog snapshot, and is stopped after 30 seconds, or by Stop.
+    func loadStudioSongs() async {
+        guard !studioSongsLoading else { return }
+        guard let cli = cliURL ?? CLILocator.locate() else {
+            studioSongsProblem = "Can't find the roughcut command-line tool. Set its location in Settings."
+            return
+        }
+        studioSongsLoading = true
+        studioSongsProblem = nil
+        let process = CLIProcess(executable: cli, arguments: StudioMusic.arguments(), environment: CLILocator.environment(for: cli, extra: [:]))
+        studioProcess = process
+        let result = await process.collect(timeout: 30)
+        if studioProcess === process {
+            studioProcess = nil
+        }
+        studioSongsLoading = false
+        if Task.isCancelled {
+            return  // the sheet closed
+        }
+        if let problem = result.problem {
+            studioSongsProblem = problem
+        } else if result.stopped {
+            studioSongsProblem = "Stopped before Studio's songs were read."
+        } else if let songs = StudioMusic.songs(from: result.output) {
+            studioSongs = songs
+            studioSongsProblem = songs.isEmpty ? "Venture Studio's catalog snapshot lists no audio." : nil
+        } else {
+            studioSongsProblem = "roughcut studio music printed nothing readable. Run `roughcut studio music` in Terminal to see why."
+        }
+    }
+
+    func cancelStudioSongs() {
+        studioProcess?.cancel()
     }
 
     // MARK: Running
