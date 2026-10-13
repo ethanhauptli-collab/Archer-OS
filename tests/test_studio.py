@@ -37,8 +37,7 @@ CREATE TABLE assets (
     display_name TEXT NOT NULL DEFAULT '', extension TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'file',
     category TEXT NOT NULL DEFAULT 'other', provider TEXT NOT NULL DEFAULT '', license TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', duration REAL, favorite INTEGER NOT NULL DEFAULT 0,
-    missing INTEGER NOT NULL DEFAULT 0, browse_visible INTEGER NOT NULL DEFAULT 1, package_id INTEGER,
-    template_resource INTEGER NOT NULL DEFAULT 0
+    missing INTEGER NOT NULL DEFAULT 0, browse_visible INTEGER NOT NULL DEFAULT 1, package_id INTEGER
 );
 CREATE TABLE collections (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 CREATE TABLE collection_assets (collection_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, PRIMARY KEY (collection_id, asset_id));
@@ -85,8 +84,7 @@ class FakeStudio:
         target.write_bytes(data)
         manifest = {
             "id": sid, "name": name, "created_at": created, "schema_version": schema, "asset_count": len(assets),
-            "library_count": 1, "collection_count": 0, "saved_search_count": 0, "project_kit_count": 0,
-            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "a_later_field": 0,  # keys Roughcut doesn't read are fine
         }
         (self.dir / "backups" / f"{sid}.json").write_text(json.dumps(manifest))
         return target
@@ -409,8 +407,8 @@ def test_items_paths_collections_and_kits(fake, library):
         _asset(1, "Sound Effects/whoosh.wav", kind="audio", category="audio", provider="Vendor", license="Standard", tags="whoosh, fast ,, transition",
                duration=1.5, favorite=1),
         _asset(2, "Sound Effects/gone.wav", kind="audio", category="audio", missing=1),
-        _asset(3, "Titles/Lower/Lower.moti", kind="template", category="title", display_name="Lower", package_id=3, template_resource=1),
-        _asset(4, "Titles/Lower/media/bg.mov", kind="video", category="video", package_id=3, template_resource=1),
+        _asset(3, "Titles/Lower/Lower.moti", kind="template", category="title", display_name="Lower", package_id=3),
+        _asset(4, "Titles/Lower/media/bg.mov", kind="video", category="video", package_id=3),
         _asset(5, "Sound Effects/hidden.txt", browse_visible=0),
         _asset(6, "../outside.wav", kind="audio", category="audio"),
         _asset(7, "Sound Effects/pop.wav", kind="audio", category="audio"),
@@ -498,6 +496,25 @@ def test_kits_in_another_format_or_kind_are_refused(tmp_path):
         studio.load_kit(flat)
 
 
+def test_deeply_nested_json_is_skipped_or_a_reason_never_a_crash(fake, tmp_path):
+    """A manifest, maintenance.json or kit nested past Python's recursion limit (well under 1 MiB) reads as unreadable."""
+    fake.snapshot("1700000000-1-1", NOW - 7200)
+    deep = "[" * 200_000 + "]" * 200_000
+    (fake.dir / "backups" / "1700000500-1-1.json").write_text(deep)
+    (fake.dir / "maintenance.json").write_text("{" + '"a":' * 100_000 + "1" + "}" * 100_000)
+    kit = tmp_path / "venture-project-deep.json"
+    kit.write_text(deep)
+    with untouched(fake.dir):
+        assert [s.id for s in studio.snapshots()] == ["1700000000-1-1"]
+        assert studio.settings() == {"automatic_updates": True, "daily_backups": True}
+        report = studio.status(offline=True)
+        guard, note = studio.output_guard(tmp_path / "out")
+    assert report["available"] and report["snapshot"]["id"] == "1700000000-1-1"
+    assert guard is None and note is None
+    with pytest.raises(studio.StudioUnavailable, match="not readable JSON"):
+        studio.load_kit(kit)
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
 def test_a_kit_that_is_a_fifo_does_not_hang(tmp_path):
     fifo = tmp_path / "kit.json"
@@ -569,6 +586,72 @@ def test_the_suggested_folder_mirrors_the_path_below_the_library(tmp_path):
     # Never a folder inside a library either.
     movies = studio.Library(2, str(home / "Movies"), "Movies")
     assert studio.elsewhere_for(Path("/Shared/Studio/Projects/Shoot_roughcut"), lib, [lib.path, movies.path], home=home) is None
+
+
+def test_a_library_row_without_an_absolute_path_contains_nothing(tmp_path):
+    """A catalog row whose path is empty, '.' or relative isn't a folder anything can be inside."""
+    roots = ["", ".", "Shared/Studio", "/Shared/Studio"]
+    assert studio.inside_library(Path("/tmp/anything_roughcut"), roots) is None
+    assert studio.inside_library(Path("Shared/Studio/x"), roots) is None
+    assert studio.inside_library(Path("/Shared/Studio/x"), roots) == "/Shared/Studio"
+    out = Path("/Shared/Studio/Projects/Shoot_roughcut")
+    home = tmp_path / "home"
+    for bad in ("", ".", "Shared/Studio"):
+        assert studio.elsewhere_for(out, studio.Library(1, bad, "Old row"), roots, home=home) is None
+    # A folder the library doesn't hold gets no suggestion from it (never the output folder itself).
+    assert studio.elsewhere_for(Path("/Elsewhere/Shoot_roughcut"), studio.Library(2, "/Shared/Studio", "Studio"), roots, home=home) is None
+    assert studio.elsewhere_for(out, studio.Library(2, "/Shared/Studio", "Studio"), roots, home=home) == (
+        home / "Movies" / "Roughcut" / "Studio" / "Projects" / "Shoot_roughcut"
+    )
+
+
+def test_a_share_mounted_under_its_duplicate_name_is_the_same_library(fake, tmp_path, monkeypatch):
+    """macOS mounts a share at /Volumes/<name>-1 when /Volumes/<name> is taken (a stale mount point): still the library."""
+    roots = ["/Volumes/Media/Studio"]
+    assert studio.inside_library("/Volumes/Media-1/Studio/Projects/Shoot_roughcut", roots) == roots[0]
+    assert studio.inside_library("/volumes/media-12/STUDIO/x", roots) == roots[0]
+    assert studio.inside_library("/Volumes/Media-1/Other/x", roots) is None
+    assert studio.inside_library("/Volumes/Media-1x/Studio/x", roots) is None
+    assert studio.inside_library("/Volumes/Media-/Studio/x", roots) is None
+    assert studio.inside_library("/Elsewhere/Media-1/Studio/x", ["/Elsewhere/Media/Studio"]) is None  # only mount points
+    fake.libraries = [("/Volumes/Media/Studio", "Studio")]
+    fake.snapshot("1700000500-1-1", NOW - 3600)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    guard, note = studio.output_guard(Path("/Volumes/Media-1/Studio/Projects/Shoot_roughcut"))
+    assert note is None and guard is not None and guard.message.startswith(GUARD)
+    assert "/Volumes/Media-1" in guard.message and "same share" in guard.message
+    assert guard.elsewhere == home / "Movies" / "Roughcut" / "Studio" / "Projects" / "Shoot_roughcut"
+    assert studio.output_guard(Path("/Volumes/Media/Studio/Shoot_roughcut"))[0].message.count("Media-1") == 0
+
+
+def test_the_suggested_folder_is_checked_where_it_really_points(tmp_path):
+    """~/Movies (or ~/Movies/Roughcut) linked into a library: no suggestion, since it would write inside the library."""
+    library = (tmp_path / "Shared" / "Studio Library").resolve()
+    (library / "Movies").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "Movies").symlink_to(library / "Movies")
+    lib = studio.Library(1, str(library), "Studio Library")
+    out = library / "Projects" / "Shoot_roughcut"
+    assert studio.elsewhere_for(out, lib, [lib.path], home=home) is None
+    # A link to somewhere outside every library is fine, and the suggestion is where it really points.
+    elsewhere = (tmp_path / "Other disk" / "Movies").resolve()
+    elsewhere.mkdir(parents=True)
+    (home / "Movies").unlink()
+    (home / "Movies").symlink_to(elsewhere)
+    assert studio.elsewhere_for(out, lib, [lib.path], home=home) == elsewhere / "Roughcut" / "Studio Library" / "Projects" / "Shoot_roughcut"
+
+
+def test_the_warnings_folder_can_be_pasted_into_terminal(fake, library, tmp_path, monkeypatch):
+    import shlex
+
+    monkeypatch.setenv("HOME", str(tmp_path / "my home"))
+    fake.snapshot("1700000500-1-1", NOW - 3600)
+    guard, _ = studio.output_guard(library / "Projects" / "Promo shoot_roughcut")
+    hint = guard.message.split("outside the library: ", 1)[1]
+    args = cli.build_parser().parse_args(["build", "/tmp/shoot", *shlex.split(hint)])
+    assert args.out == str(guard.elsewhere) and " " in args.out
 
 
 # ---------------------------------------------------------------- the output guard in runs
@@ -646,6 +729,60 @@ def test_the_terminal_offer_writes_nothing_under_the_library(shoot, library, fak
     assert len(asked) == 1 and str(elsewhere) in asked[0]
     assert elsewhere.is_dir() and list(elsewhere.glob("*.fcpxml")) and GUARD not in (elsewhere / "edit_report.md").read_text()
     assert not (shoot.parent / "Promo shoot_roughcut").exists()
+
+
+def test_a_library_row_with_no_path_never_turns_the_offer_back_into_the_library(footage, library, fake, tmp_path, monkeypatch, capsys):
+    folder = library / "Projects" / "Promo shoot"
+    folder.mkdir(parents=True)
+    for name in ("talk.mov", "talk.json", "broll.mp4", "broll.json"):
+        shutil.copy2(footage / name, folder / name)
+    fake.libraries = [("", "Old row"), (str(library), "Studio Library")]
+    fake.snapshot("1700000500-1-1", NOW - 3600)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "y")
+    cache = str(tmp_path / "cache")
+    with untouched(library, fake.dir):
+        assert main(["build", str(folder), "--provider", "none", "--transcriber", "none", "--cache-dir", cache]) == 0
+    elsewhere = home / "Movies" / "Roughcut" / "Studio Library" / "Projects" / "Promo shoot_roughcut"
+    assert len(asked) == 1 and str(elsewhere) in asked[0] and list(elsewhere.glob("*.fcpxml"))
+    # A build outside every library hears nothing about the row with no path.
+    capsys.readouterr()
+    out = tmp_path / "outside"
+    assert main(["build", str(folder), "-o", str(out), "--provider", "none", "--transcriber", "none", "--cache-dir", cache]) == 0
+    printed = capsys.readouterr()
+    assert "Venture Studio" not in printed.out + printed.err + (out / "edit_report.md").read_text()
+
+
+def test_movies_linked_into_the_library_gets_no_offer_and_nothing_written_through_it(shoot, library, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (library / "Movies").mkdir()
+    (home / "Movies").symlink_to(library / "Movies")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    with untouched(library / "Movies"):
+        assert main(["build", str(shoot), "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "cache")]) == 0
+    out = shoot.parent / "Promo shoot_roughcut"
+    report = (out / "edit_report.md").read_text()
+    assert GUARD in report and "Movies/Roughcut" not in report
+
+
+def test_no_menu_asks_nothing_and_its_help_says_so(shoot, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    assert main(["build", str(shoot), "--no-menu", "--provider", "none", "--transcriber", "none", "--cache-dir", str(tmp_path / "cache")]) == 0
+    assert GUARD in (shoot.parent / "Promo shoot_roughcut" / "edit_report.md").read_text()
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main(["build", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "default output folder" in help_text.rsplit("--no-menu", 1)[1][:200]  # its entry, after the usage line
 
 
 def test_declining_the_offer_keeps_the_default_folder(shoot, tmp_path, monkeypatch, capsys):

@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     vis.add_argument("--vision", dest="vision", action="store_true", default=None, help="describe clips from sampled frames (default when the provider supports images)")
     vis.add_argument("--no-vision", dest="vision", action="store_false", help="skip visual descriptions")
     ai.add_argument("--vision-model", help="a different model for describing clips, e.g. sonnet to save on big shoots while opus plans")
-    ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask which Claude model to use; take the default (Opus)")
+    ai.add_argument("--no-menu", dest="menu", action="store_false", help="don't ask anything: take the default model (Opus) and the default output folder, even inside a Venture Studio library")
     b.add_argument(
         "--music", action="append", default=[], metavar="FILE",
         help="a song to lay under the cut (from anywhere, e.g. Downloads): not transcribed, ducked under speech, faded, and timed to end with the cut. Repeat for more",
@@ -606,8 +606,9 @@ def where_report(folder: str, report: dict) -> dict:
     roots = [lib.path for lib in libs]
     root = studio.inside_library(path, roots)
     out_root = studio.inside_library(out, roots)
-    lib = next((x for x in libs if x.path == (root or out_root)), None)
-    elsewhere = studio.elsewhere_for(out, lib, roots) if out_root is not None and lib is not None else None
+    lib = next((x for x in libs if x.path == (root if root is not None else out_root)), None)
+    out_lib = next((x for x in libs if x.path == out_root), None) if out_root is not None else None
+    elsewhere = studio.elsewhere_for(out, out_lib, roots) if out_lib is not None else None
     found.update(
         inside=root is not None, library=lib.name if lib else None, root=lib.path if lib else None, output_inside=out_root is not None,
         elsewhere=str(elsewhere) if elsewhere else None,

@@ -14,7 +14,9 @@ it or read a half-written state. Instead Roughcut reads one of two things:
 
 Nothing in Studio's data folder is ever opened with SQLite, written, renamed
 or locked (`catalog.worker-lock` is never opened: Studio's restore needs it),
-and nothing is created under a library root. Every problem comes back as a
+and this module creates nothing under a library root (a build whose output
+folder is inside one still writes there, with the warning `output_guard`
+gives, unless the Terminal offer moved it). Every problem comes back as a
 `StudioUnavailable` reason, which callers report and never turn into a
 failed run. Snapshots are made about daily, and only while Studio is open, so
 the data can be a day old: `status` says how old, and flags a snapshot Studio
@@ -29,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat
 import tempfile
@@ -62,7 +65,7 @@ REQUIRED_COLUMNS = {
     "libraries": {"id", "path", "name"},
     "assets": {
         "id", "library_id", "relative_path", "name", "display_name", "extension", "kind", "category", "provider", "license",
-        "tags", "notes", "duration", "favorite", "missing", "browse_visible", "package_id", "template_resource",
+        "tags", "notes", "duration", "favorite", "missing", "browse_visible", "package_id",
     },
     "collections": {"id", "name"},
     "collection_assets": {"collection_id", "asset_id"},
@@ -192,7 +195,7 @@ def _manifest(path: Path, stem: str) -> Snapshot | None:
     """A manifest, type-checked; None for anything else (Studio writes them in place, so one can be half-written)."""
     try:
         data = json.loads(_read_small(path, MANIFEST_MAX).decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):  # RecursionError: nested deeper than json can read
         return None
     if not isinstance(data, dict):
         return None
@@ -601,7 +604,7 @@ def settings(folder: Path | None = None) -> dict:
     out = {"automatic_updates": True, "daily_backups": True}
     try:
         data = json.loads(_read_small(_require(folder) / "maintenance.json", MANIFEST_MAX).decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError, StudioUnavailable):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError, StudioUnavailable):
         return out
     found = data.get("settings") if isinstance(data, dict) else None
     if isinstance(found, dict):
@@ -664,7 +667,7 @@ def load_kit(file: Path | str) -> Kit:
         raise StudioUnavailable(f"{path.name} is larger than a Venture Studio kit can be (32 MB)")
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as e:
+    except (ValueError, UnicodeDecodeError, RecursionError) as e:
         raise StudioUnavailable(f"{path.name} isn't a Venture Studio kit (not readable JSON)") from e
     if not isinstance(data, dict) or data.get("kind") != KIT_KIND:
         raise StudioUnavailable(f"{path.name} isn't a Venture Studio kit export")
@@ -762,22 +765,47 @@ def _fold(part: str) -> str:
     return unicodedata.normalize("NFC", part).casefold()
 
 
-def inside_library(path, roots) -> str | None:
-    """The library root `path` is inside (or is), else None. Folder names are compared whole, exactly first,
-    then ignoring Unicode form and letter case (Mac and network volumes usually do): /Studio2 isn't inside /Studio."""
+_DUPLICATE_MOUNT = re.compile(r"(.+)-[0-9]+\Z")  # macOS mounts a share at /Volumes/<name>-1 when /Volumes/<name> is taken
+
+
+def _usual_mount(parts: tuple[str, ...]) -> tuple[str, ...] | None:
+    """('/', 'Volumes', 'Media-1', ...) as ('/', 'Volumes', 'Media', ...); None for a path not under such a mount point."""
+    volumes = _parts(VOLUMES)
+    if len(parts) <= len(volumes) or tuple(_fold(p) for p in parts[: len(volumes)]) != tuple(_fold(p) for p in volumes):
+        return None
+    m = _DUPLICATE_MOUNT.match(parts[len(volumes)])
+    return parts[: len(volumes)] + (m.group(1),) + parts[len(volumes) + 1 :] if m else None
+
+
+def _library_of(path, roots) -> tuple[str | None, str | None]:
+    """(root, mount): the library root `path` is inside, and the numbered mount point it was found through, if it was."""
+    roots = [r for r in roots if isinstance(r, str) and r.startswith("/")]  # an empty or relative row holds nothing
     target = _parts(path)
-    folded = None
     for root in roots:
         parts = _parts(root)
         if len(parts) <= len(target) and target[: len(parts)] == parts:
-            return root
+            return root, None
+    folded = tuple(_fold(p) for p in target)
     for root in roots:
         parts = _parts(root)
-        if len(parts) <= len(target):
-            folded = folded or tuple(_fold(p) for p in target)
-            if folded[: len(parts)] == tuple(_fold(p) for p in parts):
-                return root
-    return None
+        if len(parts) <= len(target) and folded[: len(parts)] == tuple(_fold(p) for p in parts):
+            return root, None
+    usual = _usual_mount(target)
+    if usual is not None:
+        folded = tuple(_fold(p) for p in usual)
+        for root in roots:
+            parts = _parts(root)
+            if len(parts) <= len(usual) and folded[: len(parts)] == tuple(_fold(p) for p in parts):
+                return root, str(PurePosixPath(*target[: len(_parts(VOLUMES)) + 1]))
+    return None, None
+
+
+def inside_library(path, roots) -> str | None:
+    """The library root `path` is inside (or is), else None. Folder names are compared whole, exactly first,
+    then ignoring Unicode form and letter case (Mac and network volumes usually do): /Studio2 isn't inside /Studio.
+    A share macOS mounted under a numbered name (/Volumes/Media-1, when /Volumes/Media was taken) counts as
+    the library on /Volumes/Media. Only absolute roots count: a catalog row with an empty path holds nothing."""
+    return _library_of(path, roots)[0]
 
 
 # ------------------------------------------------------------------ the output guard
@@ -795,15 +823,21 @@ class Guard:
 
 def elsewhere_for(out_dir: Path, library: Library, roots: list[str], home: Path | None = None) -> Path | None:
     """~/Movies/Roughcut/<library name>/<the path below the library root>: unique per footage folder, so two
-    shoots with the same folder name never share versions. None if that's inside a library too."""
+    shoots with the same folder name never share versions. The folder as it really is (links followed), and None
+    when that's inside a library too (~/Movies linked into one) or `out_dir` isn't inside `library` at all."""
+    if inside_library(out_dir, [library.path]) is None:
+        return None
     below = _parts(out_dir)[len(_parts(library.path)) :]
     if not below:
         return None
     label = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", library.name).replace("/", "-").replace(":", "-").strip()
     if label in ("", ".", ".."):
         label = PurePosixPath(library.path).name or "Venture Studio"
-    alt = (home or Path.home()) / "Movies" / "Roughcut" / label / Path(*below)
-    return None if inside_library(alt, roots) else alt
+    try:
+        alt = ((home or Path.home()) / "Movies" / "Roughcut" / label / Path(*below)).resolve()
+    except (OSError, RuntimeError):  # a link loop: no folder to offer
+        return None
+    return None if inside_library(alt, roots) is not None else alt
 
 
 def output_guard(out_dir: Path, *, folder: Path | None = None, cache_dir: Path | None = None) -> tuple[Guard | None, str | None]:
@@ -819,16 +853,21 @@ def output_guard(out_dir: Path, *, folder: Path | None = None, cache_dir: Path |
     except Exception as e:  # noqa: BLE001 - Studio never stops a run
         return None, f"Couldn't check whether the output folder is inside a Venture Studio library: {e}"
     roots = [lib.path for lib in libs]
-    root = inside_library(out_dir, roots)
+    root, mount = _library_of(out_dir, roots)
     if root is None:
         return None, None
     lib = next(lib for lib in libs if lib.path == root)
     alt = elsewhere_for(out_dir, lib, roots)
-    when = "within about a minute while Studio is open" if conf["automatic_updates"] else "on its next scan"
+    if mount:  # Studio sees the library as offline while the share is there, and catalogs the folder once it's back
+        where = f"{lib.path}; probably the same share, mounted now as {mount} because its usual folder was taken"
+        when = "once the share is back where Studio expects it" + ("" if conf["automatic_updates"] else " and Studio next scans it")
+    else:
+        where = lib.path
+        when = "within about a minute while Studio is open" if conf["automatic_updates"] else "on its next scan"
     message = (
-        f"The output folder is inside the Venture Studio library {lib.name!r} ({lib.path}): Studio catalogs what Roughcut writes there {when} "
+        f"The output folder is inside the Venture Studio library {lib.name!r} ({where}): Studio catalogs what Roughcut writes there {when} "
         "(this cut's FCPXML, graphics and history copies, which show up as missing after Roughcut prunes its history). "
-        + (f"Keep Roughcut's output outside the library, e.g. -o {alt}." if alt else "Keep Roughcut's output outside the library (-o).")
+        + (f"Keep Roughcut's output outside the library: -o {shlex.quote(str(alt))}" if alt else "Keep Roughcut's output outside the library (-o).")
     )
     return Guard(out_dir, lib, message, alt), None
 
