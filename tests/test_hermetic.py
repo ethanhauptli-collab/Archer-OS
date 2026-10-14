@@ -415,24 +415,32 @@ def _run_pytest(args: list[str], env: dict[str, str], **kw) -> subprocess.Comple
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args], cwd=REPO, env=env, capture_output=True, text=True, timeout=600, **kw)
 
 
-def test_a_child_pytest_keeps_its_temp_folders_inside_the_tests_own(tmp_path):
-    """A pytest run cleans up older sessions' folders in <tmp>/pytest-of-<user> when it starts and again when it exits.
-    That is the machine's shared temp folder: slow when other sessions have left big ones (a trivial child took
-    8 to 35 seconds), and none of a test's business."""
+def test_a_child_pytest_stays_in_its_own_folders(tmp_path):
+    """Two things that made a trivial child take 20 seconds here, and that the machine running it should not decide.
+
+    Its temp folder: a pytest run cleans up older sessions' folders in <tmp>/pytest-of-<user> when it starts and again
+    when it exits, which is the machine's shared temp folder and none of a test's business.
+
+    Its root folder: with no ini file, pytest takes the common ancestor of the working folder (the repository, so that
+    `roughcut` imports) and the project. When both sit under /tmp that is /tmp itself, and pytest then collects
+    through every folder in it (166,000 entries here)."""
     project = _project(tmp_path, where="""
-        def test_where(tmp_path_factory):
+        def test_where(request, tmp_path_factory):
             print("BASETEMP=" + str(tmp_path_factory.getbasetemp()))
+            print("ROOTDIR=" + str(request.config.rootpath))
     """)
     done = _run_pytest(["-s", str(project)], dict(os.environ))
     assert done.returncode == 0, done.stdout + done.stderr
     base = Path(re.search(r"BASETEMP=(\S+)", done.stdout).group(1)).resolve()
     assert base.is_relative_to(Path(tempfile.gettempdir()).resolve()), f"the child used {base}, not a folder of this test's own"
+    assert Path(re.search(r"ROOTDIR=(\S+)", done.stdout).group(1)).resolve() == project.resolve(), "the child's root folder is not its project"
 
 
 def _project(tmp_path: Path, **modules: str) -> Path:
     """A throwaway pytest project that uses the sandbox the way tests/conftest.py does: one line, `pytest_plugins`."""
     project = tmp_path / "project"
     project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n")  # its own root folder (see test_a_child_pytest_stays_in_its_own_folders)
     (project / "conftest.py").write_text(f"import sys\nsys.path.insert(0, {str(REPO / 'tests')!r})\npytest_plugins = ['hermetic']\n")
     for name, source in modules.items():
         (project / f"test_{name}.py").write_text(textwrap.dedent(source))
