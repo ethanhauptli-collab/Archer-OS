@@ -1,5 +1,8 @@
 """Synthetic footage for end-to-end tests, generated with ffmpeg.
 
+Every test also runs in a sandbox (tests/hermetic.py): no real Keychain, Claude Code, network, home folder or
+Venture Studio. Read that module's docstring before adding a test that needs the machine.
+
 The "talking" clip has tone bursts where speech would be and a sidecar
 transcript whose words line up with those bursts, so the whole pipeline runs
 without a Whisper model or an API key.
@@ -13,6 +16,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from hermetic import (  # noqa: F401 (the sandbox: autouse fixtures, registered by importing them here)
+    MARKER,
+    REAL_FLAG,
+    _restored_process_state,
+    _stand_in_folder,
+    apply_real_environment_marker,
+    hermetic_sandbox,
+)
 
 # (start, end, sentence) for the fake talking-head clip.
 SPEECH = [
@@ -35,11 +46,16 @@ def spread_words(start: float, end: float, sentence: str) -> list[dict]:
     ]
 
 
-@pytest.fixture(autouse=True)
-def _no_venture_studio(tmp_path_factory, monkeypatch):
-    """No test reads a real Venture Studio folder on the machine running it: Studio "isn't installed"
-    unless a test points ROUGHCUT_STUDIO_DIR at a fake one."""
-    monkeypatch.setenv("ROUGHCUT_STUDIO_DIR", str(tmp_path_factory.getbasetemp() / "no-venture-studio"))
+def pytest_configure(config):
+    config.addinivalue_line("markers", f"{MARKER}: needs the real machine (Keychain, Claude Code, network); runs only with {REAL_FLAG}=1")
+
+
+def pytest_collection_modifyitems(config, items):
+    apply_real_environment_marker(items)
+
+
+def pytest_report_header(config):
+    return f"hermetic: every test runs in a sandbox (a check of the real machine: {REAL_FLAG}=1, marker {MARKER})"
 
 
 def ffmpeg(*args: str) -> None:

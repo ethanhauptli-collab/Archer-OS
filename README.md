@@ -277,4 +277,4 @@ A transcript next to a clip wins over transcribing it again: `IMG_1234.srt`, `.v
 .venv/bin/python -m pytest
 ```
 
-The tests generate synthetic footage with ffmpeg and need no API key. CI (`.github/workflows/ci.yml`) runs them on Linux and on an Apple Silicon Mac, builds, tests and launches the Mac app, and cuts real spoken audio with mlx-whisper.
+The tests generate synthetic footage with ffmpeg and need no API key. They are hermetic (`tests/hermetic.py`): each test runs in a sandbox with its own `HOME`, an empty stand-in for the Keychain, no Claude Code, exported keys or proxies, and a guard that fails a test that tries a real network connection, a program other than ffmpeg/ffprobe/git, or a file outside its own folders, so the suite gives the same result on any machine. `ROUGHCUT_TESTS_REAL=1 .venv/bin/python -m pytest tests/test_real_environment.py` is the one deliberate exception: a `doctor` smoke test on the machine you run it on. CI (`.github/workflows/ci.yml`) runs them on Linux and on an Apple Silicon Mac, builds, tests and launches the Mac app, and cuts real spoken audio with mlx-whisper.
