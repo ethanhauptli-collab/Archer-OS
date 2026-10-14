@@ -162,7 +162,10 @@ struct BuildForm: View {
                 }
 
                 Section("AI") {
-                    Picker("Plans the edit", selection: $model.options.provider) {
+                    Picker("Plans the edit", selection: Binding(
+                        get: { model.options.provider },
+                        set: { model.options.choose(provider: $0) }  // None also turns the graphics off
+                    )) {
                         ForEach(ModelProvider.allCases) { provider in
                             Text(provider.title).tag(provider)
                         }
@@ -216,9 +219,17 @@ struct BuildForm: View {
                             Text(format.title).tag(format)
                         }
                     }
-                    Toggle("Motion graphics (Claude designs lower thirds, stats and captions from the transcript)", isOn: $model.options.graphics)
-                        .disabled(model.options.provider == .none)
-                    if model.options.graphics && model.options.provider != .none {
+                    Toggle(
+                        "Motion graphics (Claude designs lower thirds, stats and captions from the transcript)",
+                        isOn: Binding(get: { model.options.graphics }, set: { model.options.setGraphics($0) })
+                    )
+                    .disabled(!model.options.graphicsSwitchEnabled)
+                    if !model.options.provider.usesAI {
+                        Text(BuildOptions.graphicsNeedAIHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if model.options.graphicsActive {
                         TextField("Graphics style", text: $model.options.graphicsStyle, prompt: Text("Brand colors, fonts and mood, or pick a preset above"), axis: .vertical)
                             .lineLimit(1...4)
                         LogoPicker()
@@ -255,13 +266,6 @@ struct BuildForm: View {
         }
         .onChange(of: model.options) {
             model.savePreferences()
-        }
-        .onChange(of: model.options.provider) {
-            // Local and compatible servers are usually text-only models.
-            model.options.vision = model.options.provider.usesClaudeModels || model.options.provider == .openai
-            // Model names don't carry over between providers.
-            model.options.model = ""
-            model.options.visionModel = ""
         }
     }
 }

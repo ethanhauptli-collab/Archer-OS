@@ -132,6 +132,9 @@ public enum ModelProvider: String, CaseIterable, Codable, Identifiable, Sendable
         }
     }
 
+    /// A model plans the edit. `.none` only cuts the silence: nothing in the build form that needs a model applies to it
+    /// (clip descriptions, motion graphics and what hangs off them).
+    public var usesAI: Bool { self != .none }
     /// The CLI has no default model for these providers.
     public var requiresModel: Bool { self == .openai || self == .ollama || self == .openaiCompatible }
     public var usesBaseURL: Bool { self == .openaiCompatible }
@@ -309,6 +312,44 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         graphicsReferences = ReferenceImages.restoring(value(.graphicsReferences, d.graphicsReferences))
         sfx = value(.sfx, d.sfx)
         sfxFrom = value(.sfxFrom, d.sfxFrom)
+        settle()  // preferences saved while graphics were on and the provider was None (the old form allowed it)
+    }
+
+    // MARK: Provider and graphics: what the form can hold
+
+    /// Motion graphics are designed by the AI, so with no provider the build can't have them. The form's rules, kept here
+    /// (not in the view) so every way into the state (the picker, a preset, saved preferences) goes through the same ones:
+    /// graphics are never on with provider None, and choosing None turns them off. The style, logo, approved designs and
+    /// reference pictures stay remembered (and are not sent or shown) for when graphics are turned on again.
+    public static let graphicsNeedAIHint = "Motion graphics are designed by the AI: choose a provider other than None to use them."
+
+    /// Graphics are part of this build: asked for, and a model is there to design them. What the CLI is told, and what the form shows options for.
+    public var graphicsActive: Bool { graphics && provider.usesAI }
+
+    /// The Motion graphics switch can be clicked: to turn graphics on, or off whatever left them on (`settle()` normally prevents that).
+    public var graphicsSwitchEnabled: Bool { provider.usesAI || graphics }
+
+    /// The Plans-the-edit picker's choice. A different provider starts from its own defaults: local and compatible
+    /// servers are usually text-only models (no clip descriptions), and model names don't carry over. Choosing None turns graphics off.
+    public mutating func choose(provider new: ModelProvider) {
+        guard new != provider else { return }
+        provider = new
+        vision = new.usesClaudeModels || new == .openai
+        model = ""
+        visionModel = ""
+        settle()
+    }
+
+    /// The Motion graphics switch. It can't turn graphics on without a provider that can design them.
+    public mutating func setGraphics(_ on: Bool) {
+        graphics = on && provider.usesAI
+    }
+
+    /// Takes out what can't hold together: graphics without a model. Called by every way the provider or graphics can change.
+    public mutating func settle() {
+        if !provider.usesAI {
+            graphics = false
+        }
     }
 
     /// Reasons the build can't start yet, in the order the user should fix them.
@@ -327,15 +368,16 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if provider.usesBaseURL && baseURL.trimmed.isEmpty {
             list.append("Enter the server URL, e.g. http://localhost:1234/v1.")
         }
-        if graphics && provider == .none {
-            list.append("Motion graphics are designed by the AI: choose a provider other than None.")
+        if graphics && !provider.usesAI {
+            // Only reachable by setting the fields directly: the form's own controls settle it first.
+            list.append("Motion graphics are designed by the AI: choose a provider other than None, or turn motion graphics off.")
         }
         // Not a song on another volume (a network share can take minutes to answer, and this runs on every
         // keystroke): the CLI checks those with a deadline when the build starts.
         if let missing = music.first(where: { !Self.onAnotherVolume($0.path) && !FileManager.default.fileExists(atPath: $0.path) }) {
             list.append("The music file \(missing.lastPathComponent) isn't there any more: remove it or pick it again.")
         }
-        if graphics && provider != .none {
+        if graphicsActive {
             // Remembered from a preset or an earlier session: the CLI would stop on a missing file after launch.
             let logo = graphicsLogo.trimmed
             if !logo.isEmpty && !Self.fileExists(logo) {
@@ -376,10 +418,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
                 args.append("--preset-brief=\(fromPreset)")
             }
         }
-        if let seconds = TimeText.seconds(from: targetLength) {
+        if let seconds = TimeText.wholeSeconds(from: targetLength) {
             // Send plain seconds: the app's parser decided it's valid, so the
             // CLI never sees a spelling it reads differently.
-            args.append("--target=\(Int(seconds.rounded()))")
+            args.append("--target=\(seconds)")
         }
         args += ["--style", style.rawValue]
         if format != .auto {
@@ -391,7 +433,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         case .auto: break
         }
         args += ["--provider", provider.rawValue]
-        if provider != .none {
+        if provider.usesAI {
             if !model.trimmed.isEmpty {
                 args.append("--model=\(model.trimmed)")
             }
@@ -429,7 +471,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if !fades {
             args += ["--fades", "off"]
         }
-        if graphics && provider != .none {
+        if graphicsActive {
             args.append("--graphics")
             if !graphicsStyle.trimmed.isEmpty {
                 args.append("--graphics-style=\(graphicsStyle.trimmed)")
@@ -518,8 +560,17 @@ public struct RecutOptions: Equatable, Sendable {
     }
 }
 
-/// Mirrors the CLI's `parse_duration` so the form can validate as you type.
+/// Mirrors the CLI's `parse_duration` (roughcut/timecode.py) so the form can validate as you type.
+///
+/// A length is from 1 second to 24 hours, written with the digits 0-9 only: no signs, exponents, "nan" or "inf", other
+/// scripts' digits, or more than hours:minutes:seconds. A number so long it overflows to infinity is not a length either.
+/// Anything outside that is nil (the form says "Target length should look like 8m, 90s or 8:30"); nothing here can trap.
 public enum TimeText {
+    /// The shortest and longest length a cut can be asked for. The same limits as `MIN_DURATION_SECONDS` and
+    /// `MAX_DURATION_SECONDS` in the CLI.
+    public static let minSeconds = 1.0
+    public static let maxSeconds = 24.0 * 3600
+
     /// Unit words `parse_duration` reads (plus a few spellings it doesn't; the app sends plain seconds).
     static let unitSeconds: [String: Double] = [
         "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
@@ -527,63 +578,105 @@ public enum TimeText {
         "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
     ]
 
-    /// "8m", "90s", "90 sec", "10 mins", "1hr", "8:30", "1h5m", "480" -> seconds. Nil when unreadable or zero.
-    public static func seconds(from text: String) -> Double? {
-        let raw = text.trimmed.lowercased()
-        guard !raw.isEmpty else { return nil }
-        if raw.contains(":") {
-            var total = 0.0
-            for part in raw.split(separator: ":", omittingEmptySubsequences: false) {
-                guard let value = Double(part.trimmingCharacters(in: .whitespaces)) else { return nil }
-                total = total * 60 + value
-            }
-            return total > 0 ? total : nil
-        }
-        // Number-and-unit pairs ("1h 30m"); a number without a unit is seconds.
-        var pairs: [(number: String, unit: String)] = []
-        var number = ""
-        var unit = ""
-        for char in raw {
-            if char.isNumber || char == "." {
-                if !unit.isEmpty {  // "1h30": the next number starts a new pair
-                    pairs.append((number: number, unit: unit))
-                    number = ""
-                    unit = ""
-                }
-                number.append(char)
-            } else if char.isLetter {
-                guard !number.isEmpty else { return nil }  // a unit with no number: "eight minutes"
-                unit.append(char)
-            } else if char != " " {
+    /// "8", "90", "2.5": ASCII digits, then optionally a point and more digits. Finite, or nil.
+    static func number(_ text: String) -> Double? {
+        var digitsBefore = 0
+        var digitsAfter = 0
+        var afterPoint = false
+        for scalar in text.unicodeScalars {
+            if scalar.value >= 0x30 && scalar.value <= 0x39 {
+                if afterPoint { digitsAfter += 1 } else { digitsBefore += 1 }
+            } else if scalar == "." && !afterPoint && digitsBefore > 0 {
+                afterPoint = true
+            } else {
                 return nil
             }
         }
-        if !number.isEmpty {
-            pairs.append((number: number, unit: unit))
-        }
-        var total = 0.0
-        for pair in pairs {
-            guard let value = Double(pair.number) else { return nil }
-            var scale = 1.0
-            if !pair.unit.isEmpty {
-                guard let known = unitSeconds[pair.unit] else { return nil }
-                scale = known
-            }
-            total += value * scale
-        }
-        return total > 0 ? total : nil
+        guard digitsBefore > 0, !afterPoint || digitsAfter > 0, let value = Double(text), value.isFinite else { return nil }
+        return value
     }
 
-    /// 483 -> "8:03", 3725 -> "1:02:05".
+    /// "8m", "90s", "90 sec", "10 mins", "1hr", "8:30", "1h5m", "480" -> seconds. Nil when unreadable or outside 1 second to 24 hours.
+    public static func seconds(from text: String) -> Double? {
+        let raw = text.trimmed.lowercased()
+        guard !raw.isEmpty else { return nil }
+        var total = 0.0
+        if raw.contains(":") {
+            // Minutes:seconds or hours:minutes:seconds.
+            let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count <= 3 else { return nil }
+            for part in parts {
+                guard let value = number(part.trimmingCharacters(in: .whitespaces)) else { return nil }
+                total = total * 60 + value
+            }
+        } else {
+            // Number-and-unit pairs ("1h 30m"); a number without a unit is seconds.
+            var pairs: [(number: String, unit: String)] = []
+            var digits = ""
+            var unit = ""
+            var gap = false  // whitespace after a number that has no unit yet
+            for char in raw {
+                if char.isASCII && (char.isNumber || char == ".") {
+                    if !unit.isEmpty {  // "1h30": the next number starts a new pair
+                        pairs.append((number: digits, unit: unit))
+                        digits = ""
+                        unit = ""
+                        gap = false
+                    } else if gap {
+                        return nil  // "1 30": two numbers with no unit between them are not one
+                    }
+                    digits.append(char)
+                } else if char.isLetter {
+                    guard !digits.isEmpty else { return nil }  // a unit with no number: "eight minutes"
+                    unit.append(char)
+                    gap = false
+                } else if char.isWhitespace {
+                    gap = gap || (unit.isEmpty && !digits.isEmpty)
+                } else {
+                    return nil
+                }
+            }
+            if !digits.isEmpty {
+                pairs.append((number: digits, unit: unit))
+            }
+            var lastRank = -1
+            for pair in pairs {
+                guard let value = number(pair.number) else { return nil }
+                var scale = 1.0
+                if !pair.unit.isEmpty {
+                    guard let known = unitSeconds[pair.unit] else { return nil }
+                    scale = known
+                }
+                let rank = scale == 3600 ? 0 : (scale == 60 ? 1 : 2)
+                guard rank > lastRank else { return nil }  // hours, minutes and seconds each once, in that order ("5m5m" is not a length)
+                lastRank = rank
+                total += value * scale
+            }
+        }
+        guard total.isFinite, total >= minSeconds, total <= maxSeconds else { return nil }
+        return total
+    }
+
+    /// The length as the whole seconds `--target` is sent with; nil when `seconds(from:)` is.
+    public static func wholeSeconds(from text: String) -> Int? {
+        seconds(from: text).map { Int($0.rounded()) }
+    }
+
+    /// What a clock shows for something that isn't a time (not a number, or beyond what fits): the CLI's `NO_CLOCK`.
+    public static let noClock = "--:--"
+
+    /// 483 -> "8:03", 3725 -> "1:02:05". Total: a value that isn't a time (infinity, NaN, absurdly large) is "--:--", never a crash.
     public static func clock(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
+        guard seconds.isFinite, abs(seconds) <= 1e12 else { return noClock }
+        let total = Int(abs(seconds).rounded())
+        let sign = seconds < 0 && total > 0 ? "-" : ""
         let h = total / 3600
         let m = (total % 3600) / 60
         let s = total % 60
         if h > 0 {
-            return String(format: "%d:%02d:%02d", h, m, s)
+            return sign + String(format: "%d:%02d:%02d", h, m, s)
         }
-        return String(format: "%d:%02d", m, s)
+        return sign + String(format: "%d:%02d", m, s)
     }
 }
 

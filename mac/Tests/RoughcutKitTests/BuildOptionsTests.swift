@@ -102,9 +102,9 @@ final class BuildOptionsTests: XCTestCase {
         let args = o.arguments()
         XCTAssertTrue(args.contains("--graphics"))
         XCTAssertTrue(args.contains("--graphics-style=navy and orange, bold"))
-        o.provider = .none
+        o.provider = .none  // set directly, past the form's rules (FormStateTests drives the picker)
         XCTAssertFalse(o.arguments().contains("--graphics"))
-        XCTAssertEqual(o.problems, ["Motion graphics are designed by the AI: choose a provider other than None."])
+        XCTAssertEqual(o.problems, ["Motion graphics are designed by the AI: choose a provider other than None, or turn motion graphics off."])
     }
 
     func testReferenceImagesGoWithGraphicsOnly() {

@@ -616,7 +616,6 @@ final class AppModel {
             presetsLoaded = true
             if !options.presetName.isEmpty {
                 options.reapplyPreset(from: list)
-                graphicsNeedAModel()
             }
         }
     }
@@ -627,14 +626,7 @@ final class AppModel {
             options.presetName = ""
             return
         }
-        preset.apply(to: &options, replacing: presets.compactMap(\.brief))
-        graphicsNeedAModel()
-    }
-
-    private func graphicsNeedAModel() {
-        if options.provider == .none {
-            options.graphics = false  // graphics are designed by the AI
-        }
+        preset.apply(to: &options, replacing: presets.compactMap(\.brief))  // graphics stay off while the provider is None
     }
 
     // MARK: Updating
