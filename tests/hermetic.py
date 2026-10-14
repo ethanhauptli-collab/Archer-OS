@@ -27,7 +27,8 @@ a sandbox. This module is a pytest plugin (tests/conftest.py names it in `pytest
         test's folders);
       - programs: only programs named ffmpeg, ffprobe, git or sips, a Python, a program an installed package
         brings (Playwright's driver), the stand-ins above, or anything inside the test's own folders may start,
-        looked up where Python itself would look (`env`'s PATH, else `os.defpath`); `os.system` is refused;
+        looked up where Python itself would look (`env`'s PATH, else `os.defpath`), and the names a test passes to
+        `allowing_programs` for the length of one block; `os.system` is refused;
       - writes: opening for writing, mkdir, rmdir, remove, rename, symlink, link, chmod, chown, utime, truncate,
         extended attributes, file flags (macOS), shutil copy/rmtree/move, and a SQLite database opened read-write: nothing outside
         the test's folders (a `__pycache__` and /dev apart), also when it is reached through a link inside them,
