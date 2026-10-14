@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import pytest
 from conftest import CANNED_PLAN, FakeProvider, ffmpeg
 
-from roughcut import analyze, cli, pipeline, progress, sfx, studio
+from roughcut import analyze, cli, pipeline, progress, report, sfx, studio
 from roughcut.cli import main
 from roughcut.pipeline import Options
 
@@ -143,11 +143,21 @@ def _reset_progress():
     progress.enable(False)
 
 
+def _clock_at(now: float):
+    """`time` as roughcut.studio and the report see it, reading `now`: snapshots are made relative to NOW, so ages ("3 h old")
+    must not depend on how long the run has been going (a slow machine turned 3 h into 4 h and failed four tests)."""
+    proxy = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("__")})
+    proxy.time = lambda: now
+    return proxy
+
+
 @pytest.fixture
 def fake(tmp_path, monkeypatch) -> FakeStudio:
     s = FakeStudio(tmp_path)
     monkeypatch.setenv(studio.STUDIO_ENV, str(s.dir))
     monkeypatch.setattr(analyze, "default_cache_dir", lambda: tmp_path / "cache")
+    for module in (studio, report):
+        monkeypatch.setattr(module, "time", _clock_at(NOW))
     return s
 
 
@@ -854,6 +864,15 @@ def test_status_and_doctor_report_studio(fake, library, tmp_path, capsys, monkey
     vs = doctor["venture_studio"]
     assert vs["available"] and vs["libraries"][0]["online"] is None and "(not checked)" in vs["summary"]
     assert "Venture Studio" in doctor_text and "catalog snapshot from" in doctor_text
+
+
+def test_a_snapshots_age_does_not_depend_on_how_long_the_run_has_been_going(fake, library, capsys, monkeypatch):
+    """NOW is read when the tests are collected; a slow machine reaches this test half an hour later. The clock Studio's
+    ages are read against stays at NOW (it was "4 h old" for a snapshot made 3 h before NOW, and four tests failed)."""
+    fake.snapshot("1700000500-1-1", NOW - 3 * 3600, assets=[_asset(1, "Sound Effects/whoosh.wav", kind="audio", category="audio")])
+    monkeypatch.setattr(time, "time", lambda: NOW + 40 * 60)  # the real clock, 40 minutes on
+    assert main(["studio", "status", "--json"]) == 0
+    assert "3 h old" in json.loads(capsys.readouterr().out)["summary"]
 
 
 def test_doctor_without_studio_and_its_exit_code(fake, capsys, monkeypatch):
