@@ -251,10 +251,13 @@ def test_swift_fixtures_for_a_usage_limit_and_the_saved_results_match_the_cli_co
     assert partial["version"] == 2 and partial["fcpxml"] == error["written"]["fcpxml"]
     assert set(partial["graphics"]) == {"planned", "placed", "rendered", "note"}
     assert partial["graphics"]["planned"] > 0 and partial["graphics"]["rendered"] == 0  # nothing made yet: the app offers Finish graphics
+    assert partial["graphics"]["note"] == "not made yet: this cut was written before its graphics"
+    assert partial["changes"]["items"] == ["Graphics: none in this cut yet; it was written before they were made."]  # not what became of each
 
     pending = json.loads((folder / "result-pending-revise-sample.json").read_text())
     assert set(pending) == live and "partial" not in pending
     assert set(pending["graphics"]) == {"planned", "placed", "rendered", "note", "pending"} and pending["graphics"]["pending"] == 2
+    assert pending["changes"]["items"][0].startswith("Redesigning the graphics: no new design came back")  # not "designed again"
     assert pending["fcpxml"] == error["written"]["fcpxml"] and pending["version"] == error["written"]["version"]
 
 

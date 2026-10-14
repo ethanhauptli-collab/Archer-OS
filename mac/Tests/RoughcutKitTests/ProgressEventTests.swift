@@ -217,8 +217,10 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertEqual(partial.version, 2)
         XCTAssertEqual(partial.title, "Mountain Day")
         XCTAssertTrue(partial.fcpxml.hasSuffix("Trip v2.fcpxml"))
-        XCTAssertEqual(partial.graphics, GraphicsSummary(planned: 2, placed: 0, rendered: 0, note: "still being made when this cut was written", pending: nil))
+        XCTAssertEqual(partial.graphics, GraphicsSummary(planned: 2, placed: 0, rendered: 0, note: "not made yet: this cut was written before its graphics", pending: nil))
         XCTAssertEqual(partial.changes?.fromVersion, 1)
+        // The list of a cut written before its graphics says none is in it yet, not what became of each (nothing has).
+        XCTAssertEqual(partial.changes?.items, ["Graphics: none in this cut yet; it was written before they were made."])
         XCTAssertTrue(partial.warnings.contains { $0.hasPrefix("This cut is partial") })
         XCTAssertTrue(partial.canFinishGraphics)
         // Recent runs keep it and read it back, the new key included.
@@ -230,6 +232,8 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNil(limited.partial)
         XCTAssertEqual(limited.graphics?.pending, 2)
         XCTAssertEqual(limited.version, 2)
+        // ...and does not say the redesign happened: no new design came back.
+        XCTAssertEqual(limited.changes?.items.first, "Redesigning the graphics: no new design came back, so they keep their earlier look (see Warnings).")
     }
 
     func testASavedResultWithoutTheNewKeysDecodes() throws {

@@ -97,20 +97,56 @@ public enum RunEnding: Equatable, Sendable {
     ///   - error: the `error` event's message, or what the app saw instead.
     ///   - saved: the output folder's `result.json`, read after the run stopped (see `StoppedRun.newest`).
     ///   - written: the `error` event's `written`.
+    ///   - baseline: the version `result.json` held when the run began (see `StoppedRun.newest`).
+    ///   - usageLimit: the `error` event's kind was `usage_limit`; the banner then leaves out the engine's Terminal command
+    ///     (the Finish graphics button, or Revise again, is what the window offers).
     public static func after(
         _ kind: RunKind, from source: RunResult?, result: RunResult?, cancelled: Bool, error: String,
-        saved: RunResult? = nil, written: WrittenCut? = nil
+        saved: RunResult? = nil, written: WrittenCut? = nil, baseline: Int? = nil, usageLimit: Bool = false
     ) -> RunEnding {
         if let result {
             return .finished(result)
         }
-        if let newest = StoppedRun.newest(saved: saved, source: source, written: written) {
-            let problem = StoppedRun.problem(for: newest, kind: kind, cancelled: cancelled, reason: error, hasEarlier: source != nil)
+        if let newest = StoppedRun.newest(saved: saved, source: source, written: written, baseline: baseline) {
+            let problem = StoppedRun.problem(for: newest, kind: kind, cancelled: cancelled, reason: error, earlier: source, written: written)
             return .wroteAndStopped(newest, problem: problem)
         }
         if let source {
-            return .returned(source, problem: cancelled ? "\(kind.noun) cancelled." : error)
+            var problem = cancelled ? "\(kind.noun) cancelled." : (usageLimit ? StoppedRun.withoutTerminalCommands(error) : error)
+            if let note = StoppedRun.unreadVersionNote(written: written, source: source) {
+                // It wrote a newer version, but result.json wasn't there (or was an older one) to show it.
+                if let last = problem.last, !".!?".contains(last) {
+                    problem += "."
+                }
+                problem += note
+            }
+            return .returned(source, problem: problem)
         }
         return cancelled ? .cancelled : .failed(error)
+    }
+}
+
+/// A revision that stopped after writing its version: the folder whose Revise box still holds its notes. They are in that
+/// version already, so finishing the version (Finish graphics, Finish without AI) clears the box as a finished revision
+/// does; a box that kept them would apply them again with the next Revise.
+public struct StoppedRevision: Equatable, Sendable {
+    public private(set) var folder: String?
+
+    public init() {}
+
+    /// A revision stopped after writing `newest`.
+    public mutating func remember(_ newest: RunResult) {
+        folder = newest.outDir
+    }
+
+    /// Finishing `result` completes the revision that stopped: it is the cut in that folder.
+    public func isFinished(by result: RunResult?) -> Bool {
+        guard let folder, let result else { return false }
+        return folder == result.outDir
+    }
+
+    /// The box was cleared, another revision started, or another project is on screen.
+    public mutating func clear() {
+        folder = nil
     }
 }

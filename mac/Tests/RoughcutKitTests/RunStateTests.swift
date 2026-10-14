@@ -5,7 +5,7 @@ final class RunStateTests: XCTestCase {
     private typealias Graphics = (planned: Int, placed: Int, rendered: Int, pending: Int?)
 
     /// A cut as the `done` event (or the folder's result.json) describes it. `version` nil leaves the key out, as an older CLI did.
-    private func cut(_ version: Int?, graphics: Graphics? = nil, partial: Bool = false) throws -> RunResult {
+    private func cut(_ version: Int?, graphics: Graphics? = nil, partial: Bool = false, folder: String = "Promo_roughcut") throws -> RunResult {
         var extra = ""
         if let version {
             extra += ", \"version\": \(version)"
@@ -21,7 +21,7 @@ final class RunStateTests: XCTestCase {
             extra += ", \"partial\": true"
         }
         let tag = version.map { " v\($0)" } ?? ""
-        let line = "{\"event\": \"done\", \"result\": {\"title\": \"Promo\", \"out_dir\": \"/o/Promo_roughcut\", \"fcpxml\": \"/o/Promo_roughcut/Promo\(tag).fcpxml\", \"report\": \"/o/r.md\", \"rough_seconds\": 90, \"stringout_seconds\": null, \"edits\": 12, \"broll\": 3, \"sections\": [], \"planned_by\": \"claude-code:claude-opus-5-5\", \"fell_back\": false, \"warnings\": []\(extra)}}"
+        let line = "{\"event\": \"done\", \"result\": {\"title\": \"Promo\", \"out_dir\": \"/o/\(folder)\", \"fcpxml\": \"/o/\(folder)/Promo\(tag).fcpxml\", \"report\": \"/o/r.md\", \"rough_seconds\": 90, \"stringout_seconds\": null, \"edits\": 12, \"broll\": 3, \"sections\": [], \"planned_by\": \"claude-code:claude-opus-5-5\", \"fell_back\": false, \"warnings\": []\(extra)}}"
         return try XCTUnwrap(JSONLines.event(from: line)?.result)
     }
 
@@ -65,20 +65,20 @@ final class RunStateTests: XCTestCase {
         let written = WrittenCut(version: 2, fcpxml: partial.fcpxml, project: partial.project, partial: true)
 
         let crashed = RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: "the renderer crashed", saved: partial, written: written)
-        XCTAssertEqual(crashed, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the renderer crashed. Your earlier version is still there."))
+        XCTAssertEqual(crashed, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the renderer crashed. Your earlier version, Promo v1.fcpxml, is still there."))
 
         // Cancel says so; the app's own words for the reason (the CLI's "Stopped: cancelled." is not shown).
         let cancelled = RunEnding.after(.revise, from: v1, result: nil, cancelled: true, error: "roughcut stopped (exit code 15).", saved: partial, written: written)
-        XCTAssertEqual(cancelled, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the revision was cancelled. Your earlier version is still there."))
+        XCTAssertEqual(cancelled, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the revision was cancelled. Your earlier version, Promo v1.fcpxml, is still there."))
 
         // A crash or a Mac that slept sends no error event at all: result.json alone shows the version is newer.
         let silent = RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: "roughcut stopped (exit code 1).", saved: partial, written: nil)
-        XCTAssertEqual(silent, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: roughcut stopped (exit code 1). Your earlier version is still there."))
+        XCTAssertEqual(silent, .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: roughcut stopped (exit code 1). Your earlier version, Promo v1.fcpxml, is still there."))
 
         // Re-cuts and finishing graphics follow the same rule.
         XCTAssertEqual(
             RunEnding.after(.recut, from: v1, result: nil, cancelled: true, error: "", saved: partial),
-            .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the re-cut was cancelled. Your earlier version is still there.")
+            .wroteAndStopped(partial, problem: "Version 2 was written, but its graphics weren't finished: the re-cut was cancelled. Your earlier version, Promo v1.fcpxml, is still there.")
         )
         // A finished run is shown as it was, whatever the folder says.
         let v3 = try cut(3)
@@ -104,10 +104,15 @@ final class RunStateTests: XCTestCase {
             return XCTFail("a usage limit that came after version 2 was written should show version 2, not \(ending)")
         }
         XCTAssertEqual(shown, limited)
-        XCTAssertTrue(problem.hasPrefix("Version 2 was written, but its graphics weren't finished: You've hit your usage limit."), problem)
-        // The finished write moved version 1 to the folder's history, so the banner doesn't say it is still beside it.
-        XCTAssertTrue(problem.hasSuffix("Your earlier version is kept in the folder's history."), problem)
-        XCTAssertFalse(problem.contains("is still there"))
+        // Every graphic is there, in its earlier look: the banner says that, not that the graphics weren't finished, and leaves
+        // out the engine's own sentences about the file it wrote and the Terminal command (the button under it does that).
+        XCTAssertEqual(
+            problem,
+            "Version 2 was written with 2 graphics in their earlier look: You've hit your usage limit. Your earlier version is kept in the folder's history."
+        )
+        XCTAssertFalse(problem.contains("`"))
+        XCTAssertFalse(problem.contains("roughcut render"))
+        XCTAssertFalse(problem.contains("is still there"))  // the finished write moved version 1 to the folder's history
     }
 
     func testARunThatWroteNothingNewerGoesBackToItsCut() throws {
@@ -165,17 +170,184 @@ final class RunStateTests: XCTestCase {
     func testTheBannerOfAVersionWhoseGraphicsAreAllMadeDoesNotClaimTheyAreNot() throws {
         let finished = try cut(2, graphics: (planned: 2, placed: 2, rendered: 2, pending: nil))
         XCTAssertFalse(finished.canFinishGraphics)
-        let problem = StoppedRun.problem(for: finished, kind: .revise, cancelled: false, reason: "Disk full", hasEarlier: true)
+        let problem = StoppedRun.problem(for: finished, kind: .revise, cancelled: false, reason: "Disk full", earlier: try cut(1))
         XCTAssertEqual(problem, "Version 2 was written before the run stopped: Disk full. Your earlier version is kept in the folder's history.")
         XCTAssertEqual(
-            StoppedRun.problem(for: try cut(nil), kind: .recut, cancelled: false, reason: "  ", hasEarlier: false),
+            StoppedRun.problem(for: try cut(nil), kind: .recut, cancelled: false, reason: "  ", earlier: nil),
             "A newer version was written before the run stopped: the run stopped."
         )
         // A reason that already ends a sentence is not given a second full stop.
         XCTAssertEqual(
-            StoppedRun.problem(for: finished, kind: .revise, cancelled: false, reason: "Is the disk full?", hasEarlier: false),
+            StoppedRun.problem(for: finished, kind: .revise, cancelled: false, reason: "Is the disk full?", earlier: nil),
             "Version 2 was written before the run stopped: Is the disk full?"
         )
+    }
+
+    // MARK: A run is blamed only for a version it wrote
+
+    func testAStoppedRunIsNotBlamedForAPartialCutAnEarlierRunLeft() throws {
+        // Version 2 is a partial cut an earlier run left beside version 1 (the cut before it stays where it was). The user opens
+        // version 1 and revises; the run stops before it writes anything (the usage limit while planning).
+        let v1 = try cut(1, graphics: (planned: 2, placed: 2, rendered: 2, pending: nil))
+        let oldPartial = try saved("result-partial-revise-sample")
+        XCTAssertEqual(oldPartial.version, 2)
+        let limit = "You've hit your usage limit. Nothing changed: v2 is still the latest cut. Run the same revise again after the reset."
+        // Without the version the folder held when the run began, the old partial looks newer than version 1: that was the bug.
+        XCTAssertEqual(StoppedRun.newest(saved: oldPartial, source: v1, written: nil), oldPartial)
+        XCTAssertNil(StoppedRun.newest(saved: oldPartial, source: v1, written: nil, baseline: 2))
+        XCTAssertEqual(
+            RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: limit, saved: oldPartial, written: nil, baseline: 2, usageLimit: true),
+            .returned(v1, problem: limit)
+        )
+        // A run that did write the next version is still shown, as before.
+        let v3 = try cut(3, graphics: (planned: 2, placed: 0, rendered: 0, pending: nil), partial: true)
+        XCTAssertEqual(StoppedRun.newest(saved: v3, source: v1, written: nil, baseline: 2), v3)
+        XCTAssertEqual(StoppedRun.newest(saved: v3, source: v1, written: WrittenCut(version: 3, partial: true), baseline: 2), v3)
+        // A baseline that could not be read (a stalled share) leaves the rule as it was.
+        XCTAssertEqual(StoppedRun.newest(saved: oldPartial, source: v1, written: nil, baseline: nil), oldPartial)
+        // A source from an older CLI has no version: the folder's version at the start stands in for it.
+        let unnumbered = try cut(nil)
+        XCTAssertNil(StoppedRun.newest(saved: oldPartial, source: unnumbered, written: nil, baseline: 2))
+        XCTAssertEqual(StoppedRun.newest(saved: v3, source: unnumbered, written: nil, baseline: 2), v3)
+        // Finishing the graphics of that partial cut: the source is version 2, so the same version is not newer.
+        XCTAssertNil(StoppedRun.newest(saved: oldPartial, source: oldPartial, written: nil, baseline: 2))
+    }
+
+    // MARK: What the banner says
+
+    func testTheBannerLeavesOutTheEnginesTerminalCommands() throws {
+        let message = "You've hit your usage limit. Trip v2.fcpxml is written with 2 motion graphics, 2 of them in their earlier look because the new look wasn't designed; the plan and every design that came back are saved. After the reset, `roughcut render /Users/you/Movies/Trip_roughcut --design-missing` designs the new look without re-planning the cut."
+        let written = WrittenCut(version: 2, fcpxml: "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml", project: "Trip", partial: false, designMissing: true)
+        // The engine's own account of the file it wrote is cut off at the file's name.
+        XCTAssertEqual(StoppedRun.reason(from: message, written: written), "You've hit your usage limit.")
+        // Without `written`, only the sentence with the command goes.
+        XCTAssertEqual(
+            StoppedRun.reason(from: message, written: nil),
+            "You've hit your usage limit. Trip v2.fcpxml is written with 2 motion graphics, 2 of them in their earlier look because the new look wasn't designed; the plan and every design that came back are saved."
+        )
+        XCTAssertEqual(StoppedRun.withoutTerminalCommands("Disk full."), "Disk full.")
+        XCTAssertEqual(StoppedRun.withoutTerminalCommands("Run `roughcut doctor`."), "Run `roughcut doctor`.")  // nothing else to say: kept whole
+
+        // Finish graphics stopped by the limit before it wrote anything: back to the cut, without the command.
+        let v2 = try cut(2, graphics: (planned: 2, placed: 2, rendered: 2, pending: 2))
+        let nothing = "You've hit your usage limit. Nothing was written: v2 is still the newest version, and the 2 graphics still to be designed wait for `roughcut render /Users/you/Movies/Trip_roughcut --design-missing` after the reset."
+        XCTAssertEqual(
+            RunEnding.after(.finishGraphics, from: v2, result: nil, cancelled: false, error: nothing, saved: v2, written: nil, baseline: 2, usageLimit: true),
+            .returned(v2, problem: "You've hit your usage limit.")
+        )
+        // Any other error is shown in full.
+        XCTAssertEqual(
+            RunEnding.after(.finishGraphics, from: v2, result: nil, cancelled: false, error: nothing, saved: v2, written: nil, baseline: 2, usageLimit: false),
+            .returned(v2, problem: nothing)
+        )
+    }
+
+    func testAVersionTheRunWroteButTheFolderCouldNotShowIsNamed() throws {
+        // The error event says version 2 was written, but result.json is missing, unreadable in time, or still version 1's.
+        let v1 = try cut(1)
+        let written = WrittenCut(version: 2, fcpxml: "/o/Promo_roughcut/Promo v2.fcpxml", project: "Promo", partial: true)
+        let expected = RunEnding.returned(v1, problem: "the renderer crashed. Version 2 was written to Promo v2.fcpxml in the same folder.")
+        XCTAssertEqual(RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: "the renderer crashed", saved: nil, written: written), expected)
+        XCTAssertEqual(RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: "the renderer crashed", saved: v1, written: written, baseline: 1), expected)
+        // Nothing to add when the run wrote nothing newer than the cut it came from.
+        XCTAssertEqual(
+            RunEnding.after(.revise, from: v1, result: nil, cancelled: false, error: "x", saved: nil, written: WrittenCut(version: 1, fcpxml: "/o/Promo_roughcut/Promo v1.fcpxml")),
+            .returned(v1, problem: "x")
+        )
+    }
+
+    // MARK: The Revise box after a stopped revision
+
+    func testFinishingAStoppedRevisionIsRecognisedByItsFolder() throws {
+        var stopped = StoppedRevision()
+        let v2 = try cut(2)
+        XCTAssertFalse(stopped.isFinished(by: v2))  // nothing stopped
+        stopped.remember(v2)
+        XCTAssertTrue(stopped.isFinished(by: v2))
+        XCTAssertTrue(stopped.isFinished(by: try cut(3)))  // the version that finishes it is the next one, in the same folder
+        XCTAssertFalse(stopped.isFinished(by: try cut(3, folder: "Other_roughcut")))  // another project's cut is not
+        XCTAssertFalse(stopped.isFinished(by: nil))
+        stopped.clear()  // the box was cleared, or another revision started
+        XCTAssertFalse(stopped.isFinished(by: v2))
+    }
+
+    // MARK: Finish graphics, said by cause
+
+    func testFinishGraphicsSaysWhatItDoesAndOffersAnotherTryOnlyAfterAnEmptyOne() throws {
+        let partial = try cut(2, graphics: (planned: 2, placed: 0, rendered: 0, pending: nil), partial: true)
+        let earlierLook = try cut(2, graphics: (planned: 2, placed: 2, rendered: 2, pending: 2))
+        let failedRender = try cut(2, graphics: (planned: 2, placed: 2, rendered: 0, pending: nil))
+        XCTAssertTrue(partial.finishGraphicsCaption().hasPrefix("Designs the graphics this version was written without"))
+        XCTAssertTrue(earlierLook.finishGraphicsCaption().hasPrefix("Designs the new look for the graphics that are still in their earlier look"))
+        XCTAssertTrue(failedRender.finishGraphicsCaption().hasPrefix("Tries again to design and render the graphics that didn't come back"))
+        for result in [partial, earlierLook, failedRender] {
+            XCTAssertTrue(result.finishGraphicsCaption().hasSuffix("The cut isn't planned again, and this version stays as an earlier one."))
+            XCTAssertEqual(result.finishGraphicsTitle(), "Finish graphics")
+            XCTAssertEqual(result.finishGraphicsTitle(afterEmptyTry: true), "Try again")
+            XCTAssertTrue(result.finishGraphicsCaption(afterEmptyTry: true).hasPrefix("The last try changed nothing"))
+        }
+
+        // The last Finish graphics changed nothing and graphics are still to be finished: another try. One that got further is not.
+        var sameCut = failedRender
+        sameCut.changes = RunChanges(fromVersion: 2, items: ["This is the same cut as v2: its settings are the same, so it plays exactly as v2 does."], unchanged: true)
+        XCTAssertTrue(sameCut.finishGraphicsMadeNothing)
+        var gotFurther = earlierLook
+        gotFurther.changes = RunChanges(fromVersion: 2, items: ["Graphics: 1 got its new look"], unchanged: false)
+        XCTAssertFalse(gotFurther.finishGraphicsMadeNothing)
+        var finished = try cut(3, graphics: (planned: 2, placed: 2, rendered: 2, pending: nil))
+        finished.changes = RunChanges(fromVersion: 2, items: ["Graphics: 2 were rendered again"], unchanged: true)
+        XCTAssertFalse(finished.finishGraphicsMadeNothing)  // nothing is left to try
+        XCTAssertFalse(try cut(2, graphics: (planned: 2, placed: 2, rendered: 0, pending: nil)).finishGraphicsMadeNothing)  // no changes recorded
+    }
+
+    func testTheBannerSaysWhatEachFinishingButtonDoes() {
+        let both = StoppedRun.finishWithoutAICaption(finishGraphicsOffered: true)
+        XCTAssertTrue(both.contains("Finish without AI adds the graphics whose designs were saved and calls no model"), both)
+        XCTAssertTrue(both.contains("Finish graphics, below, also designs the rest"), both)
+        XCTAssertEqual(StoppedRun.finishWithoutAICaption(finishGraphicsOffered: false), "The new plan was saved before it stopped.")
+    }
+
+    func testTheGraphicsRowLeavesOutTheTerminalCommandsOfTheNote() {
+        func note(_ text: String?) -> String? {
+            GraphicsSummary(planned: 2, placed: 2, rendered: 2, note: text, pending: 2).displayNote
+        }
+        XCTAssertEqual(
+            note("2 graphics keep their earlier look: the new look wasn't designed because the usage limit was reached; after the reset run `roughcut render /o/Trip_roughcut --design-missing`"),
+            "2 graphics keep their earlier look: the new look wasn't designed because the usage limit was reached"
+        )
+        XCTAssertEqual(
+            note("2 graphics keep their earlier clip: the new design didn't render (see Warnings); `roughcut render /o/Trip_roughcut` renders them again"),
+            "2 graphics keep their earlier clip: the new design didn't render (see Warnings)"
+        )
+        XCTAssertEqual(
+            note("1 not designed yet; `roughcut render --design-missing` adds it; 1 didn't design or render; see Warnings"),
+            "1 not designed yet; 1 didn't design or render; see Warnings"
+        )
+        XCTAssertEqual(note("2 didn't design or render; see Warnings"), "2 didn't design or render; see Warnings")
+        XCTAssertEqual(note("the revision returned none"), "the revision returned none")
+        XCTAssertNil(note("`roughcut render --design-missing` adds them"))
+        XCTAssertNil(note(""))
+        XCTAssertNil(note(nil))
+    }
+
+    // MARK: result.json, read for the window
+
+    func testTheSavedResultIsReadOffTheCallingThreadAndIsNilWhenThereIsNoneToRead() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-saved-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let missing = await SavedResult.read(in: folder, timeout: 5)
+        XCTAssertNil(missing)
+
+        try FixtureFiles.data("result-partial-revise-sample", "json").write(to: folder.appendingPathComponent(SavedResult.fileName))
+        let found = await SavedResult.read(in: folder, timeout: 5)
+        XCTAssertEqual(found?.version, 2)
+        XCTAssertEqual(found?.partial, true)
+        XCTAssertEqual(found, SavedResult.read(in: folder))
+
+        try Data("not json".utf8).write(to: folder.appendingPathComponent(SavedResult.fileName))
+        let broken = await SavedResult.read(in: folder, timeout: 5)
+        XCTAssertNil(broken)
     }
 
     // MARK: What the window says

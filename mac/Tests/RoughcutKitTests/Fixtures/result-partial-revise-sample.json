@@ -28,7 +28,7 @@
   "planned": 2,
   "placed": 0,
   "rendered": 0,
-  "note": "still being made when this cut was written"
+  "note": "not made yet: this cut was written before its graphics"
  },
  "visual_log": null,
  "skipped": {
@@ -47,8 +47,7 @@
  "changes": {
   "from_version": 1,
   "items": [
-   "Redesigning the graphics: every graphic is designed again, as asked.",
-   "Graphics: 2 redesigned (every graphic is designed again)"
+   "Graphics: none in this cut yet; it was written before they were made."
   ],
   "unchanged": false
  },

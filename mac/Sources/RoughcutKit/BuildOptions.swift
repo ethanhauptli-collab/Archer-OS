@@ -509,11 +509,6 @@ public struct RecutOptions: Equatable, Sendable {
         return args
     }
 
-    /// Finish graphics for `result`: the run's own settings, and the graphics it lacks designed and rendered.
-    public static func finishingGraphics(of result: RunResult) -> RecutOptions {
-        RecutOptions(outputFolder: result.outDirURL, designMissing: true)
-    }
-
     /// The Re-cut format picker's first row, which keeps the cut's own format.
     public static func sameFormatTitle(_ cut: CutSettings?) -> String {
         guard let cut else { return "Same as this cut" }

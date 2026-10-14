@@ -33,7 +33,7 @@ struct ResultView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if let problem = model.runProblem {
-                    RunProblemBanner(problem: problem)
+                    RunProblemBanner(problem: problem, finishGraphicsOffered: result.canFinishGraphics)
                 }
 
                 HStack(alignment: .top, spacing: 12) {
@@ -64,7 +64,7 @@ struct ResultView: View {
                         Text("Edits").foregroundStyle(.secondary)
                         Text("\(result.edits) cuts, \(result.broll) B-roll")
                     }
-                    if let graphics = result.graphics, graphics.planned > 0 || graphics.note != nil {
+                    if let graphics = result.graphics, graphics.planned > 0 || graphics.displayNote != nil {
                         GridRow(alignment: .top) {
                             Text("Graphics").foregroundStyle(.secondary)
                             GraphicsRow(result: result, graphics: graphics)
@@ -286,7 +286,7 @@ struct GraphicsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("\(graphics.rendered) of \(graphics.planned) on the timeline")
-            if let note = graphics.note, !note.isEmpty {
+            if let note = graphics.displayNote {
                 Text(note)
                     .font(.callout)
                     .foregroundStyle(graphics.rendered < graphics.planned || result.canFinishGraphics ? Color.orange : Color.secondary)
@@ -294,14 +294,16 @@ struct GraphicsRow: View {
                     .textSelection(.enabled)
             }
             if result.canFinishGraphics {
+                // The last Finish graphics changed nothing: the same button says it is another try, and why to wait.
+                let again = model.finishGraphicsTriedInVain
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Button {
                         model.finishGraphics(result)
                     } label: {
-                        Label("Finish graphics", systemImage: "wand.and.stars")
+                        Label(result.finishGraphicsTitle(afterEmptyTry: again), systemImage: again ? "arrow.clockwise" : "wand.and.stars")
                     }
-                    .help(RunResult.finishGraphicsCaption)
-                    Text(RunResult.finishGraphicsCaption)
+                    .help(result.finishGraphicsCaption(afterEmptyTry: again))
+                    Text(result.finishGraphicsCaption(afterEmptyTry: again))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -360,6 +362,8 @@ struct WhatChangedBox: View {
 struct RunProblemBanner: View {
     @Environment(AppModel.self) private var model
     let problem: String
+    /// The cut on screen has graphics to finish: the Graphics row has a Finish graphics button, which the banner points to.
+    var finishGraphicsOffered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -376,9 +380,10 @@ struct RunProblemBanner: View {
             }
             if model.resumeFolder != nil {
                 HStack {
-                    Text("The new plan was saved before it stopped.")
+                    Text(StoppedRun.finishWithoutAICaption(finishGraphicsOffered: finishGraphicsOffered))
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("Finish without AI") { model.finishWithoutAI() }
                         .help("Cuts from the saved plan with its own settings and no model call (roughcut render)")
