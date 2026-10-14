@@ -105,7 +105,7 @@ final class FormStateTests: XCTestCase {
         XCTAssertEqual(stuck.graphicsStyle, "navy")
         let fine = try JSONDecoder().decode(BuildOptions.self, from: Data(#"{"provider":"claude-code","graphics":true}"#.utf8))
         XCTAssertTrue(fine.graphics)
-        XCTAssertTrue(ModelProvider.allCases.filter { !$0.usesAI } == [.none])
+        XCTAssertEqual(ModelProvider.allCases.filter { !$0.usesAI }, [ModelProvider.none])
     }
 
     // MARK: Target length
@@ -120,7 +120,8 @@ final class FormStateTests: XCTestCase {
             let seconds = try XCTUnwrap(pair[1] as? NSNumber).doubleValue
             accept.append((text, seconds))
         }
-        return (accept, try XCTUnwrap(root["reject"] as? [String]))
+        let reject = try XCTUnwrap(root["reject"] as? [String])
+        return (accept, reject)
     }
 
     private var overflowing: [String] {
