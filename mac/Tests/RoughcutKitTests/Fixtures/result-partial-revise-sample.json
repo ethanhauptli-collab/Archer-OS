@@ -1,0 +1,55 @@
+{
+ "title": "Mountain Day",
+ "out_dir": "/Users/you/Movies/Trip_roughcut",
+ "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml",
+ "report": "/Users/you/Movies/Trip_roughcut/edit_report.md",
+ "captions": "/Users/you/Movies/Trip_roughcut/Trip v2.srt",
+ "rough_seconds": 15.682,
+ "stringout_seconds": null,
+ "edits": 6,
+ "broll": 2,
+ "sections": [
+  "Cold open",
+  "Heading out",
+  "Wrap"
+ ],
+ "planned_by": "fake:fake-model",
+ "fell_back": false,
+ "warnings": [
+  "unknown segment 'V09.S001'; skipped",
+  "V01.S005 used twice; kept the first use",
+  "B-roll V01: ignored references not in section 'Heading out': ['V01.S999']",
+  "This cut is partial: it was written before its motion graphics were made, so it has none. A run that finishes replaces it with the complete cut. The cut before it, v1, is still in this folder. If the run stopped, `roughcut render /Users/you/Movies/Trip_roughcut` adds the graphics whose designs were saved, and `roughcut render /Users/you/Movies/Trip_roughcut --design-missing` designs the rest."
+ ],
+ "version": 2,
+ "project": "Trip - Rough Cut v2 (medium, fake-model)",
+ "event": "Trip (2026-08-12)",
+ "graphics": {
+  "planned": 2,
+  "placed": 0,
+  "rendered": 0,
+  "note": "not made yet: this cut was written before its graphics"
+ },
+ "visual_log": null,
+ "skipped": {
+  "files": [],
+  "plan_refs": 3
+ },
+ "usage": null,
+ "report_html": "/Users/you/Movies/Trip_roughcut/edit_report.html",
+ "cut": {
+  "style": "medium",
+  "format": null,
+  "keep_fillers": false,
+  "stringout": true,
+  "punch_in": false
+ },
+ "changes": {
+  "from_version": 1,
+  "items": [
+   "Graphics: none in this cut yet; it was written before they were made."
+  ],
+  "unchanged": false
+ },
+ "partial": true
+}

@@ -10,7 +10,7 @@ import pytest
 from conftest import CANNED_PLAN, FakeProvider, ffmpeg
 from test_end_to_end import check_invariants, validate_dtd
 
-from roughcut import graphics, pipeline, progress
+from roughcut import graphics, pipeline, progress, versions
 from roughcut.cli import main
 from roughcut.pipeline import Options, RoughcutError
 from roughcut.providers import ProviderAuthError
@@ -1186,7 +1186,8 @@ def test_the_end_of_a_run_says_what_made_it_in_and_what_it_cost(footage, tmp_pat
     capsys.readouterr()
     assert main(["render", str(out), "--progress-json"]) == 0
     done = _events(capsys.readouterr().out)[-1]["result"]
-    assert done["graphics"] == {"planned": 1, "placed": 1, "rendered": 0, "note": None}
+    # The renderer still crashes: the app's Graphics row says why, not just "0 of 1".
+    assert done["graphics"] == {"planned": 1, "placed": 1, "rendered": 0, "note": "1 didn't design or render; see Warnings"}
     assert done["skipped"] == {"files": [], "plan_refs": 3} and done["usage"] is None  # a render calls no model
     assert done["visual_log"] == {"described": 4, "total": 4}
 
@@ -1849,9 +1850,14 @@ def test_a_cut_written_before_its_graphics_has_a_matching_result_json(footage, t
     with pytest.raises(RuntimeError):
         pipeline.build(_opts(footage, out, shared_cache, graphics=True))
     result = json.loads((out / "result.json").read_text())
-    assert Path(result["fcpxml"]).is_file() and Path(result["fcpxml"]).name == "footage v2.fcpxml" == _top_fcpxml(out)[0]
+    # The cut written before its graphics is the newest version, and result.json describes it; it takes nothing off the top
+    # level, so the finished cut before it (v1) is still there, and only the final write of a version tidies the folder.
+    assert Path(result["fcpxml"]).is_file() and Path(result["fcpxml"]).name == "footage v2.fcpxml"
+    assert _top_fcpxml(out) == ["footage v1.fcpxml", "footage v2.fcpxml"]
     assert result["version"] == 2 and result["partial"] is True
-    assert result["graphics"]["note"] == "still being made when this cut was written"
+    assert result["graphics"]["note"] == "not made yet: this cut was written before its graphics"
+    current = versions.current(out)
+    assert (current["n"], current["fcpxml"], current["partial"]) == (2, "footage v2.fcpxml", True)
 
 
 def test_waiting_on_a_long_model_request_is_not_a_stall(tmp_path):

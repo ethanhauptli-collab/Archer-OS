@@ -61,7 +61,7 @@ from pathlib import Path
 from . import brand_fonts, ffmpeg_ops, progress
 from .analyze import ROLE_LABELS, Analysis, Clip, log
 from .captions import respell, respell_timed
-from .plan import DEFAULT_SECONDS, GraphicSpec
+from .plan import DEFAULT_SECONDS, GraphicSpec, spec_key
 from .references import ReferenceSet
 from .timeline import ConnectedClip, Timeline
 
@@ -1311,12 +1311,16 @@ DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")  # a graphic's saved design, 
 LEFT_OUT = "left-out"  # graphics/left-out/: designs of planned graphics a cut couldn't place, kept for the next re-cut
 
 
-def keep_left_out(specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_html: dict[int, str], out_dir: Path) -> list[dict]:
+def keep_left_out(
+    specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_html: dict[int, str], out_dir: Path, pending: dict[int, dict] | None = None,
+) -> list[dict]:
     """graphics.json entries for the planned graphics this cut doesn't place (one would have covered another,
     or its words aren't in this cut), so the next re-cut can place them again without the model.
 
     A designed one keeps its design in graphics/left-out/, named by its place in the plan (01 is the
     plan's first graphic): renumbering never writes over it, and it isn't put aside as unused.
+    `pending` (write_manifest): a design that is an earlier version's, standing in for a new one still to come, keeps that mark
+    here too, so the graphic is still owed its new look when a later cut has room for it again.
     """
     there = {g.index for g in placed}
     entries = []
@@ -1329,6 +1333,11 @@ def keep_left_out(specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_h
             (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
             (out_dir / rel).write_text(saved_html[index], encoding="utf-8")
             entry["html"] = rel
+            mark = (pending or {}).get(index)
+            if mark:
+                entry["redesign_pending"] = mark["stage"]
+                if mark.get("reason"):
+                    entry["pending_reason"] = mark["reason"]
         entries.append(entry)
     return entries
 
@@ -1549,18 +1558,27 @@ def _read_manifest(out_dir: Path) -> dict:
         return {}
 
 
+PENDING_DESIGN, PENDING_RENDER = "design", "render"  # graphics.json "redesign_pending": which step of the redesign is still to come
+
+
 def write_manifest(
     out_dir: Path, placed: list[PlacedGraphic], files: dict[str, Path], html: dict[str, str], tl: Timeline, style: str,
     notes: dict[str, list[str]] | None = None, house_style: str = "", left_out: list[dict] | None = None,
+    pending: dict[int, dict] | None = None,
 ) -> None:
     """graphics.json: every placed graphic, its design, and the clip rendered from it (if any).
 
     `house_style` is the designer's description of its design system, for later designs to match.
     "retime" is how a design made for other timing plays in this cut ((seconds here, seconds in the design)).
-    `left_out`: entries for the planned graphics this cut couldn't place (keep_left_out), listed after the placed ones."""
+    `left_out`: entries for the planned graphics this cut couldn't place (keep_left_out), listed after the placed ones.
+    `pending`: {plan index: {"stage", "reason", "rendered"}} for graphics that stand on an earlier version's work while the new
+    one is still to come: "redesign_pending" is "design" when the new design was never made (the entry's design is the earlier
+    one) and "render" when it was made but didn't render (the design is the new one; the clip is the earlier one, whose own
+    digest "rendered" keeps). Both are finished by `roughcut render` (`--design-missing` for the first)."""
     entries = []
     for g in placed:
         entry = {"id": g.id, "index": g.index, **asdict(g.spec), "start_frame": g.start, "frames": g.frames}
+        mark = (pending or {}).get(g.index)
         if g.over:
             entry["over"] = g.over
         if g.id in html:
@@ -1570,15 +1588,107 @@ def write_manifest(
                 entry["retime"] = [list(a) for a in g.retime]
         if g.id in files:
             entry["file"] = f"graphics/{files[g.id].name}"
-            entry["rendered"] = entry.get("digest")  # the design that file was rendered from
+            entry["rendered"] = (mark or {}).get("rendered") or entry.get("digest")  # the design that file was rendered from
+        if mark:
+            entry["redesign_pending"] = mark["stage"]
+            if mark.get("reason"):
+                entry["pending_reason"] = mark["reason"]
         if notes and notes.get(g.id):
             entry["notes"] = notes[g.id]
         entries.append(entry)
     entries += left_out or []
     from .versions import atomic_write
 
-    data = {"style": style, **({"house_style": house_style} if house_style else {}), "graphics": entries}
+    fd = tl.frame_duration
+    canvas_ = {"width": tl.width, "height": tl.height, "rate": f"{fd.denominator}/{fd.numerator}"}  # what the clips were rendered at
+    data = {"style": style, **({"house_style": house_style} if house_style else {}), "canvas": canvas_, "graphics": entries}
     atomic_write(out_dir / MANIFEST, json.dumps(data, indent=1))
+
+
+def saved_pending(out_dir: Path) -> dict[int, dict]:
+    """{plan index: {"stage", "reason"}} for the graphics of graphics.json that still stand on an earlier version's work
+    ("redesign_pending", see write_manifest). One the cut has no room for keeps its mark (keep_left_out); only the entries
+    with a clip on the timeline count as shown (pipeline.pending_graphics)."""
+    found: dict[int, dict] = {}
+    for g in _read_manifest(out_dir).get("graphics", []):
+        if not isinstance(g, dict) or g.get("redesign_pending") not in (PENDING_DESIGN, PENDING_RENDER):
+            continue
+        try:
+            found[int(g["index"])] = {"stage": g["redesign_pending"], "reason": str(g.get("pending_reason") or "")}
+        except (KeyError, TypeError, ValueError):
+            continue
+    return found
+
+
+@dataclass
+class EarlierClip:
+    """The rendered clip a graphic had in the version before: what stands in for it when its new render doesn't come back."""
+
+    path: Path
+    frames: int  # the length it was placed (and rendered) at
+    rendered: str  # the digest of the design it was rendered from
+    canvas: tuple[int, int, str] | None  # (width, height, "rate") of that cut; None in a graphics.json from before it was saved
+    notes: list[str] = field(default_factory=list)
+
+
+def _entry_spec(g: dict) -> GraphicSpec:
+    try:
+        seconds = float(g.get("seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return GraphicSpec(
+        kind=str(g.get("kind", "quote")), segment=str(g.get("segment", "")), words=str(g.get("words", "")), text=str(g.get("text", "")),
+        subtext=str(g.get("subtext", "")), seconds=seconds, direction=str(g.get("direction", "")),
+    )
+
+
+def text_key(spec: GraphicSpec) -> tuple:
+    """What a graphic shows, whatever it was asked to look like: an earlier design or clip can stand in for a new one
+    only while it says the same words."""
+    return spec_key(spec)[:5]
+
+
+def earlier_clips(out_dir: Path) -> dict[tuple, EarlierClip]:
+    """The rendered clips graphics.json lists (that are still on disk), by what each shows (text_key), for a revision or
+    re-cut to fall back on when a graphic's new render fails. Read before the run rewrites graphics.json."""
+    data = _read_manifest(out_dir)
+    raw = data.get("canvas")
+    canvas_ = None
+    if isinstance(raw, dict):
+        try:
+            canvas_ = (int(raw["width"]), int(raw["height"]), str(raw["rate"]))
+        except (KeyError, TypeError, ValueError):
+            canvas_ = None
+    found: dict[tuple, EarlierClip] = {}
+    for g in data.get("graphics", []):
+        if not isinstance(g, dict) or not g.get("file") or not g.get("text") or g.get("placed") is False:
+            continue
+        path = out_dir / "graphics" / Path(str(g["file"])).name
+        frames = g.get("frames")
+        try:
+            usable = path.is_file() and isinstance(frames, int) and frames > 0
+        except OSError:
+            usable = False
+        if usable:
+            notes = [str(n) for n in g.get("notes") or []] if isinstance(g.get("notes"), list) else []
+            found.setdefault(text_key(_entry_spec(g)), EarlierClip(path, frames, str(g.get("rendered") or ""), canvas_, notes))
+    return found
+
+
+def _clip_fits(old: EarlierClip, g: PlacedGraphic, tl: Timeline) -> bool:
+    """Is the earlier clip the right size, frame rate and length for this graphic's place in the cut?"""
+    if old.frames != g.frames:
+        return False
+    fd = tl.frame_duration
+    if old.canvas is not None:
+        return old.canvas == (tl.width, tl.height, f"{fd.denominator}/{fd.numerator}")
+    from .media import probe  # a graphics.json from before the canvas was saved: ask the clip
+
+    try:
+        info = probe(old.path)
+    except Exception:  # noqa: BLE001 - an unreadable clip stands in for nothing
+        return False
+    return (info.width, info.height) == (tl.width, tl.height) and info.frame_duration == fd
 
 
 def saved_designs(out_dir: Path) -> tuple[list[GraphicSpec], dict[int, str], str]:
@@ -1643,6 +1753,7 @@ def make(
     saved_html: dict[int, str] | None = None, keep_out: dict[str, float] | None = None, logo: str | None = None, look=(),
     house_style: str = "", planned: list[GraphicSpec] | None = None, spellings: list[dict] | None = None,
     references: ReferenceSet | None = None, editor_notes: str | list[str] = "",
+    pending: dict[int, dict] | None = None, earlier: dict[tuple, EarlierClip] | None = None,
 ) -> tuple[list[Clip], list[PlacedGraphic], list[str]]:
     """Place, design (unless saved designs are given), render and attach. Returns (clips, placed, warnings).
 
@@ -1654,14 +1765,18 @@ def make(
     doesn't place stay in graphics.json, with their designs, for the next re-cut to place again.
     `spellings`: the plan's name fixes, for the words the designer is shown.
     `references`, `editor_notes`: the editor's reference images and a revision's notes, for the designer only (see design).
+    `pending`: graphics that stand on the earlier version's design while the new one is still to be made (write_manifest).
+    `earlier`: the clips the version before had (earlier_clips): a graphic whose render doesn't come back keeps the one it had
+    for the same words, if it fits this cut, and is marked pending "render"; any other is left out, with a warning.
     """
     from .presets import design_style, inline_logo
 
     warnings: list[str] = []
     placed = place(specs, tl, analysis, warnings)
     folder = out_dir / "graphics"
+    pending = dict(pending or {})
     if not placed:
-        waiting = keep_left_out(planned if planned is not None else specs, [], saved_html, out_dir) if saved_html is not None else []
+        waiting = keep_left_out(planned if planned is not None else specs, [], saved_html, out_dir, pending) if saved_html is not None else []
         if waiting:
             write_manifest(out_dir, [], {}, {}, tl, style, house_style=house_style, left_out=waiting)
             _put_aside_old_designs(folder, [], {}, waiting)
@@ -1701,16 +1816,18 @@ def make(
     # asking the model again.
     previous = _read_manifest(out_dir)
     save_designs(placed, html, folder)
-    waiting = keep_left_out(planned if planned is not None else specs, placed, saved_html, out_dir) if saved_html is not None else []
+    waiting = keep_left_out(planned if planned is not None else specs, placed, saved_html, out_dir, pending) if saved_html is not None else []
     kept = unchanged(placed, html, folder, tl, previous)
     notes: dict[str, list[str]] = _old_notes(previous, placed, html, tl, kept)
-    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
+    write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting, pending=pending)
     files: dict[str, Path] = {}
 
     def record(done: dict[str, Path]) -> None:
-        write_manifest(out_dir, placed, {**files, **done}, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
+        write_manifest(out_dir, placed, {**files, **done}, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting, pending=pending)
 
     files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
+    if earlier:  # a graphic that didn't render keeps the clip it had for the same words (if it fits), not nothing
+        _keep_earlier_clips(placed, html, files, earlier, tl, notes, pending, warnings, out_dir)
     # Made way for a graphic that didn't render: render it again on its words and at its full length (the old clip stays if that fails).
     back = make_way_back(placed, set(files))
     _gone_unshortened(placed, set(files), warnings)
@@ -1731,7 +1848,7 @@ def make(
                 files[g.id], notes[g.id] = clip, said or []
     warnings += note_warnings(placed, notes)
     clips = attach(tl, placed, files, warnings)
-    write_manifest(out_dir, placed, files, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting)
+    write_manifest(out_dir, placed, files, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting, pending=pending)
     _put_aside_old_designs(folder, placed, html, waiting)
     log(f"{len(clips)} of {len(placed)} graphics on the timeline")
     try:
@@ -1741,6 +1858,32 @@ def make(
     except Exception as e:  # noqa: BLE001 - a preview is a convenience; never lose the cut over it
         warnings.append(f"graphics preview page wasn't written: {_first_line(e)}")
     return clips, placed, warnings
+
+
+def _keep_earlier_clips(
+    placed: list[PlacedGraphic], html: dict[str, str], files: dict[str, Path], earlier: dict[tuple, EarlierClip], tl: Timeline,
+    notes: dict[str, list[str]], pending: dict[int, dict], warnings: list[str], out_dir: Path,
+) -> None:
+    """Graphics with a design that didn't render take the clip the version before had for the same words, when it fits
+    (same size, frame rate and length): they go in `files` and `pending` ("render", unless they already wait for a design),
+    and one warning names them. A graphic with no such clip stays out, as it always did."""
+    kept = []
+    for g in placed:
+        old = earlier.get(text_key(g.spec)) if g.id in html and g.id not in files else None
+        if old is None or not _clip_fits(old, g, tl):
+            continue
+        files[g.id] = old.path
+        notes[g.id] = list(old.notes)
+        mark = pending.get(g.index) or {"stage": PENDING_RENDER, "reason": "its new design didn't render"}
+        pending[g.index] = {**mark, "rendered": old.rendered}
+        kept.append(g.id)
+    if kept:
+        them = "graphics" if len(kept) > 1 else "graphic"
+        warnings.append(
+            f"{them} {', '.join(kept)}: the new {'designs' if len(kept) > 1 else 'design'} didn't render, so {'they keep' if len(kept) > 1 else 'it keeps'} "
+            f"the clip the version before had for the same words. `roughcut render {shlex.quote(str(out_dir))}` renders {'them' if len(kept) > 1 else 'it'} again."
+        )
+        log(f"graphics: {', '.join(kept)} keep the earlier clip (the new render didn't come back)")
 
 
 def _old_notes(manifest: dict, placed: list[PlacedGraphic], html: dict[str, str], tl: Timeline, reused: dict[str, Path]) -> dict[str, list[str]]:

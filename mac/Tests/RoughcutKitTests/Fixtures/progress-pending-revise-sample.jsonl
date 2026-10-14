@@ -1,0 +1,25 @@
+{"event": "log", "message": "=== roughcut revise started (output: /Users/you/Movies/Trip_roughcut)"}
+{"event": "log", "message": "checking fake access (fake-model)"}
+{"event": "stage", "stage": "plan", "message": "Revising the edit with fake-model"}
+{"event": "log", "message": "revising the edit with fake:fake-model: Make the graphics bolder."}
+{"event": "log", "message": "Redesigning the graphics: every graphic is designed again, as asked."}
+{"event": "log", "message": "plan saved: `roughcut render` can finish this cut without calling the model again"}
+{"event": "stage", "stage": "cut", "message": "Cutting (medium)"}
+{"event": "log", "message": "designing 2 graphics in 1 request(s), with a frame of the shot under 2"}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 0, "total": 2}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 2, "total": 2}
+{"event": "log", "message": "designed G01-G02 in 0s"}
+{"event": "log", "message": "designed 2 of 2 graphics in 0s"}
+{"event": "log", "message": "graphics: 0 kept from the previous version, 2 designed again"}
+{"event": "stage", "stage": "graphics", "message": "Re-timing 2 graphics"}
+{"event": "log", "message": "rendering 2 graphic(s) at 1920x1080"}
+{"event": "stage", "stage": "graphics", "message": "Rendering 2 graphics", "current": 1, "total": 2}
+{"event": "log", "message": "G01-stat: the renderer crashed"}
+{"event": "stage", "stage": "graphics", "message": "Rendering 2 graphics", "current": 2, "total": 2}
+{"event": "log", "message": "G02-title-card: the renderer crashed"}
+{"event": "log", "message": "rendered 0 of 2 graphic(s) in 0s"}
+{"event": "log", "message": "graphics: G01, G02 keep the earlier clip (the new render didn't come back)"}
+{"event": "log", "message": "2 of 2 graphics on the timeline"}
+{"event": "log", "message": "graphics preview: /Users/you/Movies/Trip_roughcut/graphics/preview.html"}
+{"event": "stage", "stage": "write", "message": "Writing the Final Cut file"}
+{"event": "done", "result": {"title": "Mountain Day", "out_dir": "/Users/you/Movies/Trip_roughcut", "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml", "report": "/Users/you/Movies/Trip_roughcut/edit_report.md", "captions": "/Users/you/Movies/Trip_roughcut/Trip v2.srt", "rough_seconds": 15.682, "stringout_seconds": null, "edits": 6, "broll": 2, "sections": ["Cold open", "Heading out", "Wrap"], "planned_by": "fake:fake-model", "fell_back": false, "warnings": ["unknown segment 'V09.S001'; skipped", "V01.S005 used twice; kept the first use", "B-roll V01: ignored references not in section 'Heading out': ['V01.S999']", "graphic G01 the renderer crashed", "graphic G02 the renderer crashed", "graphics G01, G02: the new designs didn't render, so they keep the clip the version before had for the same words. `roughcut render /Users/you/Movies/Trip_roughcut` renders them again."], "version": 2, "project": "Trip - Rough Cut v2 (medium, fake-model)", "event": "Trip (2026-08-12)", "graphics": {"planned": 2, "placed": 2, "rendered": 2, "note": "2 graphics keep their earlier clip: the new design didn't render (see Warnings); `roughcut render /Users/you/Movies/Trip_roughcut` renders them again", "pending": 2}, "visual_log": null, "skipped": {"files": [], "plan_refs": 3}, "usage": null, "report_html": "/Users/you/Movies/Trip_roughcut/edit_report.html", "cut": {"style": "medium", "format": null, "keep_fillers": false, "stringout": true, "punch_in": false}, "changes": {"from_version": 1, "items": ["Redesigning the graphics: every graphic is designed again, as asked.", "Graphics: 2 could not be rendered and keep their earlier clip (see Warnings)", "Graphic \"Heading Out\": the new design didn't render, so it keeps its earlier clip", "Graphic \"Weeks\": the new design didn't render, so it keeps its earlier clip"], "unchanged": false}}}

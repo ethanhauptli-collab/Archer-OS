@@ -172,12 +172,101 @@ def test_done_payload_additions_keep_their_shape():
     fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "progress-sample.jsonl"
     r = [json.loads(ln) for ln in fixture.read_text().splitlines() if ln.strip()][-1]["result"]
     assert isinstance(r["version"], int) and r["project"].startswith("Trip - Rough Cut v") and r["event"].startswith("Trip (")
-    assert r["graphics"] is None or set(r["graphics"]) == {"planned", "placed", "rendered", "note"}
+    assert r["graphics"] is None or set(r["graphics"]) - {"pending"} == {"planned", "placed", "rendered", "note"}  # "pending" only when above 0
     assert set(r["visual_log"]) == {"described", "total"}
     assert set(r["skipped"]) == {"files", "plan_refs"}
     assert set(r["usage"]) == {"calls", "dollars", "by_purpose", "calls_by_purpose", "subscription_calls", "unpriced_calls"}
     assert r["cut"] == {"style": "medium", "format": None, "keep_fillers": False, "stringout": True, "punch_in": False}  # CutSettings in the app
     assert r["changes"] is None or set(r["changes"]) == {"from_version", "items", "unchanged"}  # RunChanges in the app: null for a first build
+
+
+def test_swift_fixtures_for_a_stopped_revise_and_for_graphics_that_keep_an_earlier_look_match_the_cli_contract():
+    """progress-stopped-revise-sample.jsonl (an `error` event whose `written` names the partial cut a stopped revise left as the
+    newest version) and progress-pending-revise-sample.jsonl (a `done` event whose `graphics` has a `pending` count and a note) are
+    real `roughcut revise --progress-json` streams, kept for the app to decode: both keys are optional, add-only."""
+    from roughcut.pipeline import Result, result_summary
+
+    folder = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures"
+    stopped = [json.loads(ln) for ln in (folder / "progress-stopped-revise-sample.jsonl").read_text().splitlines() if ln.strip()]
+    assert [e["stage"] for e in stopped if e["event"] == "stage"][0] == "plan" and all(
+        e["stage"] in progress.STAGES for e in stopped if e["event"] == "stage"
+    )
+    error = stopped[-1]
+    assert error["event"] == "error" and set(error) == {"event", "message", "resume", "written"}  # no "kind": a crash, not a cancel or a limit
+    assert error["resume"].startswith("roughcut render ")
+    assert set(error["written"]) == {"version", "fcpxml", "project", "partial"}
+    assert error["written"]["partial"] is True and isinstance(error["written"]["version"], int) and error["written"]["fcpxml"].endswith(".fcpxml")
+
+    pending = [json.loads(ln) for ln in (folder / "progress-pending-revise-sample.jsonl").read_text().splitlines() if ln.strip()]
+    done = pending[-1]
+    assert done["event"] == "done"
+
+    class _TL:
+        seconds = 1.0
+        spine = []
+        connected = []
+        section_starts = []
+
+    class _Plan:
+        title = "t"
+        source = "s"
+
+    assert set(done["result"]) == set(result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None)))
+    row = done["result"]["graphics"]
+    assert set(row) == {"planned", "placed", "rendered", "note", "pending"}
+    assert row["rendered"] == 2 and row["pending"] == 2 and "keep their earlier clip" in row["note"]
+
+
+def test_swift_fixtures_for_a_usage_limit_and_the_saved_results_match_the_cli_contract():
+    """The app reads what a stopped run left in two ways, both optional and add-only: the `error` event's `written`
+    (progress-limit-revise-sample.jsonl: the usage limit after version 2 was written) and the folder's result.json
+    (result-partial-revise-sample.json, a cut written before its graphics; result-pending-revise-sample.json, the finished
+    write of that limit). All three are real `roughcut revise --progress-json` output, decoded by the Swift tests."""
+    from roughcut.pipeline import Result, result_summary
+
+    folder = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures"
+    limit = [json.loads(ln) for ln in (folder / "progress-limit-revise-sample.jsonl").read_text().splitlines() if ln.strip()]
+    stages = [e["stage"] for e in limit if e["event"] == "stage"]
+    assert stages and all(s in progress.STAGES for s in stages) and stages == sorted(stages, key=progress.STAGES.index)
+    error = limit[-1]
+    assert error["event"] == "error" and error["kind"] == "usage_limit" and "resume" not in error  # the cut is written: plain render would only repeat it
+    assert set(error) == {"event", "message", "written", "kind"}
+    assert set(error["written"]) == {"version", "fcpxml", "project", "partial", "design_missing"}
+    assert error["written"]["partial"] is False and error["written"]["design_missing"] is True and error["written"]["version"] == 2
+    assert "--design-missing" in error["message"]
+
+    class _TL:
+        seconds = 1.0
+        spine = []
+        connected = []
+        section_starts = []
+
+    class _Plan:
+        title = "t"
+        source = "s"
+
+    live = set(result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None)))
+    partial = json.loads((folder / "result-partial-revise-sample.json").read_text())
+    assert set(partial) == live | {"partial"} and partial["partial"] is True  # `partial` is in result.json only, never in a done event
+    assert partial["version"] == 2 and partial["fcpxml"] == error["written"]["fcpxml"]
+    assert set(partial["graphics"]) == {"planned", "placed", "rendered", "note"}
+    assert partial["graphics"]["planned"] > 0 and partial["graphics"]["rendered"] == 0  # nothing made yet: the app offers Finish graphics
+    assert partial["graphics"]["note"] == "not made yet: this cut was written before its graphics"
+    assert partial["changes"]["items"] == ["Graphics: none in this cut yet; it was written before they were made."]  # not what became of each
+
+    pending = json.loads((folder / "result-pending-revise-sample.json").read_text())
+    assert set(pending) == live and "partial" not in pending
+    assert set(pending["graphics"]) == {"planned", "placed", "rendered", "note", "pending"} and pending["graphics"]["pending"] == 2
+    assert pending["changes"]["items"][0].startswith("Redesigning the graphics: no new design came back")  # not "designed again"
+    assert pending["fcpxml"] == error["written"]["fcpxml"] and pending["version"] == error["written"]["version"]
+
+
+def test_the_apps_keep_both_sentence_is_the_one_the_paper_edit_and_the_terminal_say():
+    """RunResult.sameNamesHint (the result screen's import hint for a version after the first) repeats report.SAME_NAMES."""
+    from roughcut.report import SAME_NAMES
+
+    swift = (Path(__file__).parents[1] / "mac" / "Sources" / "RoughcutKit" / "StoppedRun.swift").read_text()
+    assert f'sameNamesHint = "{SAME_NAMES}"' in swift
 
 
 def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):

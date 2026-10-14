@@ -1,0 +1,14 @@
+{"event": "log", "message": "=== roughcut revise started (output: /Users/you/Movies/Trip_roughcut)"}
+{"event": "log", "message": "checking fake access (fake-model)"}
+{"event": "stage", "stage": "plan", "message": "Revising the edit with fake-model"}
+{"event": "log", "message": "revising the edit with fake:fake-model: Make the graphics bolder."}
+{"event": "log", "message": "Redesigning the graphics: every graphic is designed again, as asked."}
+{"event": "log", "message": "plan saved: `roughcut render` can finish this cut without calling the model again"}
+{"event": "stage", "stage": "cut", "message": "Cutting (medium)"}
+{"event": "log", "message": "designing 2 graphics in 1 request(s), with a frame of the shot under 2"}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 0, "total": 2}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 2, "total": 2}
+{"event": "log", "message": "designed G01-G02 in 0s"}
+{"event": "log", "message": "designed 2 of 2 graphics in 0s"}
+{"event": "log", "message": "graphics: 0 kept from the previous version, 2 designed again"}
+{"event": "error", "message": "the renderer crashed", "resume": "roughcut render /Users/you/Movies/Trip_roughcut", "written": {"version": 2, "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml", "project": "Trip - Rough Cut v2 (medium, fake-model)", "partial": true}}

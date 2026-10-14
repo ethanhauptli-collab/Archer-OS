@@ -1,0 +1,59 @@
+{
+ "title": "Mountain Day",
+ "out_dir": "/Users/you/Movies/Trip_roughcut",
+ "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml",
+ "report": "/Users/you/Movies/Trip_roughcut/edit_report.md",
+ "captions": "/Users/you/Movies/Trip_roughcut/Trip v2.srt",
+ "rough_seconds": 15.682,
+ "stringout_seconds": null,
+ "edits": 6,
+ "broll": 2,
+ "sections": [
+  "Cold open",
+  "Heading out",
+  "Wrap"
+ ],
+ "planned_by": "fake:fake-model",
+ "fell_back": false,
+ "warnings": [
+  "unknown segment 'V09.S001'; skipped",
+  "V01.S005 used twice; kept the first use",
+  "B-roll V01: ignored references not in section 'Heading out': ['V01.S999']",
+  "graphics design failed for G01, G02: You've hit your usage limit.",
+  "The new look for the graphics wasn't designed because the usage limit was reached: 2 graphics in this version keep their earlier look, with their earlier clip. After the reset, `roughcut render /Users/you/Movies/Trip_roughcut --design-missing` designs them (each once, in the look the notes asked for, with the reference images) and makes a new version; the cut stays as it is."
+ ],
+ "version": 2,
+ "project": "Trip - Rough Cut v2 (medium, fake-model)",
+ "event": "Trip (2026-08-12)",
+ "graphics": {
+  "planned": 2,
+  "placed": 2,
+  "rendered": 2,
+  "note": "2 graphics keep their earlier look: the new look wasn't designed because the usage limit was reached; after the reset run `roughcut render /Users/you/Movies/Trip_roughcut --design-missing`",
+  "pending": 2
+ },
+ "visual_log": null,
+ "skipped": {
+  "files": [],
+  "plan_refs": 3
+ },
+ "usage": null,
+ "report_html": "/Users/you/Movies/Trip_roughcut/edit_report.html",
+ "cut": {
+  "style": "medium",
+  "format": null,
+  "keep_fillers": false,
+  "stringout": true,
+  "punch_in": false
+ },
+ "changes": {
+  "from_version": 1,
+  "items": [
+   "Redesigning the graphics: no new design came back, so they keep their earlier look (see Warnings).",
+   "Graphics: 2 got no new design and keep their earlier one (see Warnings)",
+   "Graphic \"Heading Out\": no new design came back, so it keeps its earlier one",
+   "Graphic \"Weeks\": no new design came back, so it keeps its earlier one"
+  ],
+  "unchanged": false
+ }
+}

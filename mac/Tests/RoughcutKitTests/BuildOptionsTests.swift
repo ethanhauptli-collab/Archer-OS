@@ -218,6 +218,36 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(RecutOptions.samePunchInTitle(nil), "Same as this cut")
     }
 
+    func testFinishGraphicsIsARenderThatDesignsWhatIsMissing() throws {
+        let folder = URL(fileURLWithPath: "/tmp/Promo_roughcut")
+        let base = ["render", "/tmp/Promo_roughcut", "--progress-json"]
+        // Without the flag nothing changes: a re-cut and Finish without AI send what they always did.
+        XCTAssertFalse(RecutOptions(outputFolder: folder).designMissing)
+        XCTAssertEqual(RecutOptions(outputFolder: folder).arguments(), base)
+        XCTAssertEqual(RecutOptions(outputFolder: folder, designMissing: false).arguments(), base)
+        XCTAssertFalse(RecutOptions(outputFolder: folder, style: .tight).arguments().contains("--design-missing"))
+        // With it, only the folder and the flag: every cut setting comes from the saved run.
+        XCTAssertEqual(RecutOptions(outputFolder: folder, designMissing: true).arguments(), base + ["--design-missing"])
+        XCTAssertEqual(RecutOptions(outputFolder: folder, style: .tight, punchIn: true, designMissing: true).arguments(), base + ["--style", "tight", "--punch-in", "--design-missing"])
+        // Finish graphics of a result: its own folder, the flag, and nothing else.
+        let line = #"{"event":"done","result":{"title":"T","out_dir":"/tmp/Promo_roughcut","fcpxml":"/tmp/Promo_roughcut/T v2.fcpxml","report":"/tmp/Promo_roughcut/edit_report.md","rough_seconds":20.5,"stringout_seconds":null,"edits":4,"broll":1,"sections":["A"],"planned_by":"anthropic:claude-opus-5-5","fell_back":false,"warnings":[],"version":2}}"#
+        let result = try XCTUnwrap(JSONLines.event(from: line)?.result)
+        XCTAssertEqual(RecutOptions.finishingGraphics(of: result).arguments(), base + ["--design-missing"])
+
+        // A revision writes only the Rough Cut project while its saved Stringout setting stays on: the version that finishes
+        // its graphics writes none either, so the event's project list is the same from one version to the next.
+        var revision = result
+        revision.cut = CutSettings(style: "medium", stringout: true)
+        XCTAssertNil(revision.stringoutSeconds)
+        XCTAssertEqual(RecutOptions.finishingGraphics(of: revision).arguments(), base + ["--no-stringout", "--design-missing"])
+        // A cut that has a Stringout project keeps writing it; so does one whose setting is off or unknown.
+        var built = revision
+        built.stringoutSeconds = 12.5
+        XCTAssertEqual(RecutOptions.finishingGraphics(of: built).arguments(), base + ["--design-missing"])
+        revision.cut = CutSettings(style: "medium", stringout: false)
+        XCTAssertEqual(RecutOptions.finishingGraphics(of: revision).arguments(), base + ["--design-missing"])
+    }
+
     func testRecutPickerStartsFromTheCut() {
         let vertical = CutSettings(style: "tight", format: "vertical", keepFillers: true, stringout: false)
         XCTAssertEqual(RecutOptions.sameFormatTitle(vertical), "Same as this cut (Vertical 9:16)")

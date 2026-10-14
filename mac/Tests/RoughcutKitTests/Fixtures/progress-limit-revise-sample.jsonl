@@ -1,0 +1,18 @@
+{"event": "log", "message": "=== roughcut revise started (output: /Users/you/Movies/Trip_roughcut)"}
+{"event": "log", "message": "checking fake access (fake-model)"}
+{"event": "stage", "stage": "plan", "message": "Revising the edit with fake-model"}
+{"event": "log", "message": "revising the edit with fake:fake-model: Make the graphics bolder."}
+{"event": "log", "message": "Redesigning the graphics: every graphic is designed again, as asked."}
+{"event": "log", "message": "plan saved: `roughcut render` can finish this cut without calling the model again"}
+{"event": "stage", "stage": "cut", "message": "Cutting (medium)"}
+{"event": "log", "message": "designing 2 graphics in 1 request(s), with a frame of the shot under 2"}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 0, "total": 2}
+{"event": "stage", "stage": "graphics", "message": "Designing 2 graphics", "current": 2, "total": 2}
+{"event": "log", "message": "designing G01-G02 failed after 0s: You've hit your usage limit."}
+{"event": "log", "message": "designed 0 of 2 graphics in 0s"}
+{"event": "log", "message": "graphics: 0 kept from the previous version, 0 designed again"}
+{"event": "stage", "stage": "graphics", "message": "Re-timing 2 graphics"}
+{"event": "log", "message": "2 of 2 graphics on the timeline"}
+{"event": "log", "message": "graphics preview: /Users/you/Movies/Trip_roughcut/graphics/preview.html"}
+{"event": "stage", "stage": "write", "message": "Writing the Final Cut file"}
+{"event": "error", "message": "You've hit your usage limit. Trip v2.fcpxml is written with 2 motion graphics, 2 of them in their earlier look because the new look wasn't designed; the plan and every design that came back are saved. After the reset, `roughcut render /Users/you/Movies/Trip_roughcut --design-missing` designs the new look without re-planning the cut.", "written": {"version": 2, "fcpxml": "/Users/you/Movies/Trip_roughcut/Trip v2.fcpxml", "project": "Trip - Rough Cut v2 (medium, fake-model)", "partial": false, "design_missing": true}, "kind": "usage_limit"}

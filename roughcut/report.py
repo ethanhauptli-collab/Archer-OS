@@ -21,7 +21,13 @@ def _tc(frames: int, tl: Timeline) -> str:
 HEADLINE_WARNINGS = (
     "The brief asks for graphics", "Your notes ask for", "The output folder is inside the Venture Studio library",
     "The reference image", "Only 8 reference images", "Reference images are only used",  # a picture left out is easy to miss
+    "This cut is partial",  # written before its motion graphics were made: a run that finished replaces it
+    "No graphics in this",  # graphics are on and this version has none (the revision returned none, or their lines are cut)
+    "The new look for the graphics",  # graphics keep an earlier version's look because the new one wasn't designed
 )
+
+# Importing a version after the first into the event that already holds the one before it (same event name on the same day).
+SAME_NAMES = "If Final Cut asks about items with the same names, choose Keep Both: each version is its own project."
 
 
 def collapse_warnings(warnings: list[str]) -> list[str]:
@@ -318,8 +324,10 @@ def build_report(
     graphics_refs: list[str] | None = None,
     sfx: dict | None = None,
     studio: list[str] | None = None,
+    version: int | None = None,
 ) -> str:
-    """`sfx`: {"pool": the sound-effect pool, "amount": none/soft/full, "off": why they're off, or None}, when the run has one."""
+    """`sfx`: {"pool": the sound-effect pool, "amount": none/soft/full, "off": why they're off, or None}, when the run has one.
+    `version`: this cut's number in its folder; a version after the first says what to do when Final Cut asks about same-named items."""
     raw = sum(float(c.media.duration) for c in analysis.clips if c.media.kind != "image" and c.role not in ("graphic", "sfx"))
     speech = sum(c.speech_seconds for c in analysis.clips if c.has_transcript)
     L = [f"# {plan.title}", ""]
@@ -344,6 +352,8 @@ def build_report(
     if talk > 0:
         L.append(f"- **Dead air removed:** {seconds_to_clock(max(0.0, talk - kept))} of {seconds_to_clock(talk)} talking footage ({max(0.0, 1 - kept / talk):.0%})")
     L.append(f"- **Planned by:** {plan.source}")
+    if version and version > 1:
+        L.append(f"- **Importing:** {SAME_NAMES}")
     if usage:
         calls = [c for u in usage for c in u.calls]
         if calls:

@@ -140,6 +140,137 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(RunResult.self, from: Data(older.utf8)).changes)
     }
 
+    // MARK: Runs that stopped, and graphics that wait
+
+    /// Fixtures/progress-stopped-revise-sample.jsonl is real `roughcut revise --progress-json` output: the renderer crashed
+    /// after the cut without graphics was written. tests/test_progress.py checks it still matches the CLI.
+    func testAStoppedRevisionsErrorEventNamesTheCutItLeft() throws {
+        let lines = try FixtureFiles.lines("progress-stopped-revise-sample")
+        let events = lines.compactMap(JSONLines.event(from:))
+        XCTAssertEqual(events.count, lines.count, "every line should decode")
+        let error = try XCTUnwrap(events.last)
+        XCTAssertEqual(error.event, "error")
+        XCTAssertNil(error.kind)  // a crash: neither a usage limit nor a cancel
+        XCTAssertEqual(error.resume, "roughcut render /Users/you/Movies/Trip_roughcut")
+        let written = try XCTUnwrap(error.written)
+        XCTAssertEqual(written.version, 2)
+        XCTAssertEqual(written.partial, true)
+        XCTAssertNil(written.designMissing)
+        XCTAssertTrue(written.fcpxml?.hasSuffix("Trip v2.fcpxml") ?? false)
+        XCTAssertEqual(written.project, "Trip - Rough Cut v2 (medium, fake-model)")
+        XCTAssertEqual(written.folder?.path, "/Users/you/Movies/Trip_roughcut")
+        XCTAssertEqual(ResumeCommand.outputFolder(from: error.resume)?.path, written.folder?.path)
+    }
+
+    /// Fixtures/progress-limit-revise-sample.jsonl: the usage limit hit while the graphics were designed, after version 2
+    /// was written with the graphics that were done.
+    func testAUsageLimitAfterTheCutWasWrittenNamesTheVersion() throws {
+        let lines = try FixtureFiles.lines("progress-limit-revise-sample")
+        let events = lines.compactMap(JSONLines.event(from:))
+        XCTAssertEqual(events.count, lines.count, "every line should decode")
+        let stages = events.compactMap(\.stageValue)
+        XCTAssertEqual(stages, stages.sorted { $0.order < $1.order })  // only ever forward
+        let error = try XCTUnwrap(events.last)
+        XCTAssertEqual(error.event, "error")
+        XCTAssertEqual(error.kind, "usage_limit")
+        XCTAssertNil(error.resume)  // the cut is written: plain `render` would only make it again
+        let written = try XCTUnwrap(error.written)
+        XCTAssertEqual(written.version, 2)
+        XCTAssertEqual(written.partial, false)
+        XCTAssertEqual(written.designMissing, true)
+        XCTAssertEqual(written.folder?.path, "/Users/you/Movies/Trip_roughcut")
+        XCTAssertTrue(error.message?.contains("--design-missing") ?? false)
+    }
+
+    func testAnErrorThatWroteNothingHasNoWrittenCut() throws {
+        // Older CLIs never send the key, and a stop before anything was written doesn't either.
+        let plain = try XCTUnwrap(JSONLines.event(from: #"{"event":"error","message":"No media files found."}"#))
+        XCTAssertNil(plain.written)
+        let limit = try XCTUnwrap(JSONLines.event(from: #"{"event":"error","message":"limit","resume":"roughcut render /o","kind":"usage_limit"}"#))
+        XCTAssertNil(limit.written)
+        XCTAssertEqual(limit.kind, "usage_limit")
+        // Keys the app doesn't know yet are ignored; the ones it does are all optional.
+        let sparse = try XCTUnwrap(JSONLines.event(from: #"{"event":"error","message":"x","written":{"version":3,"future":"key"}}"#)?.written)
+        XCTAssertEqual(sparse, WrittenCut(version: 3))
+        XCTAssertNil(sparse.folder)
+    }
+
+    /// Fixtures/progress-pending-revise-sample.jsonl: a done event whose graphics stand on an earlier version's clips.
+    func testGraphicsThatKeepAnEarlierClipDecode() throws {
+        let lines = try FixtureFiles.lines("progress-pending-revise-sample")
+        let events = lines.compactMap(JSONLines.event(from:))
+        XCTAssertEqual(events.count, lines.count, "every line should decode")
+        let result = try XCTUnwrap(events.last?.result)
+        XCTAssertEqual(result.graphics?.planned, 2)
+        XCTAssertEqual(result.graphics?.placed, 2)
+        XCTAssertEqual(result.graphics?.rendered, 2)
+        XCTAssertEqual(result.graphics?.pending, 2)
+        XCTAssertTrue(result.graphics?.note?.contains("earlier clip") ?? false)
+        XCTAssertNil(result.partial)  // a done event never carries it
+        XCTAssertTrue(result.canFinishGraphics)
+    }
+
+    /// Fixtures/result-partial-revise-sample.json is the `result.json` that run left: the cut written before its graphics.
+    func testASavedPartialResultDecodesWithTheNewKeys() throws {
+        let partial = try XCTUnwrap(SavedResult.decode(FixtureFiles.data("result-partial-revise-sample", "json")))
+        XCTAssertEqual(partial.partial, true)
+        XCTAssertEqual(partial.version, 2)
+        XCTAssertEqual(partial.title, "Mountain Day")
+        XCTAssertTrue(partial.fcpxml.hasSuffix("Trip v2.fcpxml"))
+        XCTAssertEqual(partial.graphics, GraphicsSummary(planned: 2, placed: 0, rendered: 0, note: "not made yet: this cut was written before its graphics", pending: nil))
+        XCTAssertEqual(partial.changes?.fromVersion, 1)
+        // The list of a cut written before its graphics says none is in it yet, not what became of each (nothing has).
+        XCTAssertEqual(partial.changes?.items, ["Graphics: none in this cut yet; it was written before they were made."])
+        XCTAssertTrue(partial.warnings.contains { $0.hasPrefix("This cut is partial") })
+        XCTAssertTrue(partial.canFinishGraphics)
+        // Recent runs keep it and read it back, the new key included.
+        let kept = try JSONEncoder().encode(partial)
+        XCTAssertEqual(try JSONDecoder().decode(RunResult.self, from: kept), partial)
+
+        // The finished write of a version that stopped for the usage limit has `pending` and no `partial`.
+        let limited = try XCTUnwrap(SavedResult.decode(FixtureFiles.data("result-pending-revise-sample", "json")))
+        XCTAssertNil(limited.partial)
+        XCTAssertEqual(limited.graphics?.pending, 2)
+        XCTAssertEqual(limited.version, 2)
+        // ...and does not say the redesign happened: no new design came back.
+        XCTAssertEqual(limited.changes?.items.first, "Redesigning the graphics: no new design came back, so they keep their earlier look (see Warnings).")
+    }
+
+    func testASavedResultWithoutTheNewKeysDecodes() throws {
+        // A result.json from before `partial` and `pending` existed.
+        let old = #"{"title":"T","out_dir":"/o","fcpxml":"/o/T v1.fcpxml","report":"/o/edit_report.md","rough_seconds":20.5,"stringout_seconds":null,"edits":4,"broll":1,"sections":["A"],"planned_by":"fake:x","fell_back":false,"warnings":[],"version":1,"graphics":{"planned":2,"placed":2,"rendered":2,"note":null}}"#
+        let result = try XCTUnwrap(SavedResult.decode(Data(old.utf8)))
+        XCTAssertNil(result.partial)
+        XCTAssertNil(result.graphics?.pending)
+        XCTAssertEqual(result.graphics, GraphicsSummary(planned: 2, placed: 2, rendered: 2, note: nil))
+        XCTAssertFalse(result.canFinishGraphics)
+        // A build with graphics off has none of it; its real done event decodes the same way.
+        let events = try FixtureFiles.lines("progress-sample").compactMap(JSONLines.event(from:))
+        let build = try XCTUnwrap(events.last?.result)
+        XCTAssertNil(build.graphics)
+        XCTAssertNil(build.partial)
+        XCTAssertFalse(build.canFinishGraphics)
+        // Something that isn't a result is none.
+        XCTAssertNil(SavedResult.decode(Data("not json".utf8)))
+        XCTAssertNil(SavedResult.decode(Data(#"{"version":2}"#.utf8)))
+    }
+
+    func testTheSavedResultIsReadFromTheOutputFolder() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("roughcut-saved-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        XCTAssertNil(SavedResult.read(in: folder))  // nothing written there
+        let file = folder.appendingPathComponent(SavedResult.fileName)
+        XCTAssertEqual(SavedResult.fileName, "result.json")
+        try "half a file {".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertNil(SavedResult.read(in: folder))  // unreadable is as good as missing
+        try FixtureFiles.data("result-partial-revise-sample", "json").write(to: file)
+        let read = try XCTUnwrap(SavedResult.read(in: folder))
+        XCTAssertEqual(read.version, 2)
+        XCTAssertEqual(read.partial, true)
+        XCTAssertNil(SavedResult.read(in: folder.appendingPathComponent("missing", isDirectory: true)))
+    }
+
     func testUnknownStageStillDecodes() throws {
         let event = try XCTUnwrap(JSONLines.event(from: #"{"event":"stage","stage":"future-stage","message":"x"}"#))
         XCTAssertNil(event.stageValue)

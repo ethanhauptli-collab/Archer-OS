@@ -11,7 +11,11 @@ history folder goes), so a cut already imported into Final Cut never loses
 media underneath it.
 
 Nothing is moved when a run starts. A run that stops early leaves the
-previous version (and `roughcut render`) working.
+previous version (and `roughcut render`) working. A version with graphics is
+written twice: first without them (an interim cut, `partial` in versions.json
+and result.json), then finished. Only the finished write calls `finish`, which
+takes the earlier cuts off the top level: a run that stops in between leaves
+the cut before it where it was, beside the partial one.
 
 `versions.json` lists the versions. A folder written before versions existed
 has none; its cut counts as version 1.
@@ -197,7 +201,7 @@ def record(out_dir: Path, entry: dict) -> None:
 
 
 def finish(out_dir: Path, n: int, *, prune: bool = True) -> None:
-    """After version n is written: take earlier cuts off the top level, then trim history."""
+    """After version n is written (its final write, never an interim one): take earlier cuts off the top level, then trim history."""
     found = entries(out_dir)
     keep_top = next((v.get("fcpxml") for v in found if v["n"] == n), None)
     keep_subs = next((v.get("captions") for v in found if v["n"] == n), None)

@@ -34,13 +34,17 @@ final class AppModel {
     // Run state
     private(set) var phase: Phase = .idle
     private(set) var runKind: RunKind = .build
-    var isRecut: Bool { runKind == .recut }
     /// After a failed run whose plan was saved: the folder `roughcut render` can finish without AI.
     private(set) var resumeFolder: URL?
     /// After a failed run: "usage_limit" when a Claude plan or API credit ran out.
     private(set) var failureKind: String?
     /// Why the last re-cut or revision of the cut on screen stopped (shown above it).
     private(set) var runProblem: String?
+    /// What to do about it, under the banner (Finish graphics after a run that left a version without all its graphics).
+    private(set) var runAdvice: String?
+    /// The last Finish graphics run ended on a version that is no further on (the model was busy, a render failed again):
+    /// the button then says "Try again" (see `RunResult.finishGraphicsMadeNothing`).
+    private(set) var finishGraphicsTriedInVain = false
     private(set) var stageStatus: [Stage: StageStatus] = [:]
     private(set) var activeStage: Stage?
     private(set) var stageDetail = ""
@@ -88,8 +92,17 @@ final class AppModel {
     @ObservationIgnored private var lastResult: RunResult?
     @ObservationIgnored private var lastResume: String?
     @ObservationIgnored private var lastKind: String?
+    /// The `error` event's `written`: the version a stopped run left behind.
+    @ObservationIgnored private var lastWritten: WrittenCut?
     /// The cut a re-cut or revision started from: where it goes back to if it stops.
     @ObservationIgnored private var runSource: RunResult?
+    /// The version in the folder's result.json when that run began: a run is blamed only for a version newer than it.
+    @ObservationIgnored private var runBaseline: Int?
+    /// A revision that stopped after writing its version: the Revise box still holds its notes, which that version already
+    /// has, so finishing the version (Finish graphics, Finish without AI) clears the box, as a finished revision does.
+    @ObservationIgnored private var stoppedRevision = StoppedRevision()
+    /// This run finishes the revision that stopped (see `stoppedRevision`).
+    @ObservationIgnored private var runFinishesRevision = false
     /// The revision's notes, written for `--notes-file`; deleted when the run ends.
     @ObservationIgnored private var notesFile: URL?
     /// The output folder the Revise box's notes are for.
@@ -104,7 +117,7 @@ final class AppModel {
     var visibleStages: [Stage] {
         switch runKind {
         case .build: return Stage.allCases
-        case .recut: return [.cut, .graphics, .write]
+        case .recut, .finishGraphics: return [.cut, .graphics, .write]
         case .revise: return [.plan, .cut, .graphics, .write]
         }
     }
@@ -208,6 +221,17 @@ final class AppModel {
         run(cli: cli, arguments: recut.arguments(), kind: .recut, from: result)
     }
 
+    /// Make the graphics a cut lacks (`roughcut render <folder> --design-missing`): the ones with no design yet or still in an
+    /// earlier look are designed with the model that planned the cut, every graphic is rendered, and the result is a new
+    /// version. The cut isn't planned again. Stages, Cancel, errors and the result are those of a re-cut.
+    func finishGraphics(_ result: RunResult) {
+        guard result.canFinishGraphics, let cli = resolveCLI() else { return }
+        run(
+            cli: cli, arguments: RecutOptions.finishingGraphics(of: result).arguments(), kind: .finishGraphics, from: result,
+            finishesRevision: stoppedRevision.isFinished(by: result)
+        )
+    }
+
     /// Finish a stopped run from its saved plan with the run's own settings and no model call
     /// (`roughcut render <folder>`, as the CLI suggests).
     func finishWithoutAI() {
@@ -216,7 +240,10 @@ final class AppModel {
         if case .finished(let result) = phase {
             shown = result  // a stopped re-cut or revision: come back to this cut if finishing stops too
         }
-        run(cli: cli, arguments: RecutOptions(outputFolder: folder).arguments(), kind: .recut, from: shown)
+        run(
+            cli: cli, arguments: RecutOptions(outputFolder: folder).arguments(), kind: .recut, from: shown,
+            finishesRevision: stoppedRevision.isFinished(by: shown)
+        )
     }
 
     /// Re-plan the cut from the Revise box's notes as a new version (`roughcut revise`).
@@ -236,6 +263,7 @@ final class AppModel {
             return
         }
         notesFile = file
+        stoppedRevision.clear()  // these notes are the revision now; an earlier one that stopped is not what the box holds
         let provider = ReviseOptions.planner(reviseProvider, form: options, doctor: doctor)
         let revise = ReviseOptions.revising(
             result, notesFile: file, targetLength: reviseTarget, provider: provider, form: options,
@@ -253,11 +281,13 @@ final class AppModel {
     func startOver() {
         guard !isRunning else { return }
         clearProblem()
+        finishGraphicsTriedInVain = false
         phase = .idle
     }
 
     private func clearProblem() {
         runProblem = nil
+        runAdvice = nil
         resumeFolder = nil
         failureKind = nil
     }
@@ -274,12 +304,17 @@ final class AppModel {
     }
 
     /// `source`: the cut a re-cut or revision starts from (it comes back to it if the run stops).
-    private func run(cli: URL, arguments: [String], kind: RunKind, from source: RunResult? = nil) {
+    /// `finishesRevision`: it completes a revision that stopped after writing its version.
+    private func run(cli: URL, arguments: [String], kind: RunKind, from source: RunResult? = nil, finishesRevision: Bool = false) {
         runKind = kind
         runSource = source
+        runBaseline = nil
+        runFinishesRevision = finishesRevision
+        finishGraphicsTriedInVain = false
         clearProblem()
         lastResume = nil
         lastKind = nil
+        lastWritten = nil
         let recut = kind != .build
         stageStatus = [:]
         activeStage = nil
@@ -304,14 +339,23 @@ final class AppModel {
         )
         self.process = process
         Task {
+            // Before the run changes anything: which version the folder holds, so a stop is not blamed for a version it did not
+            // write (read off the main thread and given up on after a few seconds, as a stalled share would never answer).
+            if let source {
+                self.runBaseline = (await SavedResult.read(in: source.outDirURL, timeout: SavedResult.readSeconds))?.version
+            }
+            if self.cancelRequested {  // Cancel came before the command started
+                await self.handle(.exited(status: 15, signaled: true))
+                return
+            }
             // Ignore stragglers from a previous run that is still shutting down.
             for await output in process.run() where self.process === process {
-                self.handle(output)
+                await self.handle(output)
             }
         }
     }
 
-    private func handle(_ output: RunOutput) {
+    private func handle(_ output: RunOutput) async {
         switch output {
         case .event(let event):
             apply(event)
@@ -334,26 +378,54 @@ final class AppModel {
                 }
                 let tail = log.suffix(6).joined(separator: "\n")
                 let error = lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)"
-                end(RunEnding.after(runKind, from: runSource, result: lastResult, cancelled: cancelRequested, error: error))
+                // The newest version in the folder (read off the main thread, and given up on after a few seconds: the share the
+                // folder is on is often why the run stopped).
+                var saved: RunResult?
+                if lastResult == nil {
+                    saved = await savedResult()
+                }
+                end(RunEnding.after(
+                    runKind, from: runSource, result: lastResult, cancelled: cancelRequested, error: error,
+                    saved: saved, written: lastWritten, baseline: runBaseline, usageLimit: failureKind == "usage_limit"
+                ))
             }
             runEnded()
         }
     }
 
-    /// A failed or cancelled re-cut or revision goes back to its cut (notes kept); a build to the form.
+    /// The newest version in the output folder (its `result.json`, which the CLI keeps with each version), read after a run
+    /// stopped: a revision that stopped while its graphics were made leaves a newer version than the cut it started from.
+    private func savedResult() async -> RunResult? {
+        guard let folder = runSource?.outDirURL ?? lastWritten?.folder else { return nil }
+        return await SavedResult.read(in: folder, timeout: SavedResult.readSeconds)
+    }
+
+    /// A failed or cancelled re-cut or revision goes back to its cut (notes kept), or, when it wrote a newer version first,
+    /// to that version, saying what it lacks; a build to the form.
     private func end(_ ending: RunEnding) {
         switch ending {
         case .finished(let result):
-            if runKind == .revise {
+            if runKind == .revise || runFinishesRevision {
                 reviseNotes = ""  // they're in this version now (and in its paper edit)
                 reviseTarget = ""
                 reviseReferences = []  // the CLI stored them with this version
                 reviseRedesign.reset()
+                stoppedRevision.clear()
             }
+            finishGraphicsTriedInVain = runKind == .finishGraphics && result.finishGraphicsMadeNothing
             show(result)
         case .returned(let source, let problem):
             runProblem = problem
+            runAdvice = runKind.stoppedAdvice(usageLimit: failureKind == "usage_limit", newest: nil)
             show(source)
+        case .wroteAndStopped(let newest, let problem):
+            runProblem = problem
+            runAdvice = runKind.stoppedAdvice(usageLimit: failureKind == "usage_limit", newest: newest)
+            remember(newest)  // it has a Final Cut file of its own now: the form's recent list can open it
+            show(newest)
+            if runKind == .revise {
+                stoppedRevision.remember(newest)  // its notes are in that version; the box keeps them until it is finished
+            }
         case .failed(let message):
             phase = .failed(message)
         case .cancelled:
@@ -368,6 +440,7 @@ final class AppModel {
             reviseTarget = ""
             reviseReferences = []
             reviseRedesign.reset()
+            stoppedRevision.clear()
             reviseProvider = ReviseOptions.defaultProvider(form: options, doctor: doctor)
             draftFolder = result.outDir
         }
@@ -452,6 +525,7 @@ final class AppModel {
             lastError = event.message
             lastResume = event.resume ?? lastResume
             lastKind = event.kind ?? lastKind
+            lastWritten = event.written ?? lastWritten
         default:
             break
         }
@@ -519,6 +593,7 @@ final class AppModel {
         guard !isRunning else { return }
         runKind = .build
         clearProblem()
+        finishGraphicsTriedInVain = false
         show(run.result)
     }
 

@@ -7,7 +7,7 @@ struct RunView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(model.runKind == .revise ? "Revising from your notes…" : model.isRecut ? "Re-cutting…" : "Building your rough cut…")
+            Text(model.runKind.runningTitle)
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 12) {

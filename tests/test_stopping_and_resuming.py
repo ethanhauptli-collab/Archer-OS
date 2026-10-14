@@ -345,6 +345,9 @@ def test_cancelling_from_the_app_after_the_plan_was_saved_says_how_to_finish(foo
     assert proc.returncode == -signal.SIGTERM
     last = _events(stdout)[-1]
     assert last["event"] == "error" and last["kind"] == "cancelled" and last["resume"] == f"roughcut render {out}"
+    # The cut written before the graphics were made is the newest version, and the event names it (the app can offer it).
+    assert last["written"] == {"version": 1, "fcpxml": str(out / "footage v1.fcpxml"), "project": json.loads((out / "result.json").read_text())["project"], "partial": True}
+    assert "Version 1 (footage v1.fcpxml) was written without its motion graphics." in stderr
     assert f"roughcut render {out}" in stderr
     log = (out / "roughcut.log").read_text().rstrip()
     assert "STOPPED: cancelled" in log and log.endswith(f"roughcut render {out}")

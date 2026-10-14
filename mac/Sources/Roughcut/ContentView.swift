@@ -375,7 +375,7 @@ struct RecentRunRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(run.result.title)
                     .lineLimit(1)
-                Text("\(TimeText.clock(run.result.roughSeconds)) · \(run.finishedAt.formatted(.relative(presentation: .named)))")
+                Text("\(TimeText.clock(run.result.roughSeconds))\(run.result.partial == true ? " · no graphics yet" : "") · \(run.finishedAt.formatted(.relative(presentation: .named)))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
