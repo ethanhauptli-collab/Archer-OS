@@ -5,10 +5,11 @@ public struct AppStamp: Equatable, Sendable {
     public static let commitKey = "RoughcutAppCommit"
     public static let sourceCommitKey = "RoughcutAppSourceCommit"
 
-    /// The checkout's short commit, `-dirty` after it when `mac/` had uncommitted changes. Nil: not built by build-app.sh
+    /// The checkout's short commit, `-dirty` after it when the app's own files had uncommitted changes. Nil: not built by build-app.sh
     /// (`swift run`, Xcode) or not from a git checkout.
     public var commit: String?
-    /// The last commit that touched `mac/` in that checkout.
+    /// The last commit that touched the app's own files in that checkout (`update.APP_PATHS`: the sources, package, resources and
+    /// build script; a README or a test under `mac/` doesn't change the app).
     public var sourceCommit: String?
 
     public init(commit: String? = nil, sourceCommit: String? = nil) {
@@ -25,7 +26,7 @@ public struct AppStamp: Equatable, Sendable {
         self.init(commit: text(Self.commitKey), sourceCommit: text(Self.sourceCommitKey))
     }
 
-    /// Built with uncommitted changes in `mac/`: the commit doesn't say what code this app has.
+    /// Built with uncommitted changes in the app's own files: the commit doesn't say what code this app has.
     public var isDirty: Bool { commit?.hasSuffix(VersionStamp.dirtySuffix) ?? false }
 }
 
@@ -76,7 +77,7 @@ public struct VersionStamp: Equatable, Sendable {
             return "This app may be out of date: it was built from \(compared.built ?? "?"), and the roughcut it runs has \(compared.now ?? "?"). Rebuild it with \(rebuildCommand)."
         }
         if app.isDirty {
-            return "This app was built with uncommitted changes in mac/, so its commit doesn't say exactly what code it has."
+            return "This app was built with uncommitted changes to its source, so its commit doesn't say exactly what code it has."
         }
         return nil
     }

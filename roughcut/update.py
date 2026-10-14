@@ -42,14 +42,27 @@ def version_in(repo: Path) -> str:
 
 GIT_SECONDS = 3  # `--version` and doctor wait this long for all their git answers together, never longer
 
+# What the Mac app is built from: the Swift package and its build script. A README or a test under mac/ doesn't change the
+# app, so it neither makes a built app out of date nor dirty. mac/scripts/build-app.sh keeps the same list (a test checks).
+APP_PATHS = ("mac/Sources", "mac/Package.swift", "mac/Resources", "mac/scripts")
+
+
+def app_files_changed(paths: list[str]) -> bool:
+    """Whether any of these repository paths (``git diff --name-only``) is a file the Mac app is built from."""
+    return any(path == base or path.startswith(base + "/") for path in paths for base in APP_PATHS)
+
 
 def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str, str | None]:
     """Which commit this engine runs: the Mac app compares it with the one it was built from (Settings > General).
 
     ``commit``: the clone's short commit, ``-dirty`` after it when the engine's own files (roughcut/, pyproject.toml) have
-    uncommitted changes. ``app_source_commit``: the last commit that touched ``mac/``, which is what tells whether the app
-    built earlier is behind. Both are None unless roughcut is an editable install from a git clone (the same test
-    ``roughcut update`` makes), or when git is missing or slow, or can't say whether the files are changed.
+    uncommitted changes. ``app_source_commit``: the last commit that touched the app's own files (``APP_PATHS``), which is
+    what tells whether the app built earlier is behind. Both are None unless roughcut is an editable install from a git
+    clone (the same test ``roughcut update`` makes), or when git is missing or slow, or can't say whether the files are changed.
+
+    Git is asked with ``--no-optional-locks``: a plain ``git status`` refreshes ``.git/index`` and takes ``index.lock``, and
+    this runs in the owner's own clone (every ``--version``, every ``doctor``, the app's background checks), where it could
+    make their ``git add`` or ``git commit`` fail.
     """
     none: dict[str, str | None] = {"commit": None, "app_source_commit": None}
     try:
@@ -63,7 +76,7 @@ def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str,
         if left <= 0:
             return None
         try:
-            done = runner(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=left)
+            done = runner(["git", "--no-optional-locks", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=left)
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout.strip() if done.returncode == 0 else None
@@ -75,7 +88,7 @@ def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str,
     changed = git("status", "--porcelain", "--", "roughcut", "pyproject.toml")
     if not sha or changed is None:
         return none  # "clean" is only said when git said so
-    return {"commit": sha + ("-dirty" if changed else ""), "app_source_commit": git("rev-list", "-1", "--abbrev-commit", "--abbrev=7", "HEAD", "--", "mac") or None}
+    return {"commit": sha + ("-dirty" if changed else ""), "app_source_commit": git("rev-list", "-1", "--abbrev-commit", "--abbrev=7", "HEAD", "--", *APP_PATHS) or None}
 
 
 def installed_extras() -> list[str]:
@@ -145,7 +158,7 @@ def update(repo: Path | None = None, *, runner=subprocess.run, out=print) -> int
         out("  " + line)
     if len(commits) > 20:
         out(f"  ... and {len(commits) - 20} more")
-    if any(p.startswith("mac/") for p in changed) and APP.exists():
+    if app_files_changed(changed) and APP.exists():
         # Not rebuilt here: an ad-hoc signed rebuild makes macOS ask for Keychain and folder access again.
         out("The Mac app changed too. Rebuild it with:\n  " + shlex.quote(str(repo / "mac" / "scripts" / "build-app.sh")) + " --install")
     out("\nChecking the setup with the new code (roughcut doctor):")

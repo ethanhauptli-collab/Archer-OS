@@ -149,7 +149,7 @@ Every later run with that preset shows those designs to the designer, which matc
 | Option | Default | |
 |---|---|---|
 | `--dialogue-level LUFS` | -16 | Every clip's speech is matched to this loudness (-14 is louder, for phones). `off` keeps clips as recorded |
-| `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue |
+| `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue (-60 to 12; `nan`, `inf` and the like are refused up front) |
 | `--music FILE` | | A song to lay under the cut (repeatable; when Claude doesn't pick one, or without AI, the first one given plays). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame. `studio:ID` is a [Venture Studio](#venture-studio) song |
 | `--music-from NAME`, `--music-max N` | none, 4 | Up to N songs from a Venture Studio collection or kit for Claude to choose from, after your own `--music` |
 | `--fades on/off` | on | Short de-click fades at audio edits and soft fades on B-roll sound (never over a word) |
@@ -208,13 +208,13 @@ Roughcut only ever reads, and only a verified copy of Studio's own daily catalog
 | Option | Default | |
 |---|---|---|
 | `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look |
-| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` (a second to 24 hours; digits 0-9 only, no signs or `nan`/`inf`/`1e3`) |
+| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` (a second to 24 hours, at most 64 characters; digits 0-9 only, no signs or `nan`/`inf`/`1e3`) |
 | `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
 | `--script FILE` | | A script, outline or transcript to follow |
 | `--style` | `auto` | `tight`, `medium`, `loose`: how much pause is kept. `auto`: Claude reads the brief while it plans and says which pacing it asks for (tight for tight cuts, snappy or no dead air; loose for let it breathe or slow and reflective; medium when it doesn't say), and the log says what it read. Your own words win over a preset's brief; a preset's pacing wins over `auto`. Claude sees each line's kept length at medium and how much shorter tight and longer loose play this footage, so it plans your target length at the pacing it picks. Without AI (`--provider none`, or the stringout when the model fails) a few plain wording rules stand in: tight for "tight", "tighter", "snappy", "punchy", "fast-paced" or "no dead air", loose for "let it breathe", "keep it loose", "looser", "loose pacing" or "slow-paced", not when turned down in the same sentence ("don't cut it too tight") or about something else ("a tight deadline", "tight shots"); otherwise medium |
 | `--keep-fillers` | off | Don't cut um/uh (narration still loses the short ones) |
 | `--punch-in` / `--no-punch-in` | when the brief asks for punch-ins | At each jump cut no B-roll covers, alternate the shot as framed with a 112% punch-in (Transform > Scale; select the clips and reset Transform to undo). A clip that doesn't fill the frame (16:9 in a vertical cut) isn't punched, since its black bars would jump in size; in a cut Claude planned, those cuts get to-do markers like other jump cuts. Re-cuts keep it. Without the flag, Claude reads the brief while it plans: punch-ins asked for at the jump cuts turn them on, a single reframe like "punch in on Roy's face" doesn't, and the log says which way it read the brief. Without AI, the wording rules turn them on only for "punch-ins", "zoom-ins" or "punch in on the (jump) cuts", not turned down ("no punch-ins", "Punch-ins: none") |
-| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
+| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` (1 to 1000 fps) |
 | `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
 | `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it (and the offer of a folder outside a [Venture Studio](#venture-studio) library) |
 | `--effort` | `high` | Claude reasoning effort: `low` … `max` |
