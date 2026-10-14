@@ -372,6 +372,13 @@ def test_doctor_says_what_claude_code_version_it_found(fake_claude):
     assert "not installed" in _claude_code_detail({"claude_code": None}) or "install" in _claude_code_detail({"claude_code": None})
 
 
+def test_doctor_has_the_claude_code_version_keys_on_a_machine_without_claude_code():
+    """doctor --json has the same keys everywhere (the Mac app's fixture, mac/Tests/.../doctor-sample.json, is checked against it)."""
+    from roughcut.cli import claude_code_report
+
+    assert claude_code_report(offline=True) == {"claude_code": None, "claude_code_auth": None, "claude_code_version": None, "claude_code_pictures": None}
+
+
 @pytest.mark.parametrize("auth", ["claude.ai", None, "api_key"])
 @pytest.mark.parametrize("version,says", [("2.1.100", "2.1.100 is older than 2.1.295"), ("junk", "Couldn't read Claude Code's version")])
 def test_doctor_says_a_claude_code_is_too_old_for_pictures_whatever_its_sign_in(fake_claude, auth, version, says):

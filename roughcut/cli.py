@@ -614,7 +614,8 @@ def claude_code_report(offline: bool = False) -> dict:
         except ProviderError:
             info = {}
         method = info.get("authMethod") if info.get("loggedIn") else None
-    report: dict = {"claude_code": binary, "claude_code_auth": method}
+    # The keys are always there (null without Claude Code), so doctor's JSON has the same keys on every machine.
+    report: dict = {"claude_code": binary, "claude_code_auth": method, "claude_code_version": None, "claude_code_pictures": None}
     if binary:  # local, so also checked offline: `claude_code_pictures` False = this version isn't shown pictures (see MIN_PICTURE_VERSION)
         version = installed_version(binary)
         report["claude_code_version"] = ".".join(map(str, version)) if version else None
