@@ -209,12 +209,19 @@ public struct KeyForm: Sendable {
         (error as? KeyStoreFailure)?.message ?? error.localizedDescription
     }
 
-    /// One line for the whole save, beside the button.
+    /// One line for the whole save, beside the button: what failed, in the words of what was asked ("not saved" for a key typed
+    /// in, "not removed" for a box emptied), else that it worked.
     public static func summary(_ results: [KeySaveResult]) -> String {
-        let failed = results.filter { $0.outcome.failed }
-        if !failed.isEmpty {
-            let names = failed.map { $0.account.title }.joined(separator: " and ")
-            return "\(names) not saved. See below."
+        var problems: [String] = []
+        for result in results {
+            switch result.outcome {
+            case .failedToSave: problems.append("\(result.account.title) not saved")
+            case .failedToRemove: problems.append("\(result.account.title) not removed")
+            case .saved, .removed, .unchanged: break
+            }
+        }
+        if !problems.isEmpty {
+            return problems.joined(separator: "; ") + ". See below."
         }
         return results.contains { $0.outcome != .unchanged } ? "Saved" : "No changes to save"
     }

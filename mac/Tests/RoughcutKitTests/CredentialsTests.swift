@@ -114,6 +114,18 @@ final class CredentialsTests: XCTestCase {
         let again = form.save(to: store)
         XCTAssertEqual(again.first?.outcome, .failedToRemove("Item can't be removed"))
         XCTAssertEqual(store.values[.anthropic], "sk-ant-key")
+        XCTAssertEqual(KeyForm.summary(again), "Claude (Anthropic) not removed. See below.", "a removal is not called a save")
+        XCTAssertEqual(form.note(for: .anthropic), "Not removed: Item can't be removed.")
+    }
+
+    func testTheSummaryNamesEachFailureInItsOwnWords() {
+        let saveFailed = KeySaveResult(account: .anthropic, outcome: .failedToSave("no"))
+        let removeFailed = KeySaveResult(account: .openai, outcome: .failedToRemove("no"))
+        let fine = KeySaveResult(account: .openai, outcome: .saved)
+        XCTAssertEqual(KeyForm.summary([saveFailed, fine]), "Claude (Anthropic) not saved. See below.")
+        XCTAssertEqual(KeyForm.summary([saveFailed, removeFailed]), "Claude (Anthropic) not saved; OpenAI or compatible not removed. See below.")
+        XCTAssertEqual(KeyForm.summary([KeySaveResult(account: .anthropic, outcome: .removed), fine]), "Saved")
+        XCTAssertEqual(KeyForm.summary([KeySaveResult(account: .anthropic, outcome: .unchanged), KeySaveResult(account: .openai, outcome: .unchanged)]), "No changes to save")
     }
 
     func testAKeychainThatCouldNotBeReadIsNeverTakenForEmpty() {
