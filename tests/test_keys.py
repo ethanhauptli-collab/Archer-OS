@@ -262,3 +262,13 @@ def test_set_explains_an_admin_key(keychain, monkeypatch, capsys):
     assert main(["key", "set"]) == 1
     out = capsys.readouterr().out
     assert "Admin API key" in out and "rejected" not in out
+
+
+def test_the_mac_app_uses_the_same_keychain_items():
+    """The app saves where this module reads: same service, accounts named after the variables (mac/.../Credentials.swift)."""
+    import re
+
+    source = (Path(__file__).resolve().parents[1] / "mac" / "Sources" / "RoughcutKit" / "Credentials.swift").read_text()
+    assert f'static let service = "{keys.SERVICE}"' in source
+    accounts = re.findall(r'case \w+ = "([A-Z_]+_API_KEY)"', source)
+    assert tuple(accounts) == keys.ACCOUNTS
