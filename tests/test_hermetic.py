@@ -666,6 +666,21 @@ def test_checks_of_the_real_machine_are_skipped_unless_asked():
     assert done.returncode == 0 and "2 skipped" in report and f"set {hermetic.REAL_FLAG}=1 to run it" in report, report
 
 
+def test_a_failing_check_of_the_real_machine_never_prints_a_secret(monkeypatch):
+    """pytest shows the values in a failed `assert`. The check that doctor printed no secret must fail without them,
+    or the one run on a machine with a real key writes that key to the terminal."""
+    import test_real_environment as real
+
+    secret = "sk-ant-api03-" + "s" * 40
+    monkeypatch.setattr(real, "_secrets", lambda: [secret])
+    report = {k: None for k in real.REPORT_KEYS} | {"anthropic_key_status": "ok", "anthropic_key_source": "keychain", "ffmpeg": "x", "ffprobe": "y"}
+    printed = json.dumps(report | {"anthropic_key_message": f"saved {secret}"})
+    with pytest.raises(AssertionError) as failure:
+        real._check(report, 0, printed)
+    assert "printed a secret" in str(failure.value) and secret not in str(failure.value) and secret[:16] not in str(failure.value)
+    real._check(report, 0, json.dumps(report))  # and a clean report passes
+
+
 # ------------------------------------------------------------------ a lived-in Mac changes nothing
 
 
