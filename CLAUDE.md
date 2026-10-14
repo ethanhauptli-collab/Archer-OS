@@ -98,6 +98,7 @@ The CLI was first built in a Linux cloud session; the owner runs it from Termina
 - Live `--provider claude-code` runs on synthetic footage: planning, revise, graphics design and rendering.
 - The owner imported earlier versions' FCPXML into Final Cut Pro 11 (A-Roll and vision keywords showed up on the clip).
 - `roughcut update`, `doctor` and `studio status` on the owner's Mac: the update installed, doctor passed (ffmpeg, mlx, API key, Claude Code, graphics, Venture Studio), and `studio status` read the owner's real catalog snapshot (the columns `studio.REQUIRED_COLUMNS` names are all there, no access prompt came up in Terminal) and reported its folders, the ones on an unmounted network share as offline.
+- After `roughcut update` and rebuilding the app, the owner ran this release on their real OCVIBE cut (graphics on) and reported that it exported with the correct edited timeline and graphics in Final Cut. Not said which features that run used (reference images, redesign, sound effects, Studio music), so those stay under Not verified.
 - The owner rebuilt a real shoot with this release (the OCVIBE walk-and-talk from an SD card, graphics on) and imported it into Final Cut Pro 11: no warnings, and the cut, graphics and Timeline Index roles looked right.
 
 ### Not verified yet (needs the owner's Mac and Final Cut)
