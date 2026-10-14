@@ -241,7 +241,7 @@ final class AppModel {
             shown = result  // a stopped re-cut or revision: come back to this cut if finishing stops too
         }
         run(
-            cli: cli, arguments: RecutOptions(outputFolder: folder).arguments(), kind: .recut, from: shown,
+            cli: cli, arguments: RecutOptions.finishingWithoutAI(in: folder, shown: shown).arguments(), kind: .recut, from: shown,
             finishesRevision: stoppedRevision.isFinished(by: shown)
         )
     }

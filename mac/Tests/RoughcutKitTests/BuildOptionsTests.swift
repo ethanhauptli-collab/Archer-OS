@@ -246,6 +246,15 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(RecutOptions.finishingGraphics(of: built).arguments(), base + ["--design-missing"])
         revision.cut = CutSettings(style: "medium", stringout: false)
         XCTAssertEqual(RecutOptions.finishingGraphics(of: revision).arguments(), base + ["--design-missing"])
+
+        // Finish without AI follows the same rule: a revision on screen brings no Stringout project back; anything else
+        // (a build, a cut whose setting is off, nothing on screen) sends a bare render as it always did.
+        revision.cut = CutSettings(style: "medium", stringout: true)
+        XCTAssertEqual(RecutOptions.finishingWithoutAI(in: folder, shown: revision).arguments(), base + ["--no-stringout"])
+        XCTAssertEqual(RecutOptions.finishingWithoutAI(in: folder, shown: built).arguments(), base)
+        XCTAssertEqual(RecutOptions.finishingWithoutAI(in: folder, shown: nil).arguments(), base)
+        revision.cut = CutSettings(style: "medium", stringout: false)
+        XCTAssertEqual(RecutOptions.finishingWithoutAI(in: folder, shown: revision).arguments(), base)
     }
 
     func testRecutPickerStartsFromTheCut() {

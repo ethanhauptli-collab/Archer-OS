@@ -90,8 +90,18 @@ extension RecutOptions {
     /// the Stringout project back and the event's project list would change between versions. The version that finishes a
     /// cut with no Stringout project writes none either (the CLI says nothing about it in the list of changes).
     public static func finishingGraphics(of result: RunResult) -> RecutOptions {
-        let noStringoutProject = result.stringoutSeconds == nil && result.cut?.stringout == true
-        return RecutOptions(outputFolder: result.outDirURL, stringout: noStringoutProject ? false : nil, designMissing: true)
+        RecutOptions(outputFolder: result.outDirURL, stringout: leavesStringoutOut(result) ? false : nil, designMissing: true)
+    }
+
+    /// Finish without AI in `folder`: `roughcut render` with the run's own settings. When the cut on screen is a revision (it has
+    /// no Stringout project while its saved setting is on) the finishing version writes none either, as Finish graphics does.
+    public static func finishingWithoutAI(in folder: URL, shown: RunResult?) -> RecutOptions {
+        RecutOptions(outputFolder: folder, stringout: shown.map(leavesStringoutOut) == true ? false : nil)
+    }
+
+    /// A cut written without a Stringout project although its saved Stringout setting is on (a revision).
+    private static func leavesStringoutOut(_ result: RunResult) -> Bool {
+        result.stringoutSeconds == nil && result.cut?.stringout == true
     }
 }
 
