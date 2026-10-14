@@ -217,6 +217,55 @@ def test_swift_fixtures_for_a_stopped_revise_and_for_graphics_that_keep_an_earli
     assert row["rendered"] == 2 and row["pending"] == 2 and "keep their earlier clip" in row["note"]
 
 
+def test_swift_fixtures_for_a_usage_limit_and_the_saved_results_match_the_cli_contract():
+    """The app reads what a stopped run left in two ways, both optional and add-only: the `error` event's `written`
+    (progress-limit-revise-sample.jsonl: the usage limit after version 2 was written) and the folder's result.json
+    (result-partial-revise-sample.json, a cut written before its graphics; result-pending-revise-sample.json, the finished
+    write of that limit). All three are real `roughcut revise --progress-json` output, decoded by the Swift tests."""
+    from roughcut.pipeline import Result, result_summary
+
+    folder = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures"
+    limit = [json.loads(ln) for ln in (folder / "progress-limit-revise-sample.jsonl").read_text().splitlines() if ln.strip()]
+    stages = [e["stage"] for e in limit if e["event"] == "stage"]
+    assert stages and all(s in progress.STAGES for s in stages) and stages == sorted(stages, key=progress.STAGES.index)
+    error = limit[-1]
+    assert error["event"] == "error" and error["kind"] == "usage_limit" and "resume" not in error  # the cut is written: plain render would only repeat it
+    assert set(error) == {"event", "message", "written", "kind"}
+    assert set(error["written"]) == {"version", "fcpxml", "project", "partial", "design_missing"}
+    assert error["written"]["partial"] is False and error["written"]["design_missing"] is True and error["written"]["version"] == 2
+    assert "--design-missing" in error["message"]
+
+    class _TL:
+        seconds = 1.0
+        spine = []
+        connected = []
+        section_starts = []
+
+    class _Plan:
+        title = "t"
+        source = "s"
+
+    live = set(result_summary(Result(Path("/o"), Path("/o/x.fcpxml"), Path("/o/r.md"), _Plan(), _TL(), None)))
+    partial = json.loads((folder / "result-partial-revise-sample.json").read_text())
+    assert set(partial) == live | {"partial"} and partial["partial"] is True  # `partial` is in result.json only, never in a done event
+    assert partial["version"] == 2 and partial["fcpxml"] == error["written"]["fcpxml"]
+    assert set(partial["graphics"]) == {"planned", "placed", "rendered", "note"}
+    assert partial["graphics"]["planned"] > 0 and partial["graphics"]["rendered"] == 0  # nothing made yet: the app offers Finish graphics
+
+    pending = json.loads((folder / "result-pending-revise-sample.json").read_text())
+    assert set(pending) == live and "partial" not in pending
+    assert set(pending["graphics"]) == {"planned", "placed", "rendered", "note", "pending"} and pending["graphics"]["pending"] == 2
+    assert pending["fcpxml"] == error["written"]["fcpxml"] and pending["version"] == error["written"]["version"]
+
+
+def test_the_apps_keep_both_sentence_is_the_one_the_paper_edit_and_the_terminal_say():
+    """RunResult.sameNamesHint (the result screen's import hint for a version after the first) repeats report.SAME_NAMES."""
+    from roughcut.report import SAME_NAMES
+
+    swift = (Path(__file__).parents[1] / "mac" / "Sources" / "RoughcutKit" / "StoppedRun.swift").read_text()
+    assert f'sameNamesHint = "{SAME_NAMES}"' in swift
+
+
 def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):
     """A run that never finished looked like a finished one (old files, no graphics): the log tells them apart."""
     out = tmp_path / "out"

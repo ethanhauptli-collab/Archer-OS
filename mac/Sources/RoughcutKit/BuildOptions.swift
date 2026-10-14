@@ -469,14 +469,21 @@ public struct RecutOptions: Equatable, Sendable {
     public var stringout: Bool?
     /// Punch-ins on jump cuts: On or Off, or nil for as the cut has them (an Auto build read them from its brief).
     public var punchIn: Bool?
+    /// Also design the graphics that have no design yet, or still stand on an earlier look (`--design-missing`): Finish
+    /// graphics. It asks the model that planned the cut for those designs only; the cut isn't planned again.
+    public var designMissing: Bool
 
-    public init(outputFolder: URL, style: CutStyle? = nil, format: SequenceFormat? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil, punchIn: Bool? = nil) {
+    public init(
+        outputFolder: URL, style: CutStyle? = nil, format: SequenceFormat? = nil, keepFillers: Bool? = nil, stringout: Bool? = nil,
+        punchIn: Bool? = nil, designMissing: Bool = false
+    ) {
         self.outputFolder = outputFolder
         self.style = style
         self.format = format
         self.keepFillers = keepFillers
         self.stringout = stringout
         self.punchIn = punchIn
+        self.designMissing = designMissing
     }
 
     public func arguments() -> [String] {
@@ -496,7 +503,15 @@ public struct RecutOptions: Equatable, Sendable {
         if let punchIn {
             args.append(punchIn ? "--punch-in" : "--no-punch-in")
         }
+        if designMissing {
+            args.append("--design-missing")
+        }
         return args
+    }
+
+    /// Finish graphics for `result`: the run's own settings, and the graphics it lacks designed and rendered.
+    public static func finishingGraphics(of result: RunResult) -> RecutOptions {
+        RecutOptions(outputFolder: result.outDirURL, designMissing: true)
     }
 
     /// The Re-cut format picker's first row, which keeps the cut's own format.

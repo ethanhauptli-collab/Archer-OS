@@ -34,13 +34,14 @@ final class AppModel {
     // Run state
     private(set) var phase: Phase = .idle
     private(set) var runKind: RunKind = .build
-    var isRecut: Bool { runKind == .recut }
     /// After a failed run whose plan was saved: the folder `roughcut render` can finish without AI.
     private(set) var resumeFolder: URL?
     /// After a failed run: "usage_limit" when a Claude plan or API credit ran out.
     private(set) var failureKind: String?
     /// Why the last re-cut or revision of the cut on screen stopped (shown above it).
     private(set) var runProblem: String?
+    /// What to do about it, under the banner (Finish graphics after a run that left a version without all its graphics).
+    private(set) var runAdvice: String?
     private(set) var stageStatus: [Stage: StageStatus] = [:]
     private(set) var activeStage: Stage?
     private(set) var stageDetail = ""
@@ -88,6 +89,8 @@ final class AppModel {
     @ObservationIgnored private var lastResult: RunResult?
     @ObservationIgnored private var lastResume: String?
     @ObservationIgnored private var lastKind: String?
+    /// The `error` event's `written`: the version a stopped run left behind.
+    @ObservationIgnored private var lastWritten: WrittenCut?
     /// The cut a re-cut or revision started from: where it goes back to if it stops.
     @ObservationIgnored private var runSource: RunResult?
     /// The revision's notes, written for `--notes-file`; deleted when the run ends.
@@ -104,7 +107,7 @@ final class AppModel {
     var visibleStages: [Stage] {
         switch runKind {
         case .build: return Stage.allCases
-        case .recut: return [.cut, .graphics, .write]
+        case .recut, .finishGraphics: return [.cut, .graphics, .write]
         case .revise: return [.plan, .cut, .graphics, .write]
         }
     }
@@ -208,6 +211,14 @@ final class AppModel {
         run(cli: cli, arguments: recut.arguments(), kind: .recut, from: result)
     }
 
+    /// Make the graphics a cut lacks (`roughcut render <folder> --design-missing`): the ones with no design yet or still in an
+    /// earlier look are designed with the model that planned the cut, every graphic is rendered, and the result is a new
+    /// version. The cut isn't planned again. Stages, Cancel, errors and the result are those of a re-cut.
+    func finishGraphics(_ result: RunResult) {
+        guard result.canFinishGraphics, let cli = resolveCLI() else { return }
+        run(cli: cli, arguments: RecutOptions.finishingGraphics(of: result).arguments(), kind: .finishGraphics, from: result)
+    }
+
     /// Finish a stopped run from its saved plan with the run's own settings and no model call
     /// (`roughcut render <folder>`, as the CLI suggests).
     func finishWithoutAI() {
@@ -258,6 +269,7 @@ final class AppModel {
 
     private func clearProblem() {
         runProblem = nil
+        runAdvice = nil
         resumeFolder = nil
         failureKind = nil
     }
@@ -280,6 +292,7 @@ final class AppModel {
         clearProblem()
         lastResume = nil
         lastKind = nil
+        lastWritten = nil
         let recut = kind != .build
         stageStatus = [:]
         activeStage = nil
@@ -334,13 +347,24 @@ final class AppModel {
                 }
                 let tail = log.suffix(6).joined(separator: "\n")
                 let error = lastError ?? "roughcut stopped (exit code \(status)).\n\(tail)"
-                end(RunEnding.after(runKind, from: runSource, result: lastResult, cancelled: cancelRequested, error: error))
+                end(RunEnding.after(
+                    runKind, from: runSource, result: lastResult, cancelled: cancelRequested, error: error,
+                    saved: lastResult == nil ? savedResult() : nil, written: lastWritten
+                ))
             }
             runEnded()
         }
     }
 
-    /// A failed or cancelled re-cut or revision goes back to its cut (notes kept); a build to the form.
+    /// The newest version in the output folder (its `result.json`, which the CLI keeps with each version), read after a run
+    /// stopped: a revision that stopped while its graphics were made leaves a newer version than the cut it started from.
+    private func savedResult() -> RunResult? {
+        guard let folder = runSource?.outDirURL ?? lastWritten?.folder else { return nil }
+        return SavedResult.read(in: folder)
+    }
+
+    /// A failed or cancelled re-cut or revision goes back to its cut (notes kept), or, when it wrote a newer version first,
+    /// to that version, saying what it lacks; a build to the form.
     private func end(_ ending: RunEnding) {
         switch ending {
         case .finished(let result):
@@ -353,7 +377,13 @@ final class AppModel {
             show(result)
         case .returned(let source, let problem):
             runProblem = problem
+            runAdvice = runKind.stoppedAdvice(usageLimit: failureKind == "usage_limit", newest: nil)
             show(source)
+        case .wroteAndStopped(let newest, let problem):
+            runProblem = problem
+            runAdvice = runKind.stoppedAdvice(usageLimit: failureKind == "usage_limit", newest: newest)
+            remember(newest)  // it has a Final Cut file of its own now: the form's recent list can open it
+            show(newest)
         case .failed(let message):
             phase = .failed(message)
         case .cancelled:
@@ -452,6 +482,7 @@ final class AppModel {
             lastError = event.message
             lastResume = event.resume ?? lastResume
             lastKind = event.kind ?? lastKind
+            lastWritten = event.written ?? lastWritten
         default:
             break
         }

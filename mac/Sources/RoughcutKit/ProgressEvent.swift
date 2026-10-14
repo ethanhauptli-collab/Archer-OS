@@ -48,9 +48,36 @@ public struct ProgressEvent: Decodable, Equatable, Sendable {
     public var resume: String?
     /// On an `error`: "usage_limit" when a Claude plan or API credit ran out.
     public var kind: String?
+    /// On an `error` after a version was written: the cut the run left behind (nil when it wrote nothing, and from older CLIs).
+    public var written: WrittenCut?
 
     /// Nil for stages this version of the app doesn't know about.
     public var stageValue: Stage? { stage.flatMap(Stage.init(rawValue:)) }
+}
+
+/// The `written` object of an `error` event: the version a stopped run left as the newest one. Either the partial cut
+/// written before the motion graphics were made (`partial`), or, after the usage limit hit while the graphics were
+/// designed, the version written with the graphics that were done (`designMissing`). Every key is optional.
+public struct WrittenCut: Decodable, Equatable, Sendable {
+    public var version: Int?
+    public var fcpxml: String?
+    public var project: String?
+    public var partial: Bool?
+    public var designMissing: Bool?
+
+    public init(version: Int? = nil, fcpxml: String? = nil, project: String? = nil, partial: Bool? = nil, designMissing: Bool? = nil) {
+        self.version = version
+        self.fcpxml = fcpxml
+        self.project = project
+        self.partial = partial
+        self.designMissing = designMissing
+    }
+
+    /// The output folder: where its Final Cut file is.
+    public var folder: URL? {
+        guard let fcpxml, !fcpxml.isEmpty else { return nil }
+        return URL(fileURLWithPath: fcpxml).deletingLastPathComponent()
+    }
 }
 
 /// Payload of the `done` event (`pipeline.result_summary`).
@@ -84,6 +111,9 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var captions: String?
     /// What a revision or re-cut changed from the version before (nil for a first build, and from older CLIs).
     public var changes: RunChanges?
+    /// Only in the `result.json` of a cut written before its motion graphics were made (a run that stops while they're
+    /// made leaves it as the newest version): true there, absent everywhere else, and never in a `done` event.
+    public var partial: Bool?
 
     /// No model planned this cut (`--provider none`, or the stringout fallback): `planned_by` names no "provider:model".
     public var madeWithoutAI: Bool { !plannedBy.contains(":") }
@@ -177,6 +207,9 @@ public struct GraphicsSummary: Codable, Equatable, Sendable {
     public var placed: Int
     public var rendered: Int
     public var note: String?
+    /// Graphics on the timeline that stand on an earlier version's design or clip while the new one is still to come
+    /// (only present when above 0, and from CLIs that know about it).
+    public var pending: Int?
 }
 
 public struct VisualLogSummary: Codable, Equatable, Sendable {

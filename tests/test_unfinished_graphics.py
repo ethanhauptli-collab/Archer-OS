@@ -575,3 +575,63 @@ def test_runs_that_go_right_write_no_partial_pending_or_note_keys(footage, tmp_p
         assert not any(w.startswith(("The new look for the graphics", "This cut is partial", "No graphics in this")) for w in result.warnings)
         validate_dtd(result.fcpxml)
         check_invariants(result.fcpxml)
+
+
+# ------------------------------------------------------------------ the Mac app's Finish graphics button
+
+
+def app_offers_finish_graphics(row: dict) -> bool:
+    """RunResult.canFinishGraphics in mac/Sources/RoughcutKit/StoppedRun.swift, on a done payload or a result.json."""
+    g = row.get("graphics")
+    if not g or g["planned"] <= 0:
+        return False
+    return bool(row.get("partial")) or g.get("pending", 0) + max(g["placed"] - g["rendered"], 0) > 0
+
+
+def test_the_apps_finish_graphics_button_is_offered_exactly_where_graphics_are_still_to_be_made(footage, tmp_path, monkeypatch, cache, clear_mov):
+    """The app decides from `graphics` (planned / placed / rendered / pending) and `partial` alone: this is what the engine
+    writes in each case, so a change to those keys that the Swift rule doesn't follow fails here."""
+    out, provider, renderer, v1 = build_v1(footage, tmp_path, monkeypatch, cache, clear_mov)
+    assert not app_offers_finish_graphics(result_json(out))  # everything made
+
+    # A revision that stops after its cut without graphics: the partial version, with nothing on the timeline yet.
+    real_make = graphics.make
+    monkeypatch.setattr(graphics, "make", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the renderer crashed")))
+    with pytest.raises(RuntimeError):
+        pipeline.revise(out, "Make the graphics bolder.", Options(inputs=[]), redesign_graphics=True)
+    monkeypatch.setattr(graphics, "make", real_make)
+    assert result_json(out)["partial"] is True and app_offers_finish_graphics(result_json(out))
+
+    # Finish graphics (render --design-missing) makes them; nothing is left to finish.
+    pipeline.rerender(out, Options(inputs=[]), design_missing=True)
+    assert "partial" not in result_json(out) and not app_offers_finish_graphics(result_json(out))
+
+    # The usage limit during a redesign: the version stands on the earlier look (pending), until the reset.
+    provider.fail = ProviderLimitError(LIMIT)
+    with pytest.raises(ProviderLimitError):
+        pipeline.revise(out, "Make them orange.", Options(inputs=[]), redesign_graphics=True)
+    assert result_json(out)["graphics"]["pending"] == 2 and app_offers_finish_graphics(result_json(out))
+    provider.fail = None
+    pipeline.rerender(out, Options(inputs=[]), design_missing=True)
+    assert not app_offers_finish_graphics(result_json(out))
+
+    # Every render fails after the designs came back and no earlier clip fits: placed, none rendered.
+    out2 = tmp_path / "out2"
+    renderer.fail_all = True
+    failed = pipeline.build(Options(inputs=[footage], out=out2, name="footage", transcriber="none", cache_dir=cache, graphics=True))
+    assert (failed.summary["graphics"]["placed"], failed.summary["graphics"]["rendered"]) == (2, 0)
+    assert app_offers_finish_graphics(result_json(out2))
+    renderer.fail_all = False
+
+    # A first build the usage limit stopped while designing: placed, not designed.
+    provider.fail = ProviderLimitError(LIMIT)
+    out3 = tmp_path / "out3"
+    with pytest.raises(ProviderLimitError):
+        pipeline.build(Options(inputs=[footage], out=out3, name="footage", transcriber="none", cache_dir=cache, graphics=True))
+    assert app_offers_finish_graphics(result_json(out3))
+    provider.fail = None
+
+    # Nothing to make: the plan's graphics don't fit the cut (the revision needs to say which to keep), or it asked for none.
+    monkeypatch.setattr(graphics, "place", lambda *a, **k: [])
+    none_fit = pipeline.revise(out, "Cut the interview down.", Options(inputs=[]))
+    assert none_fit.summary["graphics"]["planned"] == 2 and not app_offers_finish_graphics(result_json(out))

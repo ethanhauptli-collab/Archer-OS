@@ -24,14 +24,8 @@ struct ResultView: View {
             return "The AI step failed, so this is the stringout with dead air removed. The warnings say why."
         }
         let version = result.version.map { "Version \($0) · " } ?? ""
-        return version + "Planned by \(result.plannedBy)"
-    }
-
-    private var importHint: String {
-        if let project = result.project, let event = result.event {
-            return "In Final Cut Pro choose a library; then open the project “\(project)” in the event “\(event)”."
-        }
-        return "Final Cut opens its import dialog. Choose a library and the event appears with both projects."
+        let unfinished = result.partial == true ? "no graphics yet · " : ""
+        return version + unfinished + "Planned by \(result.plannedBy)"
     }
 
     var body: some View {
@@ -73,7 +67,7 @@ struct ResultView: View {
                     if let graphics = result.graphics, graphics.planned > 0 || graphics.note != nil {
                         GridRow(alignment: .top) {
                             Text("Graphics").foregroundStyle(.secondary)
-                            Text("\(graphics.rendered) of \(graphics.planned) on the timeline" + (graphics.note.map { " (\($0))" } ?? ""))
+                            GraphicsRow(result: result, graphics: graphics)
                         }
                     }
                     if let visual = result.visualLog, visual.total > 0 {
@@ -122,7 +116,7 @@ struct ResultView: View {
                     Button("Paper Edit") { model.openReport(result) }
                         .controlSize(.large)
                 }
-                Text(importHint)
+                Text(result.importHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -282,6 +276,42 @@ struct ResultView: View {
     }
 }
 
+/// The Graphics line of the result: how many are on the timeline, why fewer than planned (the engine's note, wrapped), and
+/// Finish graphics when some are still to be made.
+struct GraphicsRow: View {
+    @Environment(AppModel.self) private var model
+    let result: RunResult
+    let graphics: GraphicsSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(graphics.rendered) of \(graphics.planned) on the timeline")
+            if let note = graphics.note, !note.isEmpty {
+                Text(note)
+                    .font(.callout)
+                    .foregroundStyle(graphics.rendered < graphics.planned || result.canFinishGraphics ? Color.orange : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if result.canFinishGraphics {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Button {
+                        model.finishGraphics(result)
+                    } label: {
+                        Label("Finish graphics", systemImage: "wand.and.stars")
+                    }
+                    .help(RunResult.finishGraphicsCaption)
+                    Text(RunResult.finishGraphicsCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// What a revision or re-cut changed from the version before: bullets for the items. When nothing a viewer
 /// would see changed, the first line says so in a highlighted (not alarming) style, with what to try.
 struct WhatChangedBox: View {
@@ -338,10 +368,11 @@ struct RunProblemBanner: View {
             } icon: {
                 Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(Color.red)
             }
-            if model.failureKind == "usage_limit", let advice = model.runKind.limitAdvice {
+            if let advice = model.runAdvice {
                 Text(advice)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if model.resumeFolder != nil {
                 HStack {
