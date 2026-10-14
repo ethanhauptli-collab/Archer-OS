@@ -392,10 +392,9 @@ def check(preset: Preset, *, need_files: bool = True) -> str | None:
 
     if preset.target:
         try:
-            if parse_duration(preset.target) <= 0:
-                raise ValueError
+            parse_duration(preset.target)
         except ValueError:
-            return f"target {preset.target!r} isn't a length; try 90s, 8m or 8:30"
+            return f"target {preset.target!r} isn't a length; try 90s, 8m or 8:30 (a second to 24 hours)"
     if preset.style and preset.style not in STYLES:
         return f"pacing {preset.style!r} should be one of {', '.join(STYLES)}"
     if preset.format:

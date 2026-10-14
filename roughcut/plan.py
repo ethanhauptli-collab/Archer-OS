@@ -8,6 +8,7 @@ model says can produce an invalid timeline.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from .analyze import Analysis
 from .captions import clean_spelling, respell
 from .duplicates import LINE_CONTAINED, another_read, contains_line, found_in, line_words, same_line, take_group
+from .timecode import MAX_DURATION_SECONDS
 
 PLAN_SCHEMA: dict = {
     "type": "object",
@@ -382,10 +384,14 @@ _CLIP = re.compile(r"^\s*([A-Za-z]\d+)\s*$")
 
 
 def _secs(text: str) -> float:
+    """A time in a range the model wrote ("12.5", "1:05"), in seconds; ValueError for anything that isn't a real time (a run of
+    digits that overflows to inf is not one: a still that long would stop the cut much later)."""
     parts = [float(p) for p in text.split(":")]
     total = 0.0
     for p in parts:
         total = total * 60 + p
+    if not math.isfinite(total) or total > MAX_DURATION_SECONDS:
+        raise ValueError(f"not a time: {text!r}")
     return total
 
 
