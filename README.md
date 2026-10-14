@@ -29,7 +29,7 @@ Then choose how the AI steps are paid for:
 - **Your Claude Pro/Max plan** (no API key): install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude` once and type `/login`. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
 - **An API key** from [console.anthropic.com](https://console.anthropic.com) → API Keys: `roughcut key set` (or the app's Settings → API Keys) saves it in the macOS Keychain.
 
-`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)).
+`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)). `roughcut --version` prints the version and the commit this install runs (`commit abc1234`, `-dirty` after it with uncommitted changes in `roughcut/` or `pyproject.toml`; `unknown` unless it's an editable install from a git clone), and `doctor --json` has the same as `commit`.
 
 **Updating:** `roughcut update` from any folder, or **Roughcut → Update Roughcut…** in the app. It pulls the latest code, reinstalls only when the dependencies changed, and lists what's new. If the Mac app changed, it prints the one command that rebuilds it. A copy too old to have `roughcut update` (it says "invalid choice: 'update'") updates once with:
 
@@ -41,7 +41,7 @@ cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics
 
 1. Drop your footage folder (or clips) on the window.
 2. Pick a **Preset** (Venture OC or Save the Kid fill in the brief, length, pacing and graphics look), then add to the brief what's special about this video: who's in it, the must-keep moments, the angle.
-3. Optional: a **Music bed** song, **Sound effects** (a folder of whooshes, pops and hits, or a Venture Studio collection), a different **Dialogue level**, **Motion graphics** with a logo and **Reference images** (paste or drop screenshots of the look you want).
+3. Optional: a **Music bed** song, **Sound effects** (a folder of whooshes, pops and hits, or a Venture Studio collection), a different **Dialogue level**, **Motion graphics** with a logo and **Reference images** (paste or drop screenshots of the look you want; graphics are designed by the AI, so picking *None* as the planner turns them off).
 4. **Build Rough Cut**. The checklist shows each step; you can switch to another app, and the Mac stays awake and tells you when it's done.
 5. **Open in Final Cut Pro**, choose a library, and open the project the result screen names (for example "OC Food Fest - Rough Cut v1 (tight, Opus)").
 
@@ -208,7 +208,7 @@ Roughcut only ever reads, and only a verified copy of Studio's own daily catalog
 | Option | Default | |
 |---|---|---|
 | `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look |
-| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
+| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` (a second to 24 hours; digits 0-9 only, no signs or `nan`/`inf`/`1e3`) |
 | `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
 | `--script FILE` | | A script, outline or transcript to follow |
 | `--style` | `auto` | `tight`, `medium`, `loose`: how much pause is kept. `auto`: Claude reads the brief while it plans and says which pacing it asks for (tight for tight cuts, snappy or no dead air; loose for let it breathe or slow and reflective; medium when it doesn't say), and the log says what it read. Your own words win over a preset's brief; a preset's pacing wins over `auto`. Claude sees each line's kept length at medium and how much shorter tight and longer loose play this footage, so it plans your target length at the pacing it picks. Without AI (`--provider none`, or the stringout when the model fails) a few plain wording rules stand in: tight for "tight", "tighter", "snappy", "punchy", "fast-paced" or "no dead air", loose for "let it breathe", "keep it loose", "looser", "loose pacing" or "slow-paced", not when turned down in the same sentence ("don't cut it too tight") or about something else ("a tight deadline", "tight shots"); otherwise medium |
