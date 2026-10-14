@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 APP = Path("/Applications/Roughcut.app")
@@ -39,7 +40,7 @@ def version_in(repo: Path) -> str:
     return m.group(1) if m else "?"
 
 
-GIT_SECONDS = 3  # `--version` and doctor wait this long for each git answer, never longer
+GIT_SECONDS = 3  # `--version` and doctor wait this long for all their git answers together, never longer
 
 
 def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str, str | None]:
@@ -48,17 +49,21 @@ def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str,
     ``commit``: the clone's short commit, ``-dirty`` after it when the engine's own files (roughcut/, pyproject.toml) have
     uncommitted changes. ``app_source_commit``: the last commit that touched ``mac/``, which is what tells whether the app
     built earlier is behind. Both are None unless roughcut is an editable install from a git clone (the same test
-    ``roughcut update`` makes), or when git is missing or slow.
+    ``roughcut update`` makes), or when git is missing or slow, or can't say whether the files are changed.
     """
     none: dict[str, str | None] = {"commit": None, "app_source_commit": None}
     try:
         repo = (repo or checkout()).resolve()
     except (OSError, ImportError):
         return none
+    deadline = time.monotonic() + GIT_SECONDS
 
     def git(*args: str) -> str | None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
         try:
-            done = runner(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=GIT_SECONDS)
+            done = runner(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=left)
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout.strip() if done.returncode == 0 else None
@@ -67,9 +72,9 @@ def commit_info(repo: Path | None = None, *, runner=subprocess.run) -> dict[str,
     if not top or Path(top).resolve() != repo or not (repo / "pyproject.toml").is_file():
         return none  # not a clone's own folder (a copy, or a folder inside some other repository)
     sha = git("rev-parse", "--short=7", "HEAD")
-    if not sha:
-        return none
     changed = git("status", "--porcelain", "--", "roughcut", "pyproject.toml")
+    if not sha or changed is None:
+        return none  # "clean" is only said when git said so
     return {"commit": sha + ("-dirty" if changed else ""), "app_source_commit": git("rev-list", "-1", "--abbrev-commit", "--abbrev=7", "HEAD", "--", "mac") or None}
 
 

@@ -477,8 +477,27 @@ def test_commit_info_never_raises_or_waits_on_git(clone):
         raise FileNotFoundError("git")
 
     nothing = {"commit": None, "app_source_commit": None}
-    assert update.commit_info(local, runner=slow) == nothing and seen == [update.GIT_SECONDS]
+    assert update.commit_info(local, runner=slow) == nothing
+    assert len(seen) == 1 and 0 < seen[0] <= update.GIT_SECONDS, "one wait, within the one budget"
     assert update.commit_info(local, runner=missing) == nothing
+
+    def no_status(cmd, **kw):  # git answers everything but whether the files are changed
+        if "status" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 1)
+        return subprocess.run(cmd, **kw)
+
+    assert update.commit_info(local, runner=no_status) == nothing, "never says clean when git didn't say so"
+
+    def out_of_time(cmd, **kw):  # the budget is shared by all the calls
+        update.time.sleep(0.05)
+        return subprocess.run(cmd, **kw)
+
+    real_budget = update.GIT_SECONDS
+    update.GIT_SECONDS = 0.01
+    try:
+        assert update.commit_info(local, runner=out_of_time) == nothing
+    finally:
+        update.GIT_SECONDS = real_budget
 
 
 def test_the_app_build_script_stamps_what_commit_info_reports(clone, tmp_path):
