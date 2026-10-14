@@ -184,6 +184,16 @@ def test_programs_other_than_the_local_tools_are_refused(tmp_path):
     assert len(refused) == 6 and all("(program)" in r for r in refused)
 
 
+@pytest.mark.skipif(not hasattr(os, "spawnv") or shutil.which("touch") is None, reason="needs os.spawnv and touch")
+def test_os_spawn_is_refused_only_inside_the_process_it_forks(tmp_path):
+    """A limit the docs state, pinned so they cannot drift: Python's os.spawn* forks and then execs, and only the exec
+    raises an event, in the child. The program does not run (the child exits 127) but the parent sees no violation."""
+    marker = tmp_path / "marker"
+    with expecting_violations() as refused:
+        status = os.spawnv(os.P_WAIT, shutil.which("touch"), ["touch", str(marker)])
+    assert status == 127 and not marker.exists() and refused == []
+
+
 def test_the_local_tools_and_the_tests_own_programs_run(tmp_path):
     assert subprocess.run([sys.executable, "-c", "print(40 + 2)"], capture_output=True, text=True).stdout.strip() == "42"
     for tool in ("ffmpeg", "ffprobe", "git"):
