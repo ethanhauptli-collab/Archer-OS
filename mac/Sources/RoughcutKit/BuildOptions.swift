@@ -360,7 +360,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         }
         let target = targetLength.trimmed
         if !target.isEmpty && TimeText.seconds(from: target) == nil {
-            list.append("Target length should look like 8m, 90s or 8:30.")
+            list.append("Target length \(TimeText.shouldLookLike).")
         }
         if provider.requiresModel && model.trimmed.isEmpty {
             list.append("Enter a model name for \(provider.title).")
@@ -570,6 +570,11 @@ public enum TimeText {
     /// `MAX_DURATION_SECONDS` in the CLI.
     public static let minSeconds = 1.0
     public static let maxSeconds = 24.0 * 3600
+    /// The longest text read as a length (`MAX_DURATION_TEXT` in the CLI): a length is a few characters, and the CLI's
+    /// pattern is not meant for pages of them.
+    public static let maxTextLength = 64
+    /// What a length looks like, for the messages that refuse one: "Target length \(shouldLookLike)." The CLI says the same.
+    public static let shouldLookLike = "should look like 8m, 90s or 8:30 (1 second to 24 hours)"
 
     /// Unit words `parse_duration` reads (plus a few spellings it doesn't; the app sends plain seconds).
     static let unitSeconds: [String: Double] = [
@@ -599,7 +604,7 @@ public enum TimeText {
     /// "8m", "90s", "90 sec", "10 mins", "1hr", "8:30", "1h5m", "480" -> seconds. Nil when unreadable or outside 1 second to 24 hours.
     public static func seconds(from text: String) -> Double? {
         let raw = text.trimmed.lowercased()
-        guard !raw.isEmpty else { return nil }
+        guard !raw.isEmpty, raw.count <= maxTextLength else { return nil }
         var total = 0.0
         if raw.contains(":") {
             // Minutes:seconds or hours:minutes:seconds.

@@ -80,7 +80,8 @@ def test_parse_duration_rejects_garbage(text):
 
 LENGTHS = json.loads((Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "target-lengths.json").read_text())
 HUGE = "9" * 400  # float() turns a run of digits this long into inf
-UNSAFE_LENGTHS = LENGTHS["reject"] + [HUGE, HUGE + ":0", "1:" + HUGE, HUGE + "s", HUGE + "m", HUGE + "h"]
+SPACED = "1h" + " " * 16000  # the old unit pattern took quadratic time on a long run of spaces
+UNSAFE_LENGTHS = LENGTHS["reject"] + [HUGE, HUGE + ":0", "1:" + HUGE, HUGE + "s", HUGE + "m", HUGE + "h", SPACED + "x", SPACED + "30m", "1" + " " * 70 + "s", "9" * 65]
 
 
 @pytest.mark.parametrize("text", UNSAFE_LENGTHS, ids=lambda t: repr(t if len(t) < 24 else t[:12] + "..." + t[-6:]))
@@ -93,6 +94,33 @@ def test_parse_duration_refuses_unsafe_lengths(text):
 @pytest.mark.parametrize("text,seconds", LENGTHS["accept"], ids=lambda v: repr(v))
 def test_parse_duration_range_edges(text, seconds):
     assert tc.parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", [HUGE, "9" * 100000, SPACED + "x", SPACED + "30m", " ".join(["1"] * 5000), "1:" * 30000])
+def test_parse_duration_is_quick_and_its_message_short_for_any_input(text):
+    import time
+
+    start = time.perf_counter()
+    with pytest.raises(ValueError) as caught:
+        tc.parse_duration(text)
+    assert time.perf_counter() - start < 2, "a hostile --target must not hang the command"
+    assert len(str(caught.value)) < 200, "the message names the start of what was typed, not all of it"
+
+
+def test_the_longest_length_text_is_stated_and_used():
+    assert tc.MAX_DURATION_TEXT == 64
+    assert tc.parse_duration("0" * 61 + "90s") == 90  # 64 characters
+    with pytest.raises(ValueError):
+        tc.parse_duration("0" * 62 + "90s")
+
+
+@pytest.mark.parametrize("command", ["build", "revise"])
+def test_target_help_states_the_range(command, capsys):
+    from roughcut.cli import main
+
+    with pytest.raises(SystemExit):
+        main([command, "--help"])
+    assert "1 second to 24 hours" in " ".join(capsys.readouterr().out.split())
 
 
 def test_the_supported_range_is_stated():

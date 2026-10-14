@@ -56,7 +56,7 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(o.problems.first, "Add footage: drop folders or clips above.")
         o = options()
         o.targetLength = "about eight minutes"
-        XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30."])
+        XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30 (1 second to 24 hours)."])
     }
 
     func testOutputFolderAndName() {

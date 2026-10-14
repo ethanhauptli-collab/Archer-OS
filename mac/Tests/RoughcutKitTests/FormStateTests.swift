@@ -125,8 +125,28 @@ final class FormStateTests: XCTestCase {
     }
 
     private var overflowing: [String] {
-        let huge = String(repeating: "9", count: 400)  // a run of digits this long is infinity as a Double
-        return [huge, huge + ":0", "1:" + huge, huge + "s", huge + "m", huge + "h", "1" + String(repeating: "0", count: 400)]
+        let huge: String = String(repeating: "9", count: 400)  // a run of digits this long is infinity as a Double
+        let zeros: String = String(repeating: "0", count: 400)
+        let spaces: String = String(repeating: " ", count: 16000)  // the CLI's unit pattern once took quadratic time on this
+        let gap: String = String(repeating: " ", count: 70)
+        var list: [String] = [huge, String(repeating: "9", count: 65)]
+        list.append(huge + ":0")
+        list.append("1:" + huge)
+        list.append(huge + "s")
+        list.append(huge + "m")
+        list.append(huge + "h")
+        list.append("1" + zeros)
+        list.append("1h" + spaces + "x")
+        list.append("1h" + spaces + "30m")
+        list.append("1" + gap + "s")
+        return list
+    }
+
+    /// The same 64-character limit as `MAX_DURATION_TEXT` in the CLI.
+    func testALengthIsAtMostSixtyFourCharacters() {
+        XCTAssertEqual(TimeText.maxTextLength, 64)
+        XCTAssertEqual(TimeText.seconds(from: String(repeating: "0", count: 61) + "90s"), 90)
+        XCTAssertNil(TimeText.seconds(from: String(repeating: "0", count: 62) + "90s"))
     }
 
     func testTargetLengthReadsTheSameAsTheCLI() throws {
@@ -155,10 +175,10 @@ final class FormStateTests: XCTestCase {
         var o = form()
         for text in lengths.reject + overflowing where !text.trimmed.isEmpty {
             o.targetLength = text
-            XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30."], "\(text.prefix(20))")
+            XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30 (1 second to 24 hours)."], "\(text.prefix(20))")
             XCTAssertFalse(o.arguments().contains { $0.hasPrefix("--target") }, "\(text.prefix(20))")
             XCTAssertNil(TimeText.seconds(from: o.targetLength))  // so the form's "Aiming for about" line doesn't format it
-            XCTAssertEqual(ReviseOptions.lengthProblem(text), "New length should look like 8m, 90s or 8:30.", "\(text.prefix(20))")
+            XCTAssertEqual(ReviseOptions.lengthProblem(text), "New length should look like 8m, 90s or 8:30 (1 second to 24 hours).", "\(text.prefix(20))")
         }
         o.targetLength = "8:30"
         XCTAssertEqual(o.problems, [])

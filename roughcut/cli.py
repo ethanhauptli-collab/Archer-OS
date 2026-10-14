@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("-c", "--context", default="", help="what this video is, who it's for, tone, must-keep moments")
     brief.add_argument("--context-file", help="read the brief from a text/markdown file")
     brief.add_argument("--script", help="script, outline or reference transcript to follow (text file)")
-    brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
+    brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30 (from 1 second to 24 hours)")
     brief.add_argument("--preset", help="start from a preset's brief, length, pacing and graphics look (`roughcut preset list`); flags you type win")
     brief.add_argument("--preset-brief", default="", help=argparse.SUPPRESS)  # filled in by --preset, or by the app with its brief
     ai = b.add_argument_group("model")
@@ -196,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--notes-file", help="read the notes from a text file")
     rv.add_argument("--keep", action="append", default=[], metavar="IDS", help="segment or clip IDs the new cut must keep (comma-separated or repeated)")
     rv.add_argument("--avoid", action="append", default=[], metavar="IDS", help="segment IDs, clip IDs or CLIP@start-end ranges to leave out")
-    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30 (default: the build's)")
+    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30, from 1 second to 24 hours (default: the build's)")
     rv.add_argument("--provider", choices=[p for p in PROVIDERS if p != "none"], help="who re-plans (default: the one that planned this cut)")
     rv.add_argument("--model", help="model for the revision (default: the one that planned this cut)")
     rv.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="reasoning effort (default: the build's)")

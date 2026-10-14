@@ -1,5 +1,5 @@
 {
- "about": "Lengths --target and the Mac app's Target length field must read the same way (more than a second, at most 24 hours, digits 0-9). Read by tests/test_timecode.py and BuildOptionsTests/FormStateTests; very long digit runs are built in the tests.",
+ "about": "Lengths --target and the Mac app's Target length field must read the same way (more than a second, at most 24 hours, digits 0-9, at most 64 characters). Read by tests/test_timecode.py and BuildOptionsTests/FormStateTests; very long inputs are built in the tests.",
  "accept": [
   [
    "1",
@@ -124,6 +124,14 @@
   [
    "1:02:05",
    3725
+  ],
+  [
+   "90sec",
+   90
+  ],
+  [
+   "1h1sec",
+   3601
   ]
  ],
  "reject": [
@@ -200,6 +208,12 @@
   "8m!",
   "1 30",
   "5m5m",
-  "5s5s"
+  "5s5s",
+  "ec",
+  "90ec",
+  "8mec",
+  "8m3ec",
+  "1h1ec",
+  "1hec"
  ]
 }

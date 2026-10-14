@@ -223,14 +223,19 @@ def seconds_to_clock(seconds: float | Fraction, *, millis: bool = False) -> str:
 MIN_DURATION_SECONDS = 1
 MAX_DURATION_SECONDS = 24 * 3600
 
+# A length is typed in a few characters; more is refused before it is looked at (the unit pattern below can backtrack
+# on a long run of spaces, and a message must not echo a megabyte). The app's twin has the same limit.
+MAX_DURATION_TEXT = 64
+
 # ASCII digits only: float() and \d also read other scripts' digits, which the app's twin of this parser does not.
 _NUMBER = r"[0-9]+(?:\.[0-9]+)?"
 _NUMBER_ONLY = re.compile(_NUMBER)
-_UNITS = re.compile(rf"(?:({_NUMBER})\s*h(?:rs?|ours?)?)?\s*(?:({_NUMBER})\s*m(?:ins?)?)?\s*(?:({_NUMBER})\s*s?(?:ec)?)?")
+_UNITS = re.compile(rf"(?:({_NUMBER})\s*h(?:rs?|ours?)?)?\s*(?:({_NUMBER})\s*m(?:ins?)?)?\s*(?:({_NUMBER})\s*(?:s(?:ec)?)?)?")
 
 
 def _bad_duration(text: str) -> ValueError:
-    return ValueError(f"can't read {text!r} as a length: it should look like 8m, 90s or 8:30 (from 1 second to 24 hours)")
+    shown = text if len(text) <= 40 else text[:40] + "..."
+    return ValueError(f"can't read {shown!r} as a length: it should look like 8m, 90s or 8:30 (from 1 second to 24 hours)")
 
 
 def parse_duration(text: str) -> float:
@@ -242,6 +247,8 @@ def parse_duration(text: str) -> float:
     raw = text.strip().lower()
     if not raw:
         raise ValueError("empty duration")
+    if len(raw) > MAX_DURATION_TEXT:
+        raise _bad_duration(raw)
     if ":" in raw:
         parts = [p.strip() for p in raw.split(":")]
         if len(parts) > 3 or not all(_NUMBER_ONLY.fullmatch(p) for p in parts):

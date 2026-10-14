@@ -201,7 +201,7 @@ public struct ReviseOptions: Equatable, Sendable {
     public static func lengthProblem(_ text: String) -> String? {
         let length = text.trimmed
         guard !length.isEmpty, TimeText.seconds(from: length) == nil else { return nil }
-        return "New length should look like 8m, 90s or 8:30."
+        return "New length \(TimeText.shouldLookLike)."
     }
 
     public func arguments() -> [String] {
