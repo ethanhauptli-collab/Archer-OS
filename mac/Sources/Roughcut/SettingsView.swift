@@ -55,6 +55,13 @@ struct GeneralSettings: View {
                     CheckRow(ok: doctor.transcriber != nil, title: "Transcription", detail: doctor.transcriber ?? "pip install -e '.[mac]'")
                     CheckRow(ok: doctor.anthropicKeyWorks, title: "Claude API key", detail: keyDetail(doctor))
                     CheckRow(ok: doctor.openaiKey && doctor.openaiInstalled, title: "OpenAI (optional)", detail: doctor.openaiInstalled ? (doctor.openaiKey ? "Ready" : "No key") : "Not installed")
+                    if doctor.claudeCode != nil {
+                        CheckRow(
+                            ok: doctor.claudeCodeUsesSubscription && doctor.claudeCodePicturesNote == nil,
+                            title: "Claude Code (optional)",
+                            detail: claudeCodeDetail(doctor)
+                        )
+                    }
                     if let studio = doctor.ventureStudio, studio.isInstalled {
                         CheckRow(ok: studio.isReady, title: "Venture Studio", detail: studio.detail)
                     }
@@ -74,6 +81,12 @@ struct GeneralSettings: View {
     /// The commit this app was built from (build-app.sh writes it into Info.plist) next to the one the engine runs.
     private var versionStamp: VersionStamp {
         VersionStamp(app: AppStamp(infoDictionary: Bundle.main.infoDictionary), engine: model.doctor)
+    }
+
+    private func claudeCodeDetail(_ doctor: DoctorReport) -> String {
+        if let note = doctor.claudeCodePicturesNote { return note }
+        let version = doctor.claudeCodeVersion.map { " \($0)" } ?? ""
+        return doctor.claudeCodeUsesSubscription ? "Signed in with your subscription\(version)" : "Not signed in with a subscription: in Terminal run claude, then type /login"
     }
 
     private func keyDetail(_ doctor: DoctorReport) -> String {

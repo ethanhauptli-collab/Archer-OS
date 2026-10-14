@@ -302,6 +302,36 @@ final class ProgressEventTests: XCTestCase {
         XCTAssertEqual(bad.anthropicKeyMessage, "Anthropic rejected the key.")
     }
 
+    func testAnOldClaudeCodeIsMentionedOnlyWhenABuildWouldShowItPictures() throws {
+        // As `roughcut doctor --json` prints it for a Claude Code older than the first version pictures go through.
+        let note = "Claude Code 2.1.200 is older than 2.1.295. Run `claude update`. Until then Claude is shown no clip frames or reference images, so a cut has no visual log."
+        let line = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "anthropic_key": false, "openai_key": false, "openai_installed": false, "claude_code": "/opt/homebrew/bin/claude", "claude_code_auth": "claude.ai", "claude_code_version": "2.1.200", "claude_code_pictures": false, "claude_code_pictures_note": "\#(note)"}"#
+        let doctor = try XCTUnwrap(JSONLines.doctor(from: line))
+        XCTAssertEqual(doctor.claudeCodeVersion, "2.1.200")
+        XCTAssertEqual(doctor.claudeCodePictures, false)
+        XCTAssertEqual(doctor.claudeCodePicturesNote, note)
+
+        var options = BuildOptions()
+        options.choose(provider: .claudeCode)
+        XCTAssertTrue(options.vision)
+        XCTAssertEqual(doctor.picturesNote(for: options), note)  // the visual log would be skipped
+        options.vision = false
+        XCTAssertNil(doctor.picturesNote(for: options))  // nothing would be shown
+        options.graphics = true
+        options.graphicsReferences = [URL(fileURLWithPath: "/tmp/look.png")]
+        XCTAssertEqual(doctor.picturesNote(for: options), note)  // a reference picture for the graphics would be
+        options.choose(provider: .anthropic)
+        XCTAssertNil(doctor.picturesNote(for: options))  // another provider, another matter
+
+        // A current Claude Code (and a CLI from before the keys) has no note.
+        let current = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "anthropic_key": false, "openai_key": false, "openai_installed": false, "claude_code": "/opt/homebrew/bin/claude", "claude_code_auth": "claude.ai", "claude_code_version": "2.1.299", "claude_code_pictures": true, "claude_code_pictures_note": null}"#
+        let older = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "anthropic_key": false, "openai_key": false, "openai_installed": false, "claude_code": "/opt/homebrew/bin/claude", "claude_code_auth": "claude.ai"}"#
+        var claude = BuildOptions()
+        claude.choose(provider: .claudeCode)
+        XCTAssertNil(try XCTUnwrap(JSONLines.doctor(from: current)).picturesNote(for: claude))
+        XCTAssertNil(try XCTUnwrap(JSONLines.doctor(from: older)).picturesNote(for: claude))
+    }
+
     func testDoctorReportVentureStudio() throws {
         // An older CLI has no venture_studio key: still decodes, no row.
         let older = #"{"version": "1.0.0", "python": "3.12.4", "executable": "/x", "ffmpeg": null, "ffprobe": null, "transcriber": null, "anthropic_key": false, "openai_key": false, "openai_installed": false}"#

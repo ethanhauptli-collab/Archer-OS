@@ -376,7 +376,21 @@ def test_doctor_has_the_claude_code_version_keys_on_a_machine_without_claude_cod
     """doctor --json has the same keys everywhere (the Mac app's fixture, mac/Tests/.../doctor-sample.json, is checked against it)."""
     from roughcut.cli import claude_code_report
 
-    assert claude_code_report(offline=True) == {"claude_code": None, "claude_code_auth": None, "claude_code_version": None, "claude_code_pictures": None}
+    assert claude_code_report(offline=True) == {
+        "claude_code": None, "claude_code_auth": None, "claude_code_version": None, "claude_code_pictures": None, "claude_code_pictures_note": None,
+    }
+
+
+def test_doctor_gives_the_app_one_sentence_for_a_claude_code_that_cannot_be_shown_pictures(fake_claude):
+    """`claude_code_pictures_note` is what the Mac app's setup banner shows as it is: nothing when pictures go through."""
+    from roughcut.cli import claude_code_report
+
+    assert claude_code_report(offline=True)["claude_code_pictures_note"] is None
+    fake_claude.set_state(version="2.1.100")
+    note = claude_code_report(offline=True)["claude_code_pictures_note"]
+    assert "2.1.100 is older than 2.1.295" in note and "claude update" in note and "no visual log" in note
+    fake_claude.set_state(version="junk")
+    assert "Couldn't tell which version" in claude_code_report(offline=True)["claude_code_pictures_note"]
 
 
 @pytest.mark.parametrize("auth", ["claude.ai", None, "api_key"])

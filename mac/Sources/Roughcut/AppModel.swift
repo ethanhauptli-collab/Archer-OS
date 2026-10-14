@@ -768,7 +768,7 @@ final class AppModel {
         return lines.joined(separator: "\n")
     }
 
-    /// Things that will stop a build, for the banner at the top of the window.
+    /// Things that will stop a build, or make it worse than expected, for the banner at the top of the window.
     var setupIssues: [String] {
         if cliURL == nil {
             return ["Roughcut's command-line tool wasn't found. Set its location in Settings."]
@@ -799,6 +799,9 @@ final class AppModel {
                 issues.append("Claude Code isn't installed. In Terminal: npm install -g @anthropic-ai/claude-code")
             } else if !doctor.claudeCodeUsesSubscription {
                 issues.append("Sign Claude Code in with your subscription: in Terminal run claude, then type /login.")
+            }
+            if let note = doctor.picturesNote(for: options) {
+                issues.append(note)  // not a stop: the build runs, without clip pictures
             }
         }
         if (options.provider == .openai || options.provider == .openaiCompatible) && !doctor.openaiInstalled {

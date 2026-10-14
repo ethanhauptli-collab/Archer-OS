@@ -275,6 +275,12 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
     public var claudeCode: String?
     /// How Claude Code is signed in: claude.ai / oauth_token / api_key; nil when signed out.
     public var claudeCodeAuth: String?
+    /// The Claude Code version ("2.1.299"); nil when it isn't installed or can't be read, and from CLIs before this key.
+    public var claudeCodeVersion: String?
+    /// False: this Claude Code is older than the first release Roughcut shows pictures to (clip frames, reference images).
+    public var claudeCodePictures: Bool?
+    /// One sentence for that case (what an old version costs, and `claude update`); nil when pictures go through.
+    public var claudeCodePicturesNote: String?
     /// Why motion graphics can't render here (nil = ready, or an older CLI).
     public var graphics: String?
     /// What Roughcut can read from Venture Studio (nil from older CLIs).
@@ -282,6 +288,15 @@ public struct DoctorReport: Decodable, Equatable, Sendable {
 
     public var hasFFmpeg: Bool { ffmpeg != nil && ffprobe != nil }
     public var claudeCodeUsesSubscription: Bool { claudeCodeAuth.map { $0 != "api_key" } ?? false }
+
+    /// What to tell someone about to build with Claude Code that can't be shown pictures: only when this build would show
+    /// Claude any (clip frames with the visual log on, or reference pictures for the graphics). Nil otherwise.
+    public func picturesNote(for options: BuildOptions) -> String? {
+        guard options.provider == .claudeCode, claudeCode != nil, let note = claudeCodePicturesNote else { return nil }
+        let wouldShowClips = options.vision
+        let wouldShowReferences = options.graphicsActive && !options.graphicsReferences.isEmpty
+        return wouldShowClips || wouldShowReferences ? note : nil
+    }
     public var anthropicKeyWorks: Bool { anthropicKeyStatus.map { $0 == "ok" || $0 == "not checked" } ?? anthropicKey }
 }
 

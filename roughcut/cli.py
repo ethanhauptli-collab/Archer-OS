@@ -615,11 +615,14 @@ def claude_code_report(offline: bool = False) -> dict:
             info = {}
         method = info.get("authMethod") if info.get("loggedIn") else None
     # The keys are always there (null without Claude Code), so doctor's JSON has the same keys on every machine.
-    report: dict = {"claude_code": binary, "claude_code_auth": method, "claude_code_version": None, "claude_code_pictures": None}
+    report: dict = {"claude_code": binary, "claude_code_auth": method, "claude_code_version": None, "claude_code_pictures": None, "claude_code_pictures_note": None}
     if binary:  # local, so also checked offline: `claude_code_pictures` False = this version isn't shown pictures (see MIN_PICTURE_VERSION)
         version = installed_version(binary)
+        problem = version_problem(version)
         report["claude_code_version"] = ".".join(map(str, version)) if version else None
-        report["claude_code_pictures"] = version_problem(version) is None
+        report["claude_code_pictures"] = problem is None
+        # What the Mac app says about it (it shows the sentence as it is): the cost of an old version, and what to do.
+        report["claude_code_pictures_note"] = f"{problem} Until then Claude is shown no clip frames or reference images, so a cut has no visual log." if problem else None
     return report
 
 
