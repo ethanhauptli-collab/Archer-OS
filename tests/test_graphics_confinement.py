@@ -162,7 +162,9 @@ def vectors(port: int, udp: int) -> dict[str, str]:
         "module": f"import('{u}/module?m={m}').catch(() => {{}})",
         "media": f"new Audio('{u}/audio?m={m}').load(); const v = document.createElement('video'); v.src = '{u}/video?m={m}'; document.body.appendChild(v);",
         "object": f"const o = document.createElement('object'); o.data = '{u}/object?m={m}'; document.body.appendChild(o);",
-        "ping": f"const a = document.createElement('a'); a.href = 'about:blank'; a.ping = '{u}/ping?m={m}'; document.body.appendChild(a); a.click();",
+        # target=_blank: a link followed in the page itself navigates it to about:blank, which newer Chromium (15x) does as a real
+        # navigation (the document is replaced and the render's script context is destroyed); the ping is sent either way.
+        "ping": f"const a = document.createElement('a'); a.href = 'about:blank'; a.target = '_blank'; a.ping = '{u}/ping?m={m}'; document.body.appendChild(a); a.click();",
         "form": f"const f = document.createElement('form'); f.action = '{u}/form?m={m}'; f.method = 'POST'; document.body.appendChild(f); f.submit();",
         "navigate": f"location.href = '{u}/nav?m={m}'",
         "refresh": f"const t = document.createElement('meta'); t.httpEquiv = 'refresh'; t.content = '0;url={u}/refresh?m={m}'; document.head.appendChild(t);",
@@ -760,3 +762,46 @@ def test_a_context_without_the_websocket_route_is_said_once_and_still_confined(c
         assert "route" in names and "route_web_socket" not in names  # the rest of the layers are all there
     said = capsys.readouterr().err
     assert said.count("no WebSocket route") == 1 and "1.48" in said
+
+
+class _Message:
+    def __init__(self, text: str, type: str = "error"):
+        self.text, self.type = text, type
+
+
+@pytest.mark.parametrize(
+    "text, url",
+    [
+        # Chromium's older wording
+        ("Refused to load the image 'https://example.com/logo.png' because it violates the following Content Security Policy directive: \"img-src data: blob:\".",
+         "https://example.com/logo.png"),
+        ("Fetch API cannot load http://127.0.0.1:9/fetch. Refused to connect because it violates the document's Content Security Policy.", "http://127.0.0.1:9/fetch"),
+        # and the newer one (Chrome 15x), as CI's Chromium 156 words them
+        ("Loading the image 'https://example.com/logo.png' violates the following Content Security Policy directive: \"img-src data: blob:\". The action has been blocked.",
+         "https://example.com/logo.png"),
+        ("Connecting to 'http://127.0.0.1:9/fetch' violates the following Content Security Policy directive: \"connect-src data: blob:\". The action has been blocked.",
+         "http://127.0.0.1:9/fetch"),
+        ("Framing 'http://127.0.0.1:9/frame' violates the following Content Security Policy directive: \"frame-src 'none'\". The request has been blocked.",
+         "http://127.0.0.1:9/frame"),
+        ("Sending form data to 'http://127.0.0.1:9/form' violates the following Content Security Policy directive: \"form-action 'none'\". The request has been blocked.",
+         "http://127.0.0.1:9/form"),
+    ],
+)
+def test_a_load_the_policy_refused_is_noted_the_same_way_in_every_chromium_wording(text, url):
+    notes: list[str] = []
+    graphics._console(notes, _Message(text))
+    assert notes == [f"tried to load {url} (blocked: designs must be self-contained)"]
+
+
+def test_a_policy_message_in_a_wording_not_known_yet_is_still_said_to_be_a_blocked_load():
+    notes: list[str] = []
+    graphics._console(notes, _Message("Something about a Content Security Policy directive in a form nobody has seen."))
+    assert len(notes) == 1 and notes[0].startswith("tried to load something outside the design (blocked: designs must be self-contained)")
+
+
+def test_other_console_output_is_named_as_before():
+    notes: list[str] = []
+    graphics._console(notes, _Message("bad thing"))
+    graphics._console(notes, _Message("Failed to load resource: net::ERR_FAILED"))  # a blocked load: noted by its URL elsewhere
+    graphics._console(notes, _Message("just a log line", type="log"))
+    assert notes == ["console error: bad thing"]

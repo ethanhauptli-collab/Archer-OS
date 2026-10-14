@@ -1355,17 +1355,26 @@ async def _confined_page(browser, canvas_: tuple[int, int, float], notes: list[s
     return page
 
 
-# What Chromium logs for a load the content policy refused: "Refused to load the image 'URL' because it violates ...",
-# and for a fetch a second line too: "Fetch API cannot load URL. Refused to connect because it violates ...".
-_REFUSED = re.compile(r"Refused to [^']*'([^']+)' because it violates|cannot load (.+?)\. Refused to \w+ because it violates")
+# What Chromium logs for a load the content policy refused. Older versions: "Refused to load the image 'URL' because it violates ...",
+# and for a fetch a second line too: "Fetch API cannot load URL. Refused to connect because it violates ...". Newer ones (Chrome 15x) word
+# it "Loading the image 'URL' violates the following Content Security Policy directive: ...", "Connecting to 'URL' violates ...",
+# "Framing 'URL' violates ...", "Sending form data to 'URL' violates ...". Both are read, so the note is the same whichever version runs.
+_REFUSED = re.compile(
+    r"Refused to [^']*'([^']+)' because it violates"
+    r"|cannot load (.+?)\. Refused to \w+ because it violates"
+    r"|^(?:Loading|Connecting to|Framing|Creating a worker from|Sending form data to|Fetching|Navigating to)[^']*'([^']+)' violates"
+)
 
 
 def _console(notes: list[str], message) -> None:
     if message.type != "error":
         return
-    refused = _REFUSED.match(message.text)
+    refused = _REFUSED.search(message.text)
     if refused:  # the same note as a load the routes refuse: the page asked for something outside itself
-        _note(notes, f"tried to load {(refused.group(1) or refused.group(2))[:120]} (blocked: designs must be self-contained)")
+        asked = next(g for g in refused.groups() if g)
+        _note(notes, f"tried to load {asked[:120]} (blocked: designs must be self-contained)")
+    elif "Content Security Policy" in message.text:  # a wording not known yet: still the policy refusing a load, so say that
+        _note(notes, f"tried to load something outside the design (blocked: designs must be self-contained): {message.text[:100]}")
     elif not message.text.startswith("Failed to load resource"):  # blocked loads are noted by URL
         _note(notes, f"console error: {message.text}")
 
