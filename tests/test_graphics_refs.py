@@ -331,7 +331,7 @@ class TooOldToSee(CannotSee):
     """A Claude Code older than the picture boundary needs (see providers.claude_code.MIN_PICTURE_VERSION)."""
 
     def picture_problem(self):
-        return "Claude Code 2.1.100 is older than 2.1.259. Run `claude update`."
+        return "Claude Code 2.1.100 is older than 2.1.295. Run `claude update`."
 
 
 def test_an_old_claude_code_says_why_the_reference_images_were_left_out(tmp_path):
@@ -339,7 +339,22 @@ def test_an_old_claude_code_says_why_the_reference_images_were_left_out(tmp_path
     refs = reference_set(tmp_path)
     warnings: list[str] = []
     graphics.design(TooOldToSee(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings, references=refs)
-    assert warnings == ["Claude Code 2.1.100 is older than 2.1.259. Run `claude update`. The reference images were left out."]
+    assert warnings == ["Claude Code 2.1.100 is older than 2.1.295. Run `claude update`. The reference images and the frames of the shots were left out."]
+
+
+def test_an_old_claude_code_says_the_shots_were_not_shown_to_the_designer_even_without_reference_images():
+    """Frames of the shot under each graphic are dropped too, and nothing said so unless reference images were given."""
+    a, tl, placed = six_graphics()
+    warnings: list[str] = []
+    graphics.design(TooOldToSee(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings)
+    assert warnings == ["Claude Code 2.1.100 is older than 2.1.295. Run `claude update`. The designer was shown no frames of the shots."]
+
+
+def test_a_model_that_simply_cant_see_gets_no_new_warning_without_reference_images():
+    a, tl, placed = six_graphics()
+    warnings: list[str] = []
+    graphics.design(CannotSee(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings)
+    assert warnings == []  # a text-only model was chosen on purpose: as before
 
 
 class FailsWithPictures(FakeProvider):

@@ -768,13 +768,16 @@ def design(
         return html
     can_see = getattr(provider, "supports_vision", False)
     pictures = _pictures(placed, analysis) if can_see else {}
+    why = None if can_see else getattr(provider, "picture_problem", lambda: None)()  # e.g. a Claude Code too old to keep a picture call in its folder
+    if why and not (references and not references.warned):
+        warnings.append(f"{why} The designer was shown no frames of the shots.")  # said once here when there are no reference images to say it with
+        log(f"graphics: {why} The designer was shown no frames of the shots.")
     if references and not can_see:
         if not references.warned:
             references.warned = True
             who = getattr(provider, "model", "") or "The model"
-            why = getattr(provider, "picture_problem", lambda: None)()  # e.g. a Claude Code too old to keep a picture call in its folder
-            warnings.append(f"{why} The reference images were left out." if why else f"{who} can't look at images, so the reference images were left out")
-            log("graphics: the model can't look at images; the reference images were left out")
+            warnings.append(f"{why} The reference images and the frames of the shots were left out." if why else f"{who} can't look at images, so the reference images were left out")
+            log(f"graphics: {why or 'the model can' + chr(39) + 't look at images'}; the reference images were left out")
         references = None
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]
     t_all = time.monotonic()

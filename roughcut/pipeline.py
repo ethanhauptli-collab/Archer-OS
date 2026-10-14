@@ -1220,6 +1220,10 @@ def build(opts: Options) -> Result:
     if provider is not None:
         usage.append(provider.usage)
         want_vision = opts.vision if opts.vision is not None else provider.supports_vision
+        if not want_vision and opts.vision is None:
+            why = getattr(provider, "picture_problem", lambda: None)()  # a Claude Code too old to keep a picture call in its folder
+            if why:
+                extra_warnings.append(f"{why} The clips were not looked at, so the cut has no visual log.")
         if want_vision:
             from .vision import describe_clips
 

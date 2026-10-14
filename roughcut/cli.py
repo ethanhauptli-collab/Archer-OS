@@ -580,11 +580,12 @@ def _claude_code_detail(r: dict) -> str:
         return "optional: install it to use your Claude subscription (--provider claude-code)"
     auth = r.get("claude_code_auth")
     if auth is None:
-        return "installed, not signed in: run `claude` and type /login to use your subscription"
-    if auth == "api_key":
-        return "signed in with an API key, not a subscription"
-    detail = "signed in with your subscription: --provider claude-code uses it"
-    if r.get("claude_code_pictures") is False:
+        detail = "installed, not signed in: run `claude` and type /login to use your subscription"
+    elif auth == "api_key":
+        detail = "signed in with an API key, not a subscription"
+    else:
+        detail = "signed in with your subscription: --provider claude-code uses it"
+    if r.get("claude_code_pictures") is False:  # whatever the sign-in: this version is shown no pictures
         from .providers.claude_code import MIN_PICTURE_TEXT
 
         version = r.get("claude_code_version")
