@@ -617,11 +617,40 @@ def resume_command(e: BaseException) -> str | None:
     return f"roughcut render {shlex.quote(str(out_dir))}" if out_dir else None
 
 
+def written_cut(e: BaseException | None = None, out_dir: Path | str | None = None) -> dict | None:
+    """What a stop left written, for the app's error event: the cut a usage limit stopped after writing it
+    ({"version", "fcpxml", "project", "partial": False, "design_missing": True}, set on the error by the pipeline), or the partial
+    cut written before the motion graphics were made ({"partial": True}), which is the newest version while the one before it
+    stays on the top level. None when the run wrote nothing."""
+    from .pipeline import partial_cut
+
+    found = getattr(e, "written", None)
+    if isinstance(found, dict):
+        return found
+    folder = out_dir if out_dir is not None else getattr(e, "plan_saved", None)
+    return partial_cut(Path(folder)) if folder else None
+
+
+def partial_hint(written: dict | None, out_dir: Path | str | None) -> str | None:
+    """A line for a stop that left a partial cut: it exists, what it lacks, and how to finish the rest. It goes before the
+    command that finishes the cut, which stays the last thing printed."""
+    if not written or not written.get("partial") or not out_dir:
+        return None
+    name = Path(str(written.get("fcpxml") or "")).name
+    version = written.get("version")
+    return (
+        f"Version {version}{f' ({name})' if name else ''} was written without its motion graphics"
+        + ("; the cut before it is still in the folder." if isinstance(version, int) and version > 1 else ".")
+        + f" The command below adds the graphics whose designs were saved; `roughcut render {shlex.quote(str(out_dir))} --design-missing` designs the rest."
+    )
+
+
 def resume_hint(e: BaseException) -> str | None:
     command = resume_command(e)
     if not command:
         return None
-    return f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}"
+    extra = partial_hint(written_cut(e), getattr(e, "plan_saved", None))
+    return (f"{extra}\n" if extra else "") + f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}"
 
 
 def _log_end(line: str) -> None:
@@ -862,7 +891,7 @@ FORMAT_FROM_FOOTAGE = ("auto", "footage", "from footage")
 
 def _run(args, json_mode: bool) -> int:
     from .pipeline import Options, build, rerender, result_summary
-    from .report import HEADLINE_WARNINGS
+    from .report import HEADLINE_WARNINGS, SAME_NAMES
 
     # Only the cut settings given on the command line; the rest are defaults (build) or the saved run's (render).
     given = {
@@ -981,7 +1010,8 @@ def _run(args, json_mode: bool) -> int:
         print(f"roughcut: {e}", file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
-        progress.emit("error", message=str(e), **({"resume": command} if command else {}), **_error_kind(e))
+        written = written_cut(e)
+        progress.emit("error", message=str(e), **({"resume": command} if command else {}), **({"written": written} if written else {}), **_error_kind(e))
         _log_end(f"STOPPED: {e}" + (f"\n{hint}" if hint else ""))
         _OUTCOME["text"] = f"Stopped: {e}"
         return 1
@@ -994,7 +1024,11 @@ def _run(args, json_mode: bool) -> int:
     except Exception as e:  # a bug: tell the app, then show the traceback
         hint, command = resume_hint(e), resume_command(e)
         # With the command, the app still offers to finish the paid-for plan without AI.
-        progress.emit("error", message=f"Unexpected error ({type(e).__name__}): {e}", **({"resume": command} if command else {}), **_error_kind(e))
+        written = written_cut(e)
+        progress.emit(
+            "error", message=f"Unexpected error ({type(e).__name__}): {e}", **({"resume": command} if command else {}),
+            **({"written": written} if written else {}), **_error_kind(e),
+        )
         import traceback
 
         if hint:
@@ -1048,6 +1082,8 @@ def _run(args, json_mode: bool) -> int:
     else:
         print("\nIn Final Cut Pro: File > Import > XML..., then pick the .fcpxml above.")
     print(f"Then open the project \"{result.project or tl.name}\" in the event \"{result.event}\". The clips in the browser stay your untouched originals.")
+    if result.version > 1:
+        print(SAME_NAMES)
     return 3 if result.fell_back else 0
 
 
@@ -1182,13 +1218,21 @@ def _install_stop_handlers(json_mode: bool, own_group: bool) -> dict:
         # A signal isn't an exception: nothing marks it with the saved plan, so ask the pipeline.
         saved = getattr(sys.modules.get(f"{__package__}.pipeline"), "PLAN_SAVED", None)
         command = f"roughcut render {shlex.quote(str(saved))}" if saved else None
-        hint = f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}" if command else None
+        try:  # a cut written before the graphics were made is the newest version: say so (the file read is small and bounded)
+            written = written_cut(None, saved) if saved else None
+        except Exception:  # noqa: BLE001 - a signal handler never fails on a hint
+            written = None
+        extra = partial_hint(written, saved)
+        hint = ((f"{extra}\n" if extra else "") + f"The edit plan was saved before this stopped. Finish the cut without calling the model again:\n  {command}") if command else None
         _log_end(f"STOPPED: {reason}" + (f"\n{hint}" if hint else ""))
         if hint:
             _write_fd(2, f"\n{hint}\n")
         if json_mode:
             # Straight to the file descriptor: print() from a signal handler can collide with a write in progress.
-            event = {"event": "error", "message": f"Stopped: {reason}.", "kind": "cancelled", **({"resume": command} if command else {})}
+            event = {
+                "event": "error", "message": f"Stopped: {reason}.", "kind": "cancelled", **({"resume": command} if command else {}),
+                **({"written": written} if written else {}),
+            }
             _write_fd(1, json.dumps(event) + "\n")
         if in_group:
             try:

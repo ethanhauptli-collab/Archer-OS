@@ -397,13 +397,16 @@ def test_a_redesign_stopped_by_the_usage_limit_is_finished_in_the_look_the_notes
         kw["redesign_graphics"] = True
     else:
         provider.plan = plan_of(redesign_graphics="yes")
+    old_clips = clips_in_cut(out)
     provider.fail = ProviderLimitError("You've hit your usage limit.")
     with pytest.raises(ProviderLimitError):
         pipeline.revise(out, notes, Options(inputs=[]), **kw)
-    # Their earlier designs don't quietly stand in for them: they are still to be made, and the version says so.
+    # Their earlier designs and clips stand in for them, so the version has as many graphics as the one before, and says that
+    # the new look is still to be made (unfinished_graphics tests the rest).
     saved = json.loads((out / "result.json").read_text())
-    assert saved["changes"]["items"].count("Graphics: 2 could not be made and are not in this version (see Warnings)") == 1
-    assert settings_of(out)["graphics_direction"] == [notes] and pipeline.undesigned(out) == 2
+    assert saved["changes"]["items"].count("Graphics: 2 got no new design and keep their earlier one (see Warnings)") == 1
+    assert settings_of(out)["graphics_direction"] == [notes] and pipeline.undesigned(out) == 0
+    assert clips_in_cut(out) == old_clips and {g["redesign_pending"] for g in manifest_of(out)["graphics"]} == {"design"}
 
     provider.fail = None
     before = len(asked(provider))
@@ -418,19 +421,21 @@ def test_a_redesign_stopped_by_the_usage_limit_is_finished_in_the_look_the_notes
 
 def test_the_graphics_a_stopped_redesign_gets_when_it_resumes_are_added_not_rendered_again(footage, tmp_path, monkeypatch, shared_cache, clear_mov):
     out, provider = built(footage, tmp_path, monkeypatch, shared_cache, clear_mov, provider_class=Fails)
+    old_clips = clips_in_cut(out)
     provider.fail = ProviderLimitError("You've hit your usage limit.")
     with pytest.raises(ProviderLimitError):
         pipeline.revise(out, "Make the graphics orange.", Options(inputs=[]), redesign_graphics=True)
-    assert clips_in_cut(out) == []  # the stopped version has no graphics on its timeline
+    assert clips_in_cut(out) == old_clips and len(old_clips) == 2  # the stopped version plays the clips the version before had
 
     provider.fail = None
     result = pipeline.rerender(out, Options(inputs=[]), design_missing=True)
     assert sum(1 for c in result.timeline.connected if c.kind == "graphic") == 2
     items = result.changes["items"]
-    # They are on the timeline for the first time: nothing was rendered again, no design of theirs was edited.
-    assert "Graphics: 2 added to the cut" in items
-    assert not any("rendered again" in i for i in items)
-    assert "Graphics: 2 added to the cut" in result.report.read_text()
+    # Their new look is on the timeline now: not "added", and not "rendered again" for a design somebody edited.
+    assert "Graphics: 2 got their new look (designed now; they kept the earlier look in v2)" in items
+    assert not any("rendered again" in i or "added to the cut" in i for i in items)
+    assert "Graphics: 2 got their new look" in result.report.read_text()
+    assert not set(clips_in_cut(out)) & set(old_clips)
 
     # A design edited by hand afterwards replaces the clip the version before had: that one is rendered again.
     html = next((out / "graphics").glob("G*-stat.html"))
