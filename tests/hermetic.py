@@ -29,7 +29,7 @@ a sandbox. This module is a pytest plugin (tests/conftest.py names it in `pytest
         brings (Playwright's driver), the stand-ins above, or anything inside the test's own folders may start,
         looked up where Python itself would look (`env`'s PATH, else `os.defpath`); `os.system` is refused;
       - writes: opening for writing, mkdir, rmdir, remove, rename, symlink, link, chmod, chown, utime, truncate,
-        extended attributes, shutil copy/rmtree/move, and a SQLite database opened read-write: nothing outside
+        extended attributes, file flags (macOS), shutil copy/rmtree/move, and a SQLite database opened read-write: nothing outside
         the test's folders (a `__pycache__` and /dev apart), also when it is reached through a link inside them,
         and a call relative to a directory the program holds open is judged by that directory;
       - reads: opening a file or listing a folder under the real home folder, also through a link (the
@@ -441,6 +441,7 @@ _HANDLERS = {
     "os.chown": _on_mutation("chown", (0, 3)),
     "os.utime": _on_mutation("utime", (0, 3)),
     "os.truncate": _on_mutation("truncate", (0, None)),
+    "os.chflags": _on_mutation("chflags", (0, None)),  # macOS and the BSDs only
     "os.setxattr": _on_mutation("setxattr", (0, None)),
     "os.removexattr": _on_mutation("removexattr", (0, None)),
     "shutil.copyfile": _on_mutation("copy", (1, None)),

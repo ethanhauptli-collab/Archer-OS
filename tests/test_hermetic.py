@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -187,11 +188,24 @@ def test_programs_other_than_the_local_tools_are_refused(tmp_path):
 @pytest.mark.skipif(not hasattr(os, "spawnv") or shutil.which("touch") is None, reason="needs os.spawnv and touch")
 def test_os_spawn_is_refused_only_inside_the_process_it_forks(tmp_path):
     """A limit the docs state, pinned so they cannot drift: Python's os.spawn* forks and then execs, and only the exec
-    raises an event, in the child. The program does not run (the child exits 127) but the parent sees no violation."""
-    marker = tmp_path / "marker"
-    with expecting_violations() as refused:
-        status = os.spawnv(os.P_WAIT, shutil.which("touch"), ["touch", str(marker)])
-    assert status == 127 and not marker.exists() and refused == []
+    raises an event, in the child. The program does not run (the child exits 127) but the parent sees no violation.
+    Run in a fresh interpreter: forking this multi-threaded one can deadlock the child, and Python 3.12 warns."""
+    script = textwrap.dedent(
+        """
+        import json, os, shutil, sys
+
+        sys.path.insert(0, sys.argv[1])
+        import hermetic
+
+        marker = sys.argv[2]
+        hermetic._activate("spawn probe", (os.path.dirname(marker),))
+        status = os.spawnv(os.P_WAIT, shutil.which("touch"), ["touch", marker])
+        print(json.dumps({"status": status, "made": os.path.exists(marker), "refused": hermetic._deactivate()}))
+        """
+    )
+    done = subprocess.run([sys.executable, "-c", script, str(REPO / "tests"), str(tmp_path / "marker")], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {"status": 127, "made": False, "refused": []}, done.stdout + done.stderr
 
 
 def test_the_local_tools_and_the_tests_own_programs_run(tmp_path):
@@ -275,6 +289,8 @@ def test_changes_to_a_file_that_open_does_not_report_are_judged_too(tmp_path):
     ]
     if hasattr(os, "setxattr"):  # Linux
         attempts += [lambda: os.setxattr(NOWHERE / "x", "user.hermetic", b"1"), lambda: os.removexattr(NOWHERE / "x", "user.hermetic")]
+    if hasattr(os, "chflags"):  # macOS and the BSDs; Python documents an os.chflags event
+        attempts.append(lambda: os.chflags(NOWHERE / "x", 0))
     for attempt in attempts:
         refused = _refused_by_the_guard(attempt)
         assert len(refused) == 1 and "outside the test's own folders" in refused[0], refused
@@ -393,7 +409,24 @@ def test_the_tests_own_folders_the_repository_and_the_python_installation_are_op
 
 
 def _run_pytest(args: list[str], env: dict[str, str], **kw) -> subprocess.CompletedProcess:
+    """A pytest run in a child process, with its temp folders inside this test's own (see the test below) unless it was given one."""
+    if not any(a.startswith("--basetemp") for a in args):
+        args = [f"--basetemp={tempfile.mkdtemp(prefix='child-')}/base", *args]
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args], cwd=REPO, env=env, capture_output=True, text=True, timeout=600, **kw)
+
+
+def test_a_child_pytest_keeps_its_temp_folders_inside_the_tests_own(tmp_path):
+    """A pytest run cleans up older sessions' folders in <tmp>/pytest-of-<user> when it starts and again when it exits.
+    That is the machine's shared temp folder: slow when other sessions have left big ones (a trivial child took
+    8 to 35 seconds), and none of a test's business."""
+    project = _project(tmp_path, where="""
+        def test_where(tmp_path_factory):
+            print("BASETEMP=" + str(tmp_path_factory.getbasetemp()))
+    """)
+    done = _run_pytest(["-s", str(project)], dict(os.environ))
+    assert done.returncode == 0, done.stdout + done.stderr
+    base = Path(re.search(r"BASETEMP=(\S+)", done.stdout).group(1)).resolve()
+    assert base.is_relative_to(Path(tempfile.gettempdir()).resolve()), f"the child used {base}, not a folder of this test's own"
 
 
 def _project(tmp_path: Path, **modules: str) -> Path:
