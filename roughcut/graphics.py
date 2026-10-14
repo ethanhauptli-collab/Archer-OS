@@ -978,27 +978,176 @@ def _no_browser() -> GraphicsError:
     return GraphicsError(f"No browser to render graphics with. Install Google Chrome, or run:  {_PY} -m playwright install chromium")
 
 
+# ------------------------------------------------------------------ the page may not reach anything outside itself
+#
+# A design is code the model wrote (or the editor edited), and it runs with its scripts on. It must not be able to send
+# anything anywhere, whatever it tries: the page, its workers and frames, the windows it opens, the names it looks up.
+# Each layer stops what another might miss, and a design that only ever draws notices none of them. Every layer is
+# checked against a loopback listener (HTTP, WebSocket, TCP, UDP) in tests/test_graphics_confinement.py.
+#
+#   content policy (confine_html)     connect-src 'none' (fetch, XHR, beacons, WebSocket, EventSource, in the page and
+#                                     in workers) and 'none' for every other load (default-src: frames, objects, forms,
+#                                     prefetch, stylesheets, scripts); inline scripts and styles, data: and blob: pictures,
+#                                     fonts and media are allowed, which is all a self-contained design uses
+#   the context (_confined_page)      HTTP routed and refused, WebSockets routed and closed (set up before the page
+#                                     exists: Playwright wraps window.WebSocket in a script it injects), service workers
+#                                     blocked, the context offline, downloads refused, WebRTC removed, and any window
+#                                     the page opens closed at once
+#   the browser (_confined_launch)    every connection goes to a proxy that doesn't exist, and no name resolves, so
+#                                     navigation, popups, preconnect, DNS prefetch and anything else the page starts
+#                                     reaches nothing
+#   the sandbox (SANDBOX)             Chromium's own, where this computer lets it run (found once per process)
+
+CSP = (
+    "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline' data:; img-src data: blob:; "
+    "font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; "
+    "worker-src 'none'; form-action 'none'; base-uri 'none'; manifest-src 'none'"
+)
+_COMMENT = r"<!--(?!-?>)(?:(?!--!?>).)*--!?>"
+_DOCTYPE_FIRST = re.compile(rf"(?:[ \t\n\f\r]|{_COMMENT})*<!doctype[^>]*>", re.IGNORECASE | re.DOTALL)
+
+
+def confine_html(html: str) -> str:
+    """The design with a content policy as the first thing in it, ahead of every script and resource.
+
+    Right after the doctype when the page opens with one (putting anything ahead of it would put the page in quirks
+    mode and change its layout), else at the very start. Only whitespace and well-formed comments are looked past, so
+    nothing the design writes can hide the policy inside a comment, a script or a tag. A policy of the design's own
+    can only narrow this one.
+    """
+    tag = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+    m = _DOCTYPE_FIRST.match(html)
+    return html[: m.end()] + tag + html[m.end() :] if m else tag + html
+
+
+DEAD_PROXY = "socks5://roughcut.invalid:1"  # never resolves (see _confined_launch), so nothing is ever connected to
+# WebRTC sends UDP that neither the content policy nor the request routes see; the page gets no way to start it.
+_NO_WEBRTC_JS = (
+    "for (const k of ['RTCPeerConnection', 'webkitRTCPeerConnection']) "
+    "{ try { Object.defineProperty(window, k, {value: undefined, configurable: false, writable: false}); } catch (e) {} }"
+)
+
+
+class _Sandbox:
+    """Whether Chromium's own sandbox runs on this computer: the first launch that works decides, once per process.
+
+    It is tried first (Playwright launches without it unless asked). Where it can't start (no user namespaces in a
+    container or a locked-down Linux, running as root) the same browser is launched without it and the choice is
+    kept, with a note in the log; a render never fails for it.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.on: bool | None = None
+
+    def order(self) -> list[bool]:
+        with self.lock:
+            return [True, False] if self.on is not False else [False]
+
+    def undecided(self) -> bool:
+        with self.lock:
+            return self.on is None
+
+    def settle(self, on: bool, why: str = "") -> None:
+        with self.lock:
+            if self.on is not None:
+                return
+            self.on = on
+        if not on:
+            log(
+                "graphics: Chromium's sandbox can't start here" + (f" ({why})" if why else "")
+                + "; rendering without it. The page is still confined: content policy, blocked network, no name lookups."
+            )
+
+
+SANDBOX = _Sandbox()
+SANDBOX_LAUNCH_SECONDS = 20  # how long the first, sandboxed launch of a browser may take before the unsandboxed one is tried
+
+
+def _confined_launch(kwargs: dict, sandbox: bool, probing: bool = False) -> dict:
+    """Launch options for a browser whose pages can reach nothing: every connection (loopback included) goes to a proxy
+    that doesn't exist, and no host name resolves, so not even a DNS lookup leaves the computer."""
+    options = {
+        **kwargs,
+        "chromium_sandbox": sandbox,
+        "proxy": {"server": DEAD_PROXY, "bypass": "<-loopback>"},
+        "args": ["--host-resolver-rules=MAP * ~NOTFOUND"],
+    }
+    if sandbox and probing:
+        options["timeout"] = SANDBOX_LAUNCH_SECONDS * 1000
+    return options
+
+
+def _launched(sandbox: bool, failed: BaseException | None) -> None:
+    """A browser started, with or without its sandbox; `failed` is why the sandboxed try before it didn't."""
+    SANDBOX.settle(sandbox, _first_line(failed) if failed else "")
+    if failed and SANDBOX.on:  # it ran sandboxed before and didn't this time
+        log(f"graphics: the sandboxed browser didn't start this time ({_first_line(failed)}); started it without the sandbox")
+
+
+def _not_installed(e: BaseException) -> bool:
+    return "doesn't exist" in str(e)  # Playwright: "Executable doesn't exist at ..."
+
+
 def launch_browser(p):
     for kwargs in _launch_options():
-        try:
-            return p.chromium.launch(**kwargs)
-        except Exception:  # noqa: BLE001 - try the next browser
-            continue
+        failed: BaseException | None = None
+        for sandbox in SANDBOX.order():
+            probing = sandbox and SANDBOX.undecided()
+            browser = None
+            try:
+                browser = p.chromium.launch(**_confined_launch(kwargs, sandbox, probing))
+                if probing:  # prove the sandboxed browser can draw a page before it is trusted
+                    page = browser.new_page()
+                    page.wait_for_function("1 + 1 === 2", timeout=SANDBOX_LAUNCH_SECONDS * 1000)
+                    page.close()
+            except Exception as e:  # noqa: BLE001 - try the browser without its sandbox, then the next browser
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if sandbox:
+                    failed = e
+                    if _not_installed(e):
+                        break
+                continue
+            _launched(sandbox, failed)
+            return browser
     raise _no_browser()
 
 
 async def _launch_browser_async(p):
     for kwargs in _launch_options():
-        try:
-            return await p.chromium.launch(**kwargs)
-        except Exception:  # noqa: BLE001 - try the next browser
-            continue
+        failed: BaseException | None = None
+        for sandbox in SANDBOX.order():
+            probing = sandbox and SANDBOX.undecided()
+            browser = None
+            try:
+                browser = await p.chromium.launch(**_confined_launch(kwargs, sandbox, probing))
+                if probing:
+                    page = await browser.new_page()
+                    await _bounded(page.wait_for_function("1 + 1 === 2", timeout=SANDBOX_LAUNCH_SECONDS * 1000), SANDBOX_LAUNCH_SECONDS + 5, "the sandboxed browser didn't draw a page")
+                    await page.close()
+            except Exception as e:  # noqa: BLE001 - try the browser without its sandbox, then the next browser
+                if browser is not None:
+                    try:
+                        await _bounded(browser.close(), 20, "didn't close")
+                    except Exception:  # noqa: BLE001
+                        pass
+                if sandbox:
+                    failed = e
+                    if _not_installed(e):
+                        break
+                continue
+            _launched(sandbox, failed)
+            return browser
     raise _no_browser()
 
 
 # Spelled with this interpreter's path: `pip` alone isn't on PATH when the venv isn't activated.
 _PY = shlex.quote(sys.executable)
-INSTALL_HELP = f"Motion graphics need Playwright. Install it with:  {_PY} -m pip install 'playwright>=1.40'"
+INSTALL_HELP = f"Motion graphics need Playwright. Install it with:  {_PY} -m pip install 'playwright>=1.48'"
 
 
 def renderer_problem() -> str | None:
@@ -1126,8 +1275,53 @@ def _blocker(notes: list[str]):
     return block
 
 
+def _socket_blocker(notes: list[str]):
+    async def block(ws) -> None:  # nor open a WebSocket (it is closed before it connects to anything)
+        _note(notes, f"tried to load {ws.url[:120]} (blocked: designs must be self-contained)")
+        await ws.close(code=1008, reason="blocked")
+
+    return block
+
+
+def _stray_window(notes: list[str]):
+    async def close(page) -> None:  # nor open another window
+        _note(notes, "tried to open another window (closed: a design may only draw)")
+        try:
+            await _bounded(page.close(), 10, "didn't close")
+        except Exception:  # noqa: BLE001 - it may have closed itself already
+            pass
+
+    return close
+
+
+async def _confined_page(browser, canvas_: tuple[int, int, float], notes: list[str]):
+    """A page in a context that can reach nothing (see the notes above `CSP`) and lets nothing else open."""
+    cw, ch, scale = canvas_
+    context = await browser.new_context(
+        viewport={"width": cw, "height": ch}, device_scale_factor=scale, service_workers="block", accept_downloads=False, offline=True
+    )
+    await context.add_init_script(_NO_WEBRTC_JS)
+    route_socket = getattr(context, "route_web_socket", None)  # Playwright 1.48+
+    if route_socket is not None:
+        await route_socket(re.compile(r".*"), _socket_blocker(notes))  # before the page exists: it wraps window.WebSocket in an injected script
+    await context.route("**/*", _blocker(notes))  # the context's, so a window the page opens is covered too
+    page = await context.new_page()
+    context.on("page", _stray_window(notes))  # ours is made; any other is the design's
+    return page
+
+
+# What Chromium logs for a load the content policy refused: "Refused to load the image 'URL' because it violates ...",
+# and for a fetch a second line too: "Fetch API cannot load URL. Refused to connect because it violates ...".
+_REFUSED = re.compile(r"Refused to [^']*'([^']+)' because it violates|cannot load (.+?)\. Refused to \w+ because it violates")
+
+
 def _console(notes: list[str], message) -> None:
-    if message.type == "error" and not message.text.startswith("Failed to load resource"):  # blocked loads are noted by URL
+    if message.type != "error":
+        return
+    refused = _REFUSED.match(message.text)
+    if refused:  # the same note as a load the routes refuse: the page asked for something outside itself
+        _note(notes, f"tried to load {(refused.group(1) or refused.group(2))[:120]} (blocked: designs must be self-contained)")
+    elif not message.text.startswith("Failed to load resource"):  # blocked loads are noted by URL
         _note(notes, f"console error: {message.text}")
 
 
@@ -1141,6 +1335,7 @@ async def _render_async(job: dict) -> dict:
     frame_timeout = job.get("frame_timeout") or FRAME_TIMEOUT
     budget = job.get("budget") or max(BUDGET_MIN, BUDGET_PER_FRAME * frames)
     notes: list[str] = []  # script errors from the page, deduplicated
+    left: list[str] = []  # where the page tried to go, if it tried to leave itself
     result = {"id": gid, "error": None, "notes": notes, "seconds": 0.0, "fast": True}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "image2pipe", "-framerate", job["rate"], "-i", "-", *ENCODER, "-r", job["rate"], str(tmp)]
     t0 = time.monotonic()
@@ -1151,15 +1346,15 @@ async def _render_async(job: dict) -> dict:
             async with async_playwright() as p:
                 browser = await _launch_browser_async(p)
                 try:
-                    page = await browser.new_page(viewport={"width": cw, "height": ch}, device_scale_factor=scale)
+                    page = await _confined_page(browser, (cw, ch, scale), notes)
                     page.set_default_timeout(STEP_TIMEOUT * 1000)
-                    await page.route("**/*", _blocker(notes))
                     page.on("pageerror", lambda e: _note(notes, f"script error: {e}"))
                     page.on("console", lambda m: _console(notes, m))
+                    page.on("framenavigated", lambda f: left.append(f.url) if f == page.main_frame and f.url.split("#")[0] != "about:blank" else None)
                     cdp = await page.context.new_cdp_session(page)
                     # Transparent page background, set once (page.screenshot sets and resets it every frame).
                     await _bounded(cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}}), STEP_TIMEOUT, "didn't start")
-                    await _bounded(page.set_content(brand_fonts.embed(job["html"]), wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
+                    await _bounded(page.set_content(confine_html(brand_fonts.embed(job["html"])), wait_until="load"), STEP_TIMEOUT + 5, "never finished loading")
                     await load_fonts(page)
                     world = await drawing_world(cdp, "didn't start")
                     size = tuple(job.get("size") or (round(cw * scale), round(ch * scale)))
@@ -1218,6 +1413,8 @@ async def _render_async(job: dict) -> dict:
             if ff is not None and ff.poll() is None:
                 ff.kill()
                 ff.wait()
+            if left and result["error"] and result["error"] != "stopped":  # whatever it broke, that is why
+                result["error"] = f"its page tried to navigate away to {left[0][:100]} (blocked: designs must be self-contained); left out"
             if result["error"]:
                 tmp.unlink(missing_ok=True)
     result["seconds"] = time.monotonic() - t0
