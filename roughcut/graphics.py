@@ -772,7 +772,8 @@ def design(
         if not references.warned:
             references.warned = True
             who = getattr(provider, "model", "") or "The model"
-            warnings.append(f"{who} can't look at images, so the reference images were left out")
+            why = getattr(provider, "picture_problem", lambda: None)()  # e.g. a Claude Code too old to keep a picture call in its folder
+            warnings.append(f"{why} The reference images were left out." if why else f"{who} can't look at images, so the reference images were left out")
             log("graphics: the model can't look at images; the reference images were left out")
         references = None
     groups = [placed[n : n + batch] for n in range(0, len(placed), batch)]

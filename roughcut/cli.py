@@ -557,7 +557,7 @@ def _graphics_problem() -> str | None:
 def claude_code_report(offline: bool = False) -> dict:
     """Is Claude Code installed and signed in with a subscription (for --provider claude-code)?"""
     from .providers import ProviderError
-    from .providers.claude_code import auth_status, find_claude
+    from .providers.claude_code import auth_status, find_claude, installed_version, version_problem
 
     binary = find_claude()
     method = None
@@ -567,7 +567,12 @@ def claude_code_report(offline: bool = False) -> dict:
         except ProviderError:
             info = {}
         method = info.get("authMethod") if info.get("loggedIn") else None
-    return {"claude_code": binary, "claude_code_auth": method}
+    report: dict = {"claude_code": binary, "claude_code_auth": method}
+    if binary:  # local, so also checked offline: `claude_code_pictures` False = this version isn't shown pictures (see MIN_PICTURE_VERSION)
+        version = installed_version(binary)
+        report["claude_code_version"] = ".".join(map(str, version)) if version else None
+        report["claude_code_pictures"] = version_problem(version) is None
+    return report
 
 
 def _claude_code_detail(r: dict) -> str:
@@ -578,7 +583,17 @@ def _claude_code_detail(r: dict) -> str:
         return "installed, not signed in: run `claude` and type /login to use your subscription"
     if auth == "api_key":
         return "signed in with an API key, not a subscription"
-    return "signed in with your subscription: --provider claude-code uses it"
+    detail = "signed in with your subscription: --provider claude-code uses it"
+    if r.get("claude_code_pictures") is False:
+        from .providers.claude_code import MIN_PICTURE_TEXT
+
+        version = r.get("claude_code_version")
+        detail += (
+            f". Claude Code {version} is older than {MIN_PICTURE_TEXT}, so Claude is shown no pictures (clip frames, reference images): run `claude update`"
+            if version
+            else f". Couldn't read Claude Code's version, so Claude is shown no pictures (they need {MIN_PICTURE_TEXT} or newer): run `claude update`"
+        )
+    return detail
 
 
 def _print_doctor(r: dict) -> int:

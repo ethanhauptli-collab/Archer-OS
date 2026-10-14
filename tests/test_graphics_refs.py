@@ -327,6 +327,21 @@ def test_a_model_that_cannot_look_at_images_is_told_once_and_sent_none(tmp_path)
     assert refs.sent is False and refs.warned is True
 
 
+class TooOldToSee(CannotSee):
+    """A Claude Code older than the picture boundary needs (see providers.claude_code.MIN_PICTURE_VERSION)."""
+
+    def picture_problem(self):
+        return "Claude Code 2.1.100 is older than 2.1.259. Run `claude update`."
+
+
+def test_an_old_claude_code_says_why_the_reference_images_were_left_out(tmp_path):
+    a, tl, placed = six_graphics()
+    refs = reference_set(tmp_path)
+    warnings: list[str] = []
+    graphics.design(TooOldToSee(), placed, a, tl.frame_duration, brief="", style="", width=640, height=360, warnings=warnings, references=refs)
+    assert warnings == ["Claude Code 2.1.100 is older than 2.1.259. Run `claude update`. The reference images were left out."]
+
+
 class FailsWithPictures(FakeProvider):
     """A model whose design requests fail with `error` while they carry the reference pictures: the first `times` of them
     (None: every one); a request without them is answered."""

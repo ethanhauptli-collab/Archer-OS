@@ -1215,6 +1215,9 @@ def test_graphics_on_but_planning_failed_is_said_plainly(footage, tmp_path, monk
 FAKE_CLAUDE_REPLIES = r'''#!{python}
 import json, os, sys
 mode = os.environ["FAKE_CLAUDE_MODE"]
+if sys.argv[1:] == ["--version"]:  # the picture requests check it (providers.claude_code.MIN_PICTURE_VERSION)
+    print("2.1.299 (Claude Code)")
+    sys.exit(0)
 if sys.argv[1:3] == ["auth", "status"]:
     print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai"}}))
     sys.exit(0)
