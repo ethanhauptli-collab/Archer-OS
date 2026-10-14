@@ -1311,12 +1311,16 @@ DESIGN_FILE = re.compile(r"G\d+-[a-z0-9-]+\.html")  # a graphic's saved design, 
 LEFT_OUT = "left-out"  # graphics/left-out/: designs of planned graphics a cut couldn't place, kept for the next re-cut
 
 
-def keep_left_out(specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_html: dict[int, str], out_dir: Path) -> list[dict]:
+def keep_left_out(
+    specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_html: dict[int, str], out_dir: Path, pending: dict[int, dict] | None = None,
+) -> list[dict]:
     """graphics.json entries for the planned graphics this cut doesn't place (one would have covered another,
     or its words aren't in this cut), so the next re-cut can place them again without the model.
 
     A designed one keeps its design in graphics/left-out/, named by its place in the plan (01 is the
     plan's first graphic): renumbering never writes over it, and it isn't put aside as unused.
+    `pending` (write_manifest): a design that is an earlier version's, standing in for a new one still to come, keeps that mark
+    here too, so the graphic is still owed its new look when a later cut has room for it again.
     """
     there = {g.index for g in placed}
     entries = []
@@ -1329,6 +1333,11 @@ def keep_left_out(specs: list[GraphicSpec], placed: list[PlacedGraphic], saved_h
             (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
             (out_dir / rel).write_text(saved_html[index], encoding="utf-8")
             entry["html"] = rel
+            mark = (pending or {}).get(index)
+            if mark:
+                entry["redesign_pending"] = mark["stage"]
+                if mark.get("reason"):
+                    entry["pending_reason"] = mark["reason"]
         entries.append(entry)
     return entries
 
@@ -1598,10 +1607,11 @@ def write_manifest(
 
 def saved_pending(out_dir: Path) -> dict[int, dict]:
     """{plan index: {"stage", "reason"}} for the graphics of graphics.json that still stand on an earlier version's work
-    ("redesign_pending", see write_manifest); not the ones the cut left out."""
+    ("redesign_pending", see write_manifest). One the cut has no room for keeps its mark (keep_left_out); only the entries
+    with a clip on the timeline count as shown (pipeline.pending_graphics)."""
     found: dict[int, dict] = {}
     for g in _read_manifest(out_dir).get("graphics", []):
-        if not isinstance(g, dict) or g.get("placed") is False or g.get("redesign_pending") not in (PENDING_DESIGN, PENDING_RENDER):
+        if not isinstance(g, dict) or g.get("redesign_pending") not in (PENDING_DESIGN, PENDING_RENDER):
             continue
         try:
             found[int(g["index"])] = {"stage": g["redesign_pending"], "reason": str(g.get("pending_reason") or "")}
@@ -1766,7 +1776,7 @@ def make(
     folder = out_dir / "graphics"
     pending = dict(pending or {})
     if not placed:
-        waiting = keep_left_out(planned if planned is not None else specs, [], saved_html, out_dir) if saved_html is not None else []
+        waiting = keep_left_out(planned if planned is not None else specs, [], saved_html, out_dir, pending) if saved_html is not None else []
         if waiting:
             write_manifest(out_dir, [], {}, {}, tl, style, house_style=house_style, left_out=waiting)
             _put_aside_old_designs(folder, [], {}, waiting)
@@ -1806,7 +1816,7 @@ def make(
     # asking the model again.
     previous = _read_manifest(out_dir)
     save_designs(placed, html, folder)
-    waiting = keep_left_out(planned if planned is not None else specs, placed, saved_html, out_dir) if saved_html is not None else []
+    waiting = keep_left_out(planned if planned is not None else specs, placed, saved_html, out_dir, pending) if saved_html is not None else []
     kept = unchanged(placed, html, folder, tl, previous)
     notes: dict[str, list[str]] = _old_notes(previous, placed, html, tl, kept)
     write_manifest(out_dir, placed, kept, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting, pending=pending)
@@ -1816,7 +1826,7 @@ def make(
         write_manifest(out_dir, placed, {**files, **done}, html, tl, style, notes=notes, house_style=found["house_style"], left_out=waiting, pending=pending)
 
     files = render(placed, html, folder, tl, workers=workers, warnings=warnings, previous=previous, notes=notes, keep_out=keep_out, on_rendered=record)
-    if earlier:  # a graphic that didn't render keeps the clip it had, so the version never has fewer graphics than the one before
+    if earlier:  # a graphic that didn't render keeps the clip it had for the same words (if it fits), not nothing
         _keep_earlier_clips(placed, html, files, earlier, tl, notes, pending, warnings, out_dir)
     # Made way for a graphic that didn't render: render it again on its words and at its full length (the old clip stays if that fails).
     back = make_way_back(placed, set(files))

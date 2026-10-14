@@ -46,7 +46,13 @@ CREATE TABLE project_kits (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COL
 CREATE TABLE project_kit_assets (kit_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, PRIMARY KEY (kit_id, asset_id));
 """
 
-NOW = int(time.time())
+NOW = int(time.time())  # for what is compared exactly (a kit's exported_at, a result checked at a given moment)
+
+
+def _now() -> int:
+    """When a snapshot's age is measured from: taken as the test runs. NOW is taken when this file is imported, and a
+    full run is hours later by the time the last test reads an age ("3 h old")."""
+    return int(time.time())
 
 
 class FakeStudio:
@@ -177,9 +183,9 @@ def _asset(i, rel, **kw):
 
 
 def test_the_newest_snapshot_is_copied_and_minus_10_beats_minus_9(fake, tmp_path, only_the_cache_is_opened):
-    fake.snapshot("1700000000-42-9", NOW - 3600, libraries=[("/Libraries/nine", "nine")])
-    fake.snapshot("1700000000-42-10", NOW - 3600, libraries=[("/Libraries/ten", "ten")])
-    fake.snapshot("1690000000-42-99", NOW - 86400 * 3, libraries=[("/Libraries/old", "old")])
+    fake.snapshot("1700000000-42-9", _now() - 3600, libraries=[("/Libraries/nine", "nine")])
+    fake.snapshot("1700000000-42-10", _now() - 3600, libraries=[("/Libraries/ten", "ten")])
+    fake.snapshot("1690000000-42-99", _now() - 86400 * 3, libraries=[("/Libraries/old", "old")])
     with untouched(fake.dir):
         listed = studio.snapshots()
         copy = studio.newest_copy()
@@ -196,7 +202,7 @@ def test_the_newest_snapshot_is_copied_and_minus_10_beats_minus_9(fake, tmp_path
 
 
 def test_a_half_written_manifest_is_skipped_without_a_word(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
     (fake.dir / "backups" / "1700000100-1-1.json").write_text('{"id": "1700000100-1-1", "name": "Catalog snap')
     (fake.dir / "backups" / "1700000200-1-1.json").write_text(json.dumps({"id": "1700000200-1-1", "created_at": "yesterday"}))
     with untouched(fake.dir):
@@ -206,8 +212,8 @@ def test_a_half_written_manifest_is_skipped_without_a_word(fake):
 
 
 def test_a_tampered_snapshot_falls_back_and_says_so(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    newest = fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    newest = fake.snapshot("1700000500-1-1", _now() - 3600)
     data = bytearray(newest.read_bytes())
     data[len(data) // 2] ^= 0xFF  # same size, different bytes
     newest.write_bytes(bytes(data))
@@ -221,9 +227,9 @@ def test_a_tampered_snapshot_falls_back_and_says_so(fake):
 
 
 def test_a_snapshot_archived_while_reading_falls_back_and_says_so(fake, monkeypatch):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    fake.snapshot("1700000500-1-1", NOW - 3600)
-    gone = fake.snapshot("1700000900-1-1", NOW - 60)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
+    gone = fake.snapshot("1700000900-1-1", _now() - 60)
     gone.unlink()  # Studio archives the .sqlite first, then its manifest
     real_open = os.open
 
@@ -240,8 +246,8 @@ def test_a_snapshot_archived_while_reading_falls_back_and_says_so(fake, monkeypa
 
 
 def test_a_snapshot_with_sqlite_files_beside_it_is_refused(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    newest = fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    newest = fake.snapshot("1700000500-1-1", _now() - 3600)
     Path(f"{newest}-journal").write_bytes(b"")
     with untouched(fake.dir):
         copy = studio.newest_copy()
@@ -249,15 +255,15 @@ def test_a_snapshot_with_sqlite_files_beside_it_is_refused(fake):
 
 
 def test_symlinked_manifests_and_snapshots_are_refused(fake, tmp_path):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
     # A manifest that's a link: not listed at all.
-    elsewhere = fake.snapshot("1700000500-1-1", NOW - 3600)
+    elsewhere = fake.snapshot("1700000500-1-1", _now() - 3600)
     manifest = elsewhere.with_suffix(".json")
     moved = tmp_path / "moved.json"
     manifest.rename(moved)
     manifest.symlink_to(moved)
     # A snapshot that's a link to a perfectly good file elsewhere: refused, like Studio does.
-    linked = fake.snapshot("1700000900-1-1", NOW - 60)
+    linked = fake.snapshot("1700000900-1-1", _now() - 60)
     real = tmp_path / "real.sqlite"
     linked.rename(real)
     linked.symlink_to(real)
@@ -270,8 +276,8 @@ def test_symlinked_manifests_and_snapshots_are_refused(fake, tmp_path):
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
 def test_a_fifo_where_the_snapshot_should_be_does_not_hang(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    fifo = fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    fifo = fake.snapshot("1700000500-1-1", _now() - 3600)
     fifo.unlink()
     os.mkfifo(fifo)
     done: dict = {}
@@ -284,8 +290,8 @@ def test_a_fifo_where_the_snapshot_should_be_does_not_hang(fake):
 
 
 def test_a_newer_catalog_format_is_refused_and_reported(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    fake.snapshot("1700000500-1-1", NOW - 3600, schema=4, user_version=4)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    fake.snapshot("1700000500-1-1", _now() - 3600, schema=4, user_version=4)
     with untouched(fake.dir):
         copy = studio.newest_copy()
         report = studio.status(offline=True)
@@ -294,7 +300,7 @@ def test_a_newer_catalog_format_is_refused_and_reported(fake):
 
 
 def test_a_snapshot_whose_catalog_says_format_4_is_refused(fake):
-    fake.snapshot("1700000500-1-1", NOW - 3600, user_version=4)  # the manifest says 3, the file says 4
+    fake.snapshot("1700000500-1-1", _now() - 3600, user_version=4)  # the manifest says 3, the file says 4
     with untouched(fake.dir):
         copy = studio.newest_copy()
         with pytest.raises(studio.StudioUnavailable, match="format 4"):
@@ -304,14 +310,14 @@ def test_a_snapshot_whose_catalog_says_format_4_is_refused(fake):
 
 
 def test_a_catalog_missing_a_column_roughcut_reads_is_refused(fake):
-    fake.snapshot("1700000500-1-1", NOW - 3600, drop_column="browse_visible")
+    fake.snapshot("1700000500-1-1", _now() - 3600, drop_column="browse_visible")
     copy = studio.newest_copy()
     with pytest.raises(studio.StudioUnavailable, match="browse_visible"):
         studio.open_copy(copy.path)
 
 
 def test_extra_tables_and_columns_are_fine(fake):
-    path = fake.snapshot("1700000500-1-1", NOW - 3600)
+    path = fake.snapshot("1700000500-1-1", _now() - 3600)
     con = sqlite3.connect(path)
     con.executescript("ALTER TABLE assets ADD COLUMN metadata_revision INTEGER; CREATE TABLE later_feature (x);")
     con.close()
@@ -323,8 +329,8 @@ def test_extra_tables_and_columns_are_fine(fake):
 
 
 def test_the_copy_from_before_a_catalog_restore_is_flagged(fake):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
-    fake.snapshot("1700000500-1-1", NOW - 60, name="Before catalog restore")
+    fake.snapshot("1700000000-1-1", _now() - 7200)
+    fake.snapshot("1700000500-1-1", _now() - 60, name="Before catalog restore")
     with untouched(fake.dir):
         report = studio.status(offline=True)
     assert report["snapshot"]["before_restore"] and "before a catalog restore" in report["summary"]
@@ -332,7 +338,7 @@ def test_the_copy_from_before_a_catalog_restore_is_flagged(fake):
 
 
 def test_an_imported_or_old_snapshot_is_flagged(fake):
-    fake.snapshot("1700000000-1-1", NOW - 86400 * 9, name="Imported: catalog from the old Mac")
+    fake.snapshot("1700000000-1-1", _now() - 86400 * 9, name="Imported: catalog from the old Mac")
     notes = studio.newest_copy().notes()
     assert any("imported" in n for n in notes) and any("9 days old" in n for n in notes)
 
@@ -356,7 +362,7 @@ def test_no_snapshot_yet_is_a_reason_not_an_error(fake):
 
 
 def test_the_copy_is_reused_and_old_copies_pruned(fake, monkeypatch, tmp_path):
-    fake.snapshot("1700000000-1-1", NOW - 7200)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
     first = studio.newest_copy()
     assert not first.reused
     real_open = os.open
@@ -381,7 +387,7 @@ def test_the_copy_is_reused_and_old_copies_pruned(fake, monkeypatch, tmp_path):
     young_partial.write_bytes(b"x")
     for i, sid in enumerate(("1700000500-1-1", "1700000900-1-1")):
         time.sleep(0.02)
-        fake.snapshot(sid, NOW - 3000 + i)
+        fake.snapshot(sid, _now() - 3000 + i)
         studio.newest_copy()
     names = sorted(p.name for p in cache.iterdir())
     assert names == [".1700000900-1-1.def.partial", "1700000500-1-1.sqlite", "1700000900-1-1.sqlite", "keep-me.txt"]
@@ -389,7 +395,7 @@ def test_the_copy_is_reused_and_old_copies_pruned(fake, monkeypatch, tmp_path):
 
 def test_a_cache_path_with_url_characters_and_nfd_letters_works(fake, tmp_path, monkeypatch, only_the_cache_is_opened):
     fake.libraries = [("/Libraries/one", "one")]
-    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[_asset(1, "a.wav", kind="audio", category="audio")])
+    fake.snapshot("1700000500-1-1", _now() - 3600, assets=[_asset(1, "a.wav", kind="audio", category="audio")])
     odd = tmp_path / "odd" / "ca#c?he%20" / unicodedata.normalize("NFD", "Café")
     with untouched(fake.dir):
         copy = studio.newest_copy(cache_dir=odd)
@@ -407,7 +413,7 @@ def test_a_cache_path_with_url_characters_and_nfd_letters_works(fake, tmp_path, 
 
 def test_items_paths_collections_and_kits(fake, library):
     root = str(library)
-    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[
+    fake.snapshot("1700000500-1-1", _now() - 3600, assets=[
         _asset(1, "Sound Effects/whoosh.wav", kind="audio", category="audio", provider="Vendor", license="Standard", tags="whoosh, fast ,, transition",
                duration=1.5, favorite=1),
         _asset(2, "Sound Effects/gone.wav", kind="audio", category="audio", missing=1),
@@ -502,7 +508,7 @@ def test_kits_in_another_format_or_kind_are_refused(tmp_path):
 
 def test_deeply_nested_json_is_skipped_or_a_reason_never_a_crash(fake, tmp_path):
     """A manifest, maintenance.json or kit nested past Python's recursion limit (well under 1 MiB) reads as unreadable."""
-    fake.snapshot("1700000000-1-1", NOW - 7200)
+    fake.snapshot("1700000000-1-1", _now() - 7200)
     deep = "[" * 200_000 + "]" * 200_000
     (fake.dir / "backups" / "1700000500-1-1.json").write_text(deep)
     (fake.dir / "maintenance.json").write_text("{" + '"a":' * 100_000 + "1" + "}" * 100_000)
@@ -619,7 +625,7 @@ def test_a_share_mounted_under_its_duplicate_name_is_the_same_library(fake, tmp_
     assert studio.inside_library("/Volumes/Media-/Studio/x", roots) is None
     assert studio.inside_library("/Elsewhere/Media-1/Studio/x", ["/Elsewhere/Media/Studio"]) is None  # only mount points
     fake.libraries = [("/Volumes/Media/Studio", "Studio")]
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     guard, note = studio.output_guard(Path("/Volumes/Media-1/Studio/Projects/Shoot_roughcut"))
@@ -651,7 +657,7 @@ def test_the_warnings_folder_can_be_pasted_into_terminal(fake, library, tmp_path
     import shlex
 
     monkeypatch.setenv("HOME", str(tmp_path / "my home"))
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     guard, _ = studio.output_guard(library / "Projects" / "Promo shoot_roughcut")
     hint = guard.message.split("outside the library: ", 1)[1]
     args = cli.build_parser().parse_args(["build", "/tmp/shoot", *shlex.split(hint)])
@@ -668,7 +674,7 @@ def shoot(footage, library, fake) -> Path:
     folder.mkdir(parents=True)
     for name in ("talk.mov", "talk.json", "broll.mp4", "broll.json"):
         shutil.copy2(footage / name, folder / name)
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     return folder
 
 
@@ -741,7 +747,7 @@ def test_a_library_row_with_no_path_never_turns_the_offer_back_into_the_library(
     for name in ("talk.mov", "talk.json", "broll.mp4", "broll.json"):
         shutil.copy2(footage / name, folder / name)
     fake.libraries = [("", "Old row"), (str(library), "Studio Library")]
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -803,7 +809,7 @@ def test_declining_the_offer_keeps_the_default_folder(shoot, tmp_path, monkeypat
 
 
 def test_a_build_outside_every_library_says_nothing_about_studio(footage, library, fake, tmp_path):
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     out = tmp_path / "out"
     result = pipeline.build(Options(inputs=[footage], out=out, provider="none", transcriber="none", cache_dir=tmp_path / "cache"))
     assert not any("Venture Studio" in w for w in result.warnings)
@@ -817,7 +823,7 @@ def test_a_build_without_studio_says_nothing_about_it(footage, tmp_path):
 
 
 def test_the_wording_follows_studios_automatic_updates(fake, library):
-    fake.snapshot("1700000500-1-1", NOW - 3600)
+    fake.snapshot("1700000500-1-1", _now() - 3600)
     out = library / "Projects" / "Shoot_roughcut"
     guard, _ = studio.output_guard(out)
     assert "within about a minute" in guard.message and guard.library.name == "Studio Library"
@@ -831,7 +837,7 @@ def test_the_wording_follows_studios_automatic_updates(fake, library):
 
 
 def test_status_and_doctor_report_studio(fake, library, tmp_path, capsys, monkeypatch):
-    fake.snapshot("1700000500-1-1", NOW - 3 * 3600, assets=[_asset(1, "Sound Effects/whoosh.wav", kind="audio", category="audio")])
+    fake.snapshot("1700000500-1-1", _now() - 3 * 3600, assets=[_asset(1, "Sound Effects/whoosh.wav", kind="audio", category="audio")])
     (library / "Projects" / "Shoot").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     with untouched(fake.dir, library):
@@ -895,7 +901,7 @@ def _sounds(library: Path) -> None:
 
 def _sfx_catalog(fake: FakeStudio, *, kits=None) -> None:
     rel = "Sound Effects/Accents/"
-    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[
+    fake.snapshot("1700000500-1-1", _now() - 3600, assets=[
         _asset(1, rel + "whoosh_soft_01.wav", kind="audio", category="audio", provider="Vendor A", license="Standard", duration=1.0),
         _asset(2, rel + "take_02.wav", kind="audio", category="audio", tags="transition, fast", provider="Vendor A", license="Standard"),
         _asset(3, rel + "impact_hit_01.wav", kind="audio", category="audio", provider="Vendor B", license="Extended"),

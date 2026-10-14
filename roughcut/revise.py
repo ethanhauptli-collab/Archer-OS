@@ -357,6 +357,22 @@ def enforce(plan: Plan, analysis: Analysis, *, keep: list[str], avoid: list[str]
 
 LISTED = 10  # lines or shots named one by one; the rest are counted
 CHANGE_NOTES = ("Pacing:", "Punch-ins:", "Sound effects:", "Redesigning the graphics")  # settings notes that say something changed (the rest only explain)
+GRAPHICS_NOT_YET = "Graphics: none in this cut yet; it was written before they were made."  # the cut a run leaves when it stops before them
+NO_NEW_LOOK = "Redesigning the graphics: no new design came back, so they keep their earlier look (see Warnings)."
+
+
+def redesign_notes(settings_notes: list[str], redesign: str, outcome: dict | None) -> list[str]:
+    """The settings notes as what came of them. `redesign` is the note that every graphic is designed again: it isn't said of
+    the cut written before the graphics are made (outcome["interim"]: nothing is designed yet), and says no new design came
+    back when every graphic that had room kept its earlier one (a usage limit, a failed request)."""
+    if not redesign or not outcome:
+        return list(settings_notes)
+    if outcome.get("interim"):
+        return [n for n in settings_notes if n != redesign]
+    placed, fell = outcome.get("placed"), outcome.get("fell_back")
+    if placed and fell and set(placed) <= set(fell):
+        return [NO_NEW_LOOK if n == redesign else n for n in settings_notes]
+    return list(settings_notes)
 
 
 def _refs(plan: Plan) -> list[str]:
@@ -621,6 +637,7 @@ def change_items(
     outcome: dict | None = None,
     accents: tuple[int | None, int | None] = (None, None),
     no_graphics: str | None = None,
+    graphics_pending: bool = False,
 ) -> tuple[list[str], bool]:
     """What a revision changed, as plain sentences, and whether it changed nothing a viewer would see: (items, unchanged).
 
@@ -629,6 +646,8 @@ def change_items(
     `accents`: how many sound-effect accents the version before had and this one has (None: not known).
     `no_graphics`: the sentence for a revision with graphics on whose plan has none while the version before had some (why, and
     what to do: pipeline.no_graphics_texts), which heads the changes to the graphics.
+    `graphics_pending`: this is the cut written before its graphics were made (a run that stops there leaves it): the graphics
+    aren't in it yet, so the list says that in one line, not what became of each.
     `outcome`: once the graphics are made, {"in_cut": plan indexes that made it into the cut, "fell_back": plan indexes whose
     new design never came back and that kept the earlier one, "clip_kept": plan indexes whose new design didn't render and that
     play the clip they had, "placed": plan indexes the cut had room for} (_graphic_changes),
@@ -700,6 +719,8 @@ def change_items(
         gfx_changes = [f"Motion graphics are off: the {len(previous.graphics)} graphics of {'v' + str(previous_version) if previous_version else 'the previous cut'} are not in this version"]
     if no_graphics and graphics_on and previous.graphics and not revised.graphics:
         gfx_changes = [no_graphics] + gfx_changes
+    if graphics_pending and graphics_on and revised.graphics:
+        gfx_changes, gfx_same = [GRAPHICS_NOT_YET], []  # nothing is made yet: not what any graphic became
     plan_changes += gfx_changes
 
     skip = _noted(notes)
@@ -787,7 +808,7 @@ def stringout_back(previous_version: int | None) -> str:
 
 def recut_items(
     was: dict, now: dict, previous_version: int | None, *, before: dict, after: dict, rerendered: int | None = None, added: int | None = None,
-    stringout_returns: bool = False, redesigned: int = 0,
+    stringout_returns: bool = False, redesigned: int = 0, previous_partial: bool = False,
 ) -> tuple[list[str], bool]:
     """What a re-cut at other settings changed from the version before, in numbers: (items, unchanged).
 
@@ -797,6 +818,8 @@ def recut_items(
     Stringout project and the revision before it wrote none (said once, after the rest, unless a setting already says so).
     `redesigned`: graphics that kept the version before's design and clip while their new look was still to be designed, and got
     it in this run (`render --design-missing`): said as such, and not counted again among the clips rendered again.
+    `previous_partial`: the version before was the cut written before its graphics were made, which had none: every graphic this
+    cut has is new to it, said once (it kept no earlier look there).
     """
     deltas = setting_deltas(was, now)
     if not deltas and not was.get("style") and before.get("seconds") is None and before.get("edits") is None:
@@ -808,12 +831,13 @@ def recut_items(
         if before.get(key) is not None and before[key] != after[key]:
             numbers.append(f"{label}: {before[key]} → {after[key]}")
     numbers += [item for item in [accent_item(before.get("accents"), after.get("accents"))] if item]
-    if redesigned:
+    if redesigned and not previous_partial:
         was_in = f"v{previous_version}" if previous_version else "the version before"
         numbers.append(f"Graphics: {redesigned} got {'its' if redesigned == 1 else 'their'} new look (designed now; {'it' if redesigned == 1 else 'they'} kept the earlier look in {was_in})")
         rerendered = max(0, (rerendered or 0) - redesigned)
     if added:
-        numbers.append(f"Graphics: {added} added to the cut")
+        was_in = f"v{previous_version}" if previous_version else "the version before"
+        numbers.append(f"Graphics: {added} added to the cut" + (f" ({was_in} was written before its graphics were made)" if previous_partial else ""))
     if rerendered:
         numbers.append(f"Graphics: {rerendered} {'was' if rerendered == 1 else 'were'} rendered again (a design you edited, or timing that moved)")
     back = [stringout_back(previous_version)] if stringout_returns and not any(d.startswith("Stringout project") for d in deltas) else []

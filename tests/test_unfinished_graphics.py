@@ -1,4 +1,4 @@
-"""A version never leaves the folder with fewer graphics, or without its predecessor, than a run that stopped.
+"""A run that stops leaves the folder with the cut before it and, for each graphic that says the same words, its earlier design and clip.
 
 An interim cut (written before the graphics are made) takes nothing off the top level; a redesign whose new designs or
 renders don't come back keeps the earlier version's design and clip, marked `redesign_pending`, until `roughcut render
@@ -148,7 +148,7 @@ def test_a_revise_that_stops_after_its_interim_cut_leaves_the_cut_before_it_in_p
     assert current["n"] == 2 and current["partial"] is True and current["fcpxml"] == "footage v2.fcpxml"
     saved = result_json(out)
     assert saved["version"] == 2 and saved["partial"] is True and Path(saved["fcpxml"]).name == "footage v2.fcpxml"
-    assert saved["graphics"]["note"] == "still being made when this cut was written"
+    assert saved["graphics"]["note"] == "not made yet: this cut was written before its graphics"
     report = (out / "edit_report.md").read_text()
     assert report.split("\n")[2].startswith("> This cut is partial: it was written before its motion graphics were made")
     assert "The cut before it, v1, is still in this folder." in report
@@ -469,7 +469,7 @@ def test_a_revision_that_returns_no_graphics_says_so_and_what_to_do(footage, tmp
     out, provider, renderer, v1 = build_v1(footage, tmp_path, monkeypatch, cache, clear_mov)
     provider.plan = {**CANNED_PLAN, "graphics": []}
     result = pipeline.revise(out, "Graphics: make them bolder, orange.", Options(inputs=[]), redesign_graphics=True)
-    said = "No graphics in this version: the revision returned none. Revise again and say which graphics to keep."
+    said = "No graphics in this version: the revision returned none. To bring graphics back, revise again and ask for the ones you want in your notes; they are designed again."
     assert said in result.warnings and not any("didn't ask for any" in w for w in result.warnings)
     assert said in result.changes["items"] and result.changes["items"].index(said) < result.changes["items"].index("Removed graphic: \"Heading Out\"")
     assert result.summary["graphics"]["note"] == "the revision returned none" and uses(result.fcpxml) == []
@@ -531,10 +531,15 @@ def test_a_recut_of_a_revision_says_the_stringout_project_is_back(footage, tmp_p
     assert back in same.report.read_text()
     tighter = pipeline.rerender(out, Options(inputs=[], style="tight"), overrides={"style"})
     assert tighter.changes["items"][0] == "Pacing: medium → tight" and back not in tighter.changes["items"]  # v3 had one; this one carries on
-    # A revision then a re-cut that leaves it out says nothing about it; one that turns it on says the setting.
+    # A revision then a re-cut that leaves it out changes nothing about the project list (the revision wrote none): it says
+    # nothing about it, as the app's Finish graphics needs; with the cut changed it lists only the change.
     pipeline.revise(out, "Tighter hook.", Options(inputs=[]))
     quiet = pipeline.rerender(out, Options(inputs=[], stringout=False), overrides={"stringout"})
-    assert quiet.changes["items"][0] == "Stringout project: on → off" and not any(i.startswith("A Stringout project is back") for i in quiet.changes["items"])
+    assert quiet.changes["unchanged"] is True and quiet.changes["items"][0].startswith("This is the same cut as v5")
+    assert not any("Stringout" in i for i in quiet.changes["items"]) and len(check_invariants(quiet.fcpxml)) == 1
+    assert json.loads((out / "plan.json").read_text())["settings"]["stringout"] is False  # the next re-cut carries on without it
+    looser = pipeline.rerender(out, Options(inputs=[], style="loose"), overrides={"style"})
+    assert looser.changes["items"][0].startswith("Pacing:") and not any("Stringout" in i for i in looser.changes["items"])
 
 
 # ------------------------------------------------------------------ (f) importing a version after the first

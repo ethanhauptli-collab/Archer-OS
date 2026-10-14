@@ -1855,7 +1855,7 @@ def test_a_cut_written_before_its_graphics_has_a_matching_result_json(footage, t
     assert Path(result["fcpxml"]).is_file() and Path(result["fcpxml"]).name == "footage v2.fcpxml"
     assert _top_fcpxml(out) == ["footage v1.fcpxml", "footage v2.fcpxml"]
     assert result["version"] == 2 and result["partial"] is True
-    assert result["graphics"]["note"] == "still being made when this cut was written"
+    assert result["graphics"]["note"] == "not made yet: this cut was written before its graphics"
     current = versions.current(out)
     assert (current["n"], current["fcpxml"], current["partial"]) == (2, "footage v2.fcpxml", True)
 
