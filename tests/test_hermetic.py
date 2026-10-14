@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ import pytest
 from hermetic import REAL_HOME, REPO, HermeticViolation, expecting_violations
 
 HAS_REAL_HOME = bool(REAL_HOME) and REAL_HOME != os.sep
+NOWHERE = Path(REAL_HOME if HAS_REAL_HOME else "/") / "hermetic-probe-no-such-folder"  # nothing is ever there: a call the guard misses fails harmlessly
 
 
 # ------------------------------------------------------------------ the environment
@@ -214,6 +216,145 @@ def test_files_outside_the_sandbox_are_neither_written_nor_read(tmp_path, monkey
                 with pytest.raises(HermeticViolation):
                     attempt()
         assert len(refused) == 4 and all("real home folder" in r for r in refused)
+
+
+# ------------------------------------------------------------------ what a guard built on `open`, `connect` and `Popen` would miss
+
+
+def _refused_by_the_guard(attempt) -> list[str]:
+    """What the guard refused while `attempt` ran. A call it lets through fails harmlessly: nothing exists where these point."""
+    with expecting_violations() as refused:
+        try:
+            attempt()
+        except (OSError, sqlite3.Error):  # HermeticViolation is an OSError; the rest reached the system call
+            pass
+    return refused
+
+
+def test_sqlite_is_judged_by_the_file_it_opens(tmp_path):
+    """sqlite opens its file in C: Python reports `sqlite3.connect` and no `open`. Venture Studio's live catalog is
+    reached this way if the code ever opens it instead of its verified copy."""
+    refused = _refused_by_the_guard(lambda: sqlite3.connect(str(NOWHERE / "x.db")))  # a plain name is read-write-create
+    assert len(refused) == 1 and "outside the test's own folders" in refused[0], refused
+    assert _refused_by_the_guard(lambda: sqlite3.connect(f"file:{NOWHERE}/x.db?mode=rwc", uri=True))
+    if HAS_REAL_HOME:
+        refused = _refused_by_the_guard(lambda: sqlite3.connect(f"file:{NOWHERE}/x.db?mode=ro&immutable=1", uri=True))
+        assert len(refused) == 1 and "real home folder" in refused[0], refused  # read-only is a read
+    for fine in (
+        lambda: sqlite3.connect(":memory:").close(),
+        lambda: sqlite3.connect("").close(),  # a private temporary database
+        lambda: sqlite3.connect("file::memory:?cache=shared", uri=True).close(),
+        lambda: sqlite3.connect(tmp_path / "mine.db").close(),  # a Path, in the test's own folder
+        lambda: sqlite3.connect(f"file:{tmp_path / 'mine.db'}?mode=ro&immutable=1", uri=True).close(),
+        lambda: sqlite3.connect(f"file:{REPO / 'pyproject.toml'}?mode=ro", uri=True).close(),  # the repository is read-only territory
+    ):
+        assert _refused_by_the_guard(fine) == []
+
+
+def test_changes_to_a_file_that_open_does_not_report_are_judged_too(tmp_path):
+    attempts = [
+        lambda: os.truncate(NOWHERE / "x", 0),
+        lambda: os.chown(NOWHERE / "x", os.getuid(), os.getgid()),
+    ]
+    if hasattr(os, "setxattr"):  # Linux
+        attempts += [lambda: os.setxattr(NOWHERE / "x", "user.hermetic", b"1"), lambda: os.removexattr(NOWHERE / "x", "user.hermetic")]
+    for attempt in attempts:
+        refused = _refused_by_the_guard(attempt)
+        assert len(refused) == 1 and "outside the test's own folders" in refused[0], refused
+    mine = tmp_path / "mine.txt"
+    mine.write_text("abc")
+    os.truncate(mine, 1)
+    os.chown(mine, os.getuid(), os.getgid())
+    assert mine.read_text() == "a"
+
+
+def test_a_link_in_the_sandbox_does_not_lead_out_of_it(tmp_path):
+    out = tmp_path / "out"
+    out.symlink_to("/")
+    refused = _refused_by_the_guard(lambda: (out / "hermetic-probe-no-such-folder" / "x").write_text("x"))
+    assert len(refused) == 1 and "through a link" in refused[0], refused
+    if HAS_REAL_HOME:
+        home = tmp_path / "home-link"
+        home.symlink_to(REAL_HOME)
+        assert _refused_by_the_guard(lambda: os.listdir(home))
+        assert _refused_by_the_guard(lambda: (home / ".zshrc").read_bytes())
+    # a link between the test's own folders is fine, both ways round
+    (tmp_path / "real").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    (tmp_path / "alias" / "f.txt").write_text("x")
+    assert (tmp_path / "real" / "f.txt").read_text() == "x" and sorted(os.listdir(tmp_path / "alias")) == ["f.txt"]
+    (tmp_path / "repository").symlink_to(REPO)
+    assert _refused_by_the_guard(lambda: os.listdir(tmp_path / "repository")) == []  # a link out of the sandbox to somewhere readable is just a read
+
+
+def test_the_other_ways_to_send_or_look_up_are_refused():
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        refused = _refused_by_the_guard(lambda: udp.sendmsg([b"x"], [], 0, ("192.0.2.1", 53)))
+        assert len(refused) == 1 and "(network)" in refused[0], refused
+    finally:
+        udp.close()
+    numeric = socket.NI_NUMERICHOST | socket.NI_NUMERICSERV  # no lookup is made even if the guard misses
+    for attempt in (lambda: socket.gethostbyaddr("192.0.2.1"), lambda: socket.getnameinfo(("192.0.2.1", 80), numeric)):
+        refused = _refused_by_the_guard(attempt)
+        assert len(refused) == 1 and "(network)" in refused[0], refused
+    assert _refused_by_the_guard(lambda: socket.getnameinfo(("127.0.0.1", 80), numeric)) == []
+
+
+def test_a_change_relative_to_a_directory_the_program_holds_is_judged_by_that_directory(tmp_path):
+    """What shutil.rmtree does inside the folder it removes; os.remove(name, dir_fd=...) is the same call."""
+    held = os.open(os.sep, os.O_RDONLY)
+    try:
+        refused = _refused_by_the_guard(lambda: os.remove("hermetic-probe-no-such-file", dir_fd=held))
+        assert len(refused) == 1 and "outside the test's own folders" in refused[0], refused
+        assert _refused_by_the_guard(lambda: os.rename("hermetic-probe-no-such-file", "hermetic-probe-other", src_dir_fd=held, dst_dir_fd=held))
+        assert _refused_by_the_guard(lambda: os.mkdir("hermetic-probe-no-such-folder/x", dir_fd=held))  # its parent is missing: harmless if let through
+    finally:
+        os.close(held)
+    (tmp_path / "f").write_text("x")
+    (tmp_path / "d").mkdir()
+    mine = os.open(tmp_path, os.O_RDONLY)
+    try:
+        os.rename("f", "g", src_dir_fd=mine, dst_dir_fd=mine)
+        os.remove("g", dir_fd=mine)
+        os.rmdir("d", dir_fd=mine)
+    finally:
+        os.close(mine)
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_held_directory_is_found_on_a_mac_too(monkeypatch):
+    """macOS has no /proc: F_GETPATH says where the directory is. Not runnable here as itself, so its answer is faked."""
+    import types
+
+    asked = []
+
+    def answers(fd, op, buffer):
+        asked.append((fd, op, len(buffer)))
+        return b"/private/var/folders/ab/cd\0" + b"\0" * 100
+
+    def cannot(fd, op, buffer):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(hermetic.sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace(F_GETPATH=50, fcntl=answers))
+    assert hermetic._held_directory(7) == "/private/var/folders/ab/cd" and asked == [(7, 50, 1024)]
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace(F_GETPATH=50, fcntl=cannot))
+    assert hermetic._held_directory(7) is None  # not judged, rather than refused for a reason that is not the test's
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace())  # a Python without the constant
+    assert hermetic._held_directory(7) is None
+
+
+def test_a_program_is_looked_up_where_python_will_look_for_it(tmp_path, monkeypatch):
+    """With no PATH in `env` Python searches os.defpath: a stand-in first on the test's PATH is not what would run."""
+    stub = tmp_path / "bin" / "sh"
+    stub.parent.mkdir()
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+    refused = _refused_by_the_guard(lambda: subprocess.run(["sh", "-c", "true"], env={"X": "1"}, capture_output=True))
+    assert len(refused) == 1 and "(program)" in refused[0], refused
+    assert subprocess.run(["sh"], env={"PATH": str(stub.parent)}, capture_output=True).returncode == 0  # the test's own program
 
 
 def test_the_tests_own_folders_the_repository_and_the_python_installation_are_open(tmp_path, hermetic_sandbox):

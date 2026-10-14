@@ -46,6 +46,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -196,16 +197,24 @@ def _may_write(path: str) -> bool:
 
 def _write_check(event: str, path) -> None:
     p = _absolute(path)
-    if p is not None and not _may_write(p):
+    if p is None:
+        return
+    if not _may_write(p):
         _refuse("file", f"{event} {p} is outside the test's own folders")
+    if not p.startswith(_DEV):  # /dev/stdout is a link into /proc
+        real = os.path.realpath(p)  # a link inside the test's folders can lead anywhere
+        if real != p and not _may_write(real):
+            _refuse("file", f"{event} {p} leads through a link to {real}, outside the test's own folders")
 
 
 def _read_check(event: str, path) -> None:
     p = _absolute(path)
     if p is None or not REAL_HOME or REAL_HOME == os.sep:
         return
-    if _inside(p, (REAL_HOME,)) and not _inside(p, _STATE.own) and not _inside(p, _STATE.readable):
-        _refuse("file", f"{event} {p} is in the real home folder, which tests must not read (HOME is the test's own folder)")
+    for q in (p, os.path.realpath(p)) if _inside(p, _STATE.own) else (p,):  # a link in the test's folders can lead to the home folder
+        if _inside(q, (REAL_HOME,)) and not _inside(q, _STATE.own) and not _inside(q, _STATE.readable):
+            through = "" if q == p else f" (through a link to {q})"
+            _refuse("file", f"{event} {p}{through} is in the real home folder, which tests must not read (HOME is the test's own folder)")
 
 
 def _on_open(args) -> None:
@@ -220,17 +229,63 @@ def _on_listing(event):
     return lambda args: _read_check(event, args[0] if args else None)
 
 
+def _held_directory(fd: int) -> str | None:
+    """Where a directory the program holds open is: Linux says through /proc, macOS through F_GETPATH. None when the
+    platform cannot say (the call is then not judged)."""
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0]) or None
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except (OSError, ImportError, AttributeError, ValueError, TypeError):
+        return None
+
+
 def _on_mutation(event: str, *targets: tuple[int, int | None]):
     """`targets`: (position of a path, position of its dir_fd). A path relative to a directory the program holds open
-    (what shutil.rmtree does to everything under the folder it was asked to remove) is judged by that folder."""
+    (what shutil.rmtree does to everything under the folder it was asked to remove) is judged by that directory."""
 
     def check(args) -> None:
         for path, dir_fd in targets:
+            if path >= len(args):
+                continue
             held = args[dir_fd] if dir_fd is not None and dir_fd < len(args) else None  # None or negative (AT_FDCWD): not given
-            if path < len(args) and (held is None or held < 0):
+            if held is None or not isinstance(held, int) or held < 0:
                 _write_check(event, args[path])
+                continue
+            name = args[path]
+            folder = _held_directory(held) if isinstance(name, (str, bytes, os.PathLike)) else None
+            if folder is not None:
+                _write_check(event, os.path.join(folder, os.fsdecode(name)))
 
     return check
+
+
+def _on_sqlite(args) -> None:
+    """sqlite3 opens its file in C, so no `open` event is seen: judge the database by its name. A plain name is opened
+    read-write and created when missing; a `file:` URI with mode=ro (or immutable=1) is a read; memory is not a file."""
+    target = args[0] if args else None
+    if not isinstance(target, (str, bytes, os.PathLike)):
+        return
+    try:
+        text = os.fsdecode(target)
+    except (TypeError, ValueError):
+        return
+    if text in ("", ":memory:"):
+        return
+    if text.startswith("file:"):
+        parts = urlsplit(text)
+        query = parse_qs(parts.query)
+        path = unquote(parts.path)
+        if not path or path == ":memory:" or "memory" in query.get("mode", []):
+            return
+        if "ro" in query.get("mode", []) or "1" in query.get("immutable", []):
+            _read_check("sqlite3", path)
+        else:
+            _write_check("sqlite3", path)
+        return
+    _write_check("sqlite3", text)
 
 
 # Network ---------------------------------------------------------------------
@@ -279,6 +334,12 @@ def _on_lookup(args) -> None:
         _refuse("network", f"name lookup of {args[0]!r}; only loopback is allowed")
 
 
+def _on_name_info(args) -> None:
+    """socket.getnameinfo((address, port, ...), flags): a reverse lookup of the address."""
+    address = args[0]
+    _on_lookup((address[0] if isinstance(address, tuple) and address else address,))
+
+
 # Programs --------------------------------------------------------------------
 
 ALLOWED_PROGRAMS = frozenset({"ffmpeg", "ffprobe", "git", "sips"})  # local tools, run on the test's own files
@@ -315,10 +376,11 @@ def _resolve_program(name, env, cwd) -> str | None:
     text = os.fsdecode(name)
     if os.sep in text:
         return os.path.join(os.fsdecode(cwd), text) if cwd and not os.path.isabs(text) else text
-    search = None
-    if env is not None:
-        search = next((os.fsdecode(v) for k, v in env.items() if os.fsdecode(k) == "PATH"), None)
-    return which(text, search)
+    try:
+        folders = os.get_exec_path(env)  # what subprocess searches: env's PATH, else os.defpath, never this process's PATH
+    except (TypeError, ValueError, AttributeError):
+        folders = os.get_exec_path(None)
+    return which(text, os.pathsep.join(os.fsdecode(f) for f in folders))
 
 
 def _check_program(event: str, name, env=None, cwd=None) -> None:
@@ -360,14 +422,22 @@ _HANDLERS = {
     "os.symlink": _on_mutation("symlink", (1, 2)),
     "os.link": _on_mutation("link", (1, 3)),
     "os.chmod": _on_mutation("chmod", (0, 2)),
+    "os.chown": _on_mutation("chown", (0, 3)),
     "os.utime": _on_mutation("utime", (0, 3)),
+    "os.truncate": _on_mutation("truncate", (0, None)),
+    "os.setxattr": _on_mutation("setxattr", (0, None)),
+    "os.removexattr": _on_mutation("removexattr", (0, None)),
     "shutil.copyfile": _on_mutation("copy", (1, None)),
     "shutil.rmtree": _on_mutation("rmtree", (0, 1)),
     "shutil.move": _on_mutation("move", (1, None)),
+    "sqlite3.connect": _on_sqlite,
     "socket.connect": _on_connect,
     "socket.sendto": _on_sendto,
+    "socket.sendmsg": _on_sendto,
     "socket.getaddrinfo": _on_lookup,
     "socket.gethostbyname": _on_lookup,
+    "socket.gethostbyaddr": _on_lookup,
+    "socket.getnameinfo": _on_name_info,
     "subprocess.Popen": _on_popen,
     "os.posix_spawn": _on_exec,
     "os.exec": _on_exec,
