@@ -10,7 +10,7 @@ struct SettingsView: View {
             KeySettings()
                 .tabItem { Label("API Keys", systemImage: "key") }
         }
-        .frame(width: 560, height: 400)
+        .frame(width: 560, height: 480)
     }
 }
 
@@ -38,6 +38,16 @@ struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Versions") {
+                CheckRow(ok: versionStamp.warning == nil, title: "Roughcut", detail: versionStamp.line)
+                if let warning = versionStamp.warning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(Color.orange)
+                        .textSelection(.enabled)
+                }
+            }
+
             Section("Setup check") {
                 if let doctor = model.doctor {
                     CheckRow(ok: true, title: "roughcut \(doctor.version)", detail: "Python \(doctor.python)")
@@ -59,6 +69,11 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The commit this app was built from (build-app.sh writes it into Info.plist) next to the one the engine runs.
+    private var versionStamp: VersionStamp {
+        VersionStamp(app: AppStamp(infoDictionary: Bundle.main.infoDictionary), engine: model.doctor)
     }
 
     private func keyDetail(_ doctor: DoctorReport) -> String {

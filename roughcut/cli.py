@@ -33,6 +33,16 @@ GRAPHICS_REF_HELP = (
 )
 
 
+class _VersionAction(argparse.Action):
+    """`--version`: ``roughcut 1.0.0 (commit abc1234)``. The commit is looked up only when asked (git is not run for any other command)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .update import commit_info
+
+        print(f"roughcut {__version__} (commit {commit_info()['commit'] or 'unknown'})")
+        parser.exit()
+
+
 def _level(text: str) -> float | str:
     """--dialogue-level: LUFS (-16, -16LUFS) or off."""
     t = text.strip().lower().removesuffix("lufs").strip()
@@ -100,7 +110,7 @@ class _StyleAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="roughcut", description="Dump footage in, get a Final Cut Pro rough cut out.")
-    parser.add_argument("--version", action="version", version=f"roughcut {__version__}")
+    parser.add_argument("--version", action=_VersionAction, nargs=0, default=argparse.SUPPRESS, help="show the version and the commit this install runs, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
 
     b = sub.add_parser("build", help="analyze footage and build a rough cut FCPXML")
@@ -502,6 +512,13 @@ def check_anthropic_key(offline: bool = False, pasted: str | None = None) -> tup
     return "ok", ""
 
 
+def _commit_fields() -> dict:
+    """doctor's ``commit`` and ``app_source_commit`` (add-only keys): None when this isn't a git clone."""
+    from .update import commit_info
+
+    return commit_info()
+
+
 def doctor_report(offline: bool = False) -> dict:
     mlx = importlib.util.find_spec("mlx_whisper") is not None
     fw = importlib.util.find_spec("faster_whisper") is not None
@@ -510,6 +527,7 @@ def doctor_report(offline: bool = False) -> dict:
     key_status, key_message = check_anthropic_key(offline)
     return {
         "version": __version__,
+        **_commit_fields(),
         "python": sys.version.split()[0],
         "executable": sys.executable,
         "ffmpeg": shutil.which("ffmpeg"),
@@ -598,7 +616,7 @@ def _print_doctor(r: dict) -> int:
     vs = r.get("venture_studio")
     if isinstance(vs, dict):  # informational: never changes doctor's exit code
         rows.append(("Venture Studio", bool(vs.get("available")) and not vs.get("notes"), _studio_detail(vs)))
-    print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
+    print(f"roughcut {r['version']} (commit {r.get('commit') or 'unknown'}, Python {r['python']}, {r['executable']})")
     for label, ok, detail in rows:
         print(f"  {'ok ' if ok else '-- '} {label:<15} {detail}")
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1

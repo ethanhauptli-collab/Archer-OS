@@ -21,6 +21,22 @@ CLI_PATH="$REPO_ROOT/.venv/bin/roughcut"
 APP="$MAC_DIR/build/Roughcut.app"
 VERSION="$(grep -m1 '^version' "$REPO_ROOT/pyproject.toml" | cut -d'"' -f2)"
 
+# Which code this app is built from, written into Info.plist for Settings to show beside the engine's commit
+# (`roughcut --version`). RoughcutAppCommit: the checkout's short commit, with -dirty after it when mac/ has uncommitted
+# changes (edited or new files). RoughcutAppSourceCommit: the last commit that touched mac/, which is what says whether
+# the app is behind after `roughcut update`. "unknown" outside a git checkout. Same git commands as roughcut/update.py's
+# commit_info, so the two compare.
+APP_COMMIT="unknown"
+APP_SOURCE_COMMIT="unknown"
+if git -C "$REPO_ROOT" rev-parse --short=7 HEAD >/dev/null 2>&1; then
+    APP_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD)"
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- mac 2>/dev/null)" ]; then
+        APP_COMMIT="${APP_COMMIT}-dirty"
+    fi
+    APP_SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-list -1 --abbrev-commit --abbrev=7 HEAD -- mac 2>/dev/null || true)"
+    APP_SOURCE_COMMIT="${APP_SOURCE_COMMIT:-unknown}"
+fi
+
 cd "$MAC_DIR"
 swift build -c release --product Roughcut
 BIN_DIR="$(swift build -c release --show-bin-path)"
@@ -63,11 +79,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 # Added with plutil so any characters in the path are escaped properly.
 plutil -insert RoughcutCLIPath -string "$CLI_PATH" "$APP/Contents/Info.plist"
+plutil -insert RoughcutAppCommit -string "$APP_COMMIT" "$APP/Contents/Info.plist"
+plutil -insert RoughcutAppSourceCommit -string "$APP_SOURCE_COMMIT" "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # Enough to run locally on Apple Silicon. Not notarized.
 codesign --force --sign "${ROUGHCUT_SIGN_IDENTITY:--}" "$APP" >/dev/null
-echo "Built $APP"
+echo "Built $APP (commit $APP_COMMIT, app source $APP_SOURCE_COMMIT)"
 
 if [ ! -x "$CLI_PATH" ]; then
     echo "Note: $CLI_PATH doesn't exist yet. Set up the Python CLI (repo README) or pick it in Settings."

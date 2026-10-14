@@ -419,6 +419,117 @@ def test_update_refuses_outside_a_git_checkout(tmp_path):
     assert "isn't a git clone" in lines[0]
 
 
+def _short(repo: Path, *args: str) -> str:
+    return _git(repo, *args).strip()
+
+
+def test_commit_info_names_the_clones_commit(clone):
+    """What `roughcut --version` and doctor say, and what the Mac app compares with the commit it was built from."""
+    from roughcut import update
+
+    upstream, local = clone
+    head = _short(local, "rev-parse", "--short=7", "HEAD")
+    assert update.commit_info(local) == {"commit": head, "app_source_commit": None}, "nothing in mac/ yet"
+
+    _commit(local, {"mac/Sources/App.swift": "// app\n"}, "App")
+    app = _short(local, "rev-parse", "--short=7", "HEAD")
+    _commit(local, {"roughcut/cut.py": "x = 1\n"}, "Engine only")
+    head = _short(local, "rev-parse", "--short=7", "HEAD")
+    assert head != app
+    info = update.commit_info(local)
+    assert info == {"commit": head, "app_source_commit": app}, "the app's source didn't change with the engine-only commit"
+
+    (local / "roughcut" / "cut.py").write_text("x = 2\n")  # the engine edited by hand
+    assert update.commit_info(local)["commit"] == head + "-dirty"
+    _git(local, "checkout", "--", ".")
+    (local / "README.md").write_text("notes\n")  # outside the engine: not dirty for it
+    assert update.commit_info(local)["commit"] == head
+    (local / "roughcut" / "new.py").write_text("y = 1\n")  # a file git doesn't know yet is part of the engine too
+    assert update.commit_info(local)["commit"] == head + "-dirty"
+
+
+def test_commit_info_is_none_outside_a_clone(clone, tmp_path):
+    from roughcut import update
+
+    upstream, local = clone
+    nothing = {"commit": None, "app_source_commit": None}
+    assert update.commit_info(tmp_path / "plain") == nothing, "no such folder"
+    (tmp_path / "plain").mkdir()
+    assert update.commit_info(tmp_path / "plain") == nothing
+    inside = local / ".venv" / "lib" / "site-packages"
+    inside.mkdir(parents=True)
+    assert update.commit_info(inside) == nothing, "a folder inside someone's clone isn't the clone (a regular install in .venv)"
+
+
+def test_commit_info_never_raises_or_waits_on_git(clone):
+    import subprocess
+
+    from roughcut import update
+
+    _, local = clone
+    seen = []
+
+    def slow(cmd, **kw):
+        seen.append(kw.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError("git")
+
+    nothing = {"commit": None, "app_source_commit": None}
+    assert update.commit_info(local, runner=slow) == nothing and seen == [update.GIT_SECONDS]
+    assert update.commit_info(local, runner=missing) == nothing
+
+
+def test_the_app_build_script_stamps_what_commit_info_reports(clone, tmp_path):
+    """mac/scripts/build-app.sh writes the commit into Info.plist with the same git commands the engine reports with."""
+    import shlex
+    import subprocess
+
+    script = (Path(__file__).resolve().parents[1] / "mac" / "scripts" / "build-app.sh").read_text()
+    block = script[script.index('APP_COMMIT="unknown"'):]
+    block = block[: block.index("\nfi\n") + 4]  # the stamp block alone: the rest of the script needs Swift and a Mac
+    assert 'plutil -insert RoughcutAppCommit -string "$APP_COMMIT"' in script
+    assert 'plutil -insert RoughcutAppSourceCommit -string "$APP_SOURCE_COMMIT"' in script
+
+    def stamp(repo: Path) -> list[str]:
+        shell = f'REPO_ROOT={shlex.quote(str(repo))}\n{block}\necho "$APP_COMMIT $APP_SOURCE_COMMIT"'
+        return subprocess.run(["bash", "-c", shell], capture_output=True, text=True, check=True).stdout.split()
+
+    from roughcut import update
+
+    _, local = clone
+    _commit(local, {"mac/Sources/App.swift": "// app\n"}, "App")
+    _commit(local, {"roughcut/cut.py": "x = 1\n"}, "Engine only")
+    info = update.commit_info(local)
+    assert stamp(local) == [info["commit"], info["app_source_commit"]]
+    (local / "mac" / "Sources" / "App.swift").write_text("// edited\n")
+    assert stamp(local) == [info["commit"] + "-dirty", info["app_source_commit"]], "uncommitted Swift marks the app"
+    assert update.commit_info(local)["commit"] == info["commit"], "...and not the engine"
+    _git(local, "checkout", "--", ".")
+    (local / "mac" / "Sources" / "New.swift").write_text("// not committed yet\n")
+    assert stamp(local)[0].endswith("-dirty"), "a new file in mac/ is part of the build"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert stamp(plain) == ["unknown", "unknown"], "not a git checkout"
+
+
+def test_version_and_doctor_say_which_commit(capsys):
+    from roughcut import __version__, update
+    from roughcut.cli import doctor_report, main
+
+    with pytest.raises(SystemExit) as stop:
+        main(["--version"])
+    assert stop.value.code == 0
+    printed = capsys.readouterr().out.strip()
+    commit = update.commit_info()["commit"]
+    assert printed == f"roughcut {__version__} (commit {commit or 'unknown'})"
+    report = doctor_report(offline=True)
+    assert report["commit"] == commit and "app_source_commit" in report
+    assert main(["doctor", "--offline"]) in (0, 1)
+    assert f"commit {commit or 'unknown'}" in capsys.readouterr().out
+
+
 def test_update_command_is_wired(monkeypatch):
     from roughcut import update
     from roughcut.cli import main
