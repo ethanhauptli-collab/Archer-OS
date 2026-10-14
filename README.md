@@ -101,6 +101,7 @@ Everything goes in `<footage folder>_roughcut/`, next to your footage (or wherev
 | `plan.json`, `analysis.json`, `prompt.md` | The plan with the run's settings (the sound-effect pool and the Venture Studio check included, so `render` and `revise` need neither the share nor Studio), the transcripts and clip data, and the exact prompt Claude saw |
 | `result.json`, `versions.json` | The run summary and the list of versions (the app reads these) |
 | `roughcut.log` | Every step of every run with times, ending in FINISHED or STOPPED and why |
+| `.roughcut.lock` | Always empty. A build, re-cut or revision holds it while it writes in the folder, so a second one started there (the app and Terminal, or a run you closed the app on) is refused with a message instead of numbering the same version; it lets go when the run ends or crashes. A drive that can't lock, or doesn't answer, is run without it |
 
 When a run ends, Terminal and the app say what made it in and what was left out (graphics, clips described, unreadable files) and roughly what the AI steps cost, per step.
 

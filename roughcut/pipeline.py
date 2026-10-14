@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import json
 import os
 import re
 import shlex
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ from .analyze import Analysis, Cache, Clip, analyze, default_cache_dir, log, mea
 from .captions import clean_spelling
 from .captions import srt as captions_srt
 from .fcpxml import build_fcpxml
+from .locking import FolderBusy, folder_lock
 from .media import AUDIO_EXTS, require_tools, scan
 from .plan import SFX_AMOUNTS, Plan, as_played, chosen_takes, heuristic_plan, normalize, plan_schema, respell_graphics, spec_key, spelling_key
 from .prompts import PLANNER_SYSTEM, own_words, pacing_choice, render_brief, render_media
@@ -696,15 +699,15 @@ def studio_song_problem(song: Path | str) -> str | None:
     return f"--music {song}: {why}" if why else None
 
 
+FOOTAGE_CHECK_SECONDS = 5.0  # is a footage file still there, and still the one that was read: a drive or share gets this long
+
+
 def _still_there(clip) -> bool | None:
-    """Whether a clip's file is where it was read; None when its network folder (a Studio song's) doesn't answer in time."""
-    if not clip.library:
-        return Path(clip.media.path).exists()
+    """Whether a clip's file is where it was read; None when its drive or network folder doesn't answer in time."""
     from .studio import FILE_SECONDS
-    from .textio import Stalled, bounded
 
     try:
-        return bool(bounded(Path(clip.media.path).exists, seconds=FILE_SECONDS))
+        return bool(bounded(Path(clip.media.path).exists, seconds=FILE_SECONDS if clip.library else FOOTAGE_CHECK_SECONDS, what=clip.media.name))
     except Stalled:
         return None
 
@@ -864,7 +867,16 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool
         f"{c.media.name} (a Venture Studio song) couldn't be checked: its network folder didn't answer. If it's still offline when "
         "you open the cut, Final Cut shows it as missing media until the share is back."
         for c in silent
+        if c.library
     ]
+    quiet = [c for c in silent if not c.library]
+    if quiet:
+        n = len(quiet)
+        out.append(
+            f"The drive or share holding {n} file{'s' if n != 1 else ''} this cut uses didn't answer, so Roughcut couldn't check "
+            f"{'they are' if n != 1 else 'it is'} still there ({quiet[0].media.name}). If it's still offline when you open the cut, "
+            f"Final Cut shows {'them' if n != 1 else 'it'} as missing media until it's back."
+        )
     if unanswered:
         n = len(unanswered)
         out.append(
@@ -873,6 +885,41 @@ def missing_media(analysis: Analysis, *timelines: Timeline | None, footage: bool
             "missing media until it's back."
         )
     return out
+
+
+def changed_media(analysis: Analysis, *timelines: Timeline | None) -> list[str]:
+    """Footage a cut uses that is no longer the file Roughcut read: another size, edit date or place.
+
+    `render` and `revise` reuse the saved reading of the footage (its words, pauses and lengths), so a clip that was
+    trimmed, re-exported or replaced since would be cut on times that no longer fit it, and Final Cut would show the
+    result as a cut on the wrong words. The check is the cheap one the cache is keyed on (path, size and modification
+    time), under a deadline; a file that is gone is missing_media's to say, and a drive that doesn't answer is left
+    unchecked after the first wait rather than waited on for every file.
+    """
+    from .media import fingerprint
+
+    used = {c.clip_id for tl in timelines if tl is not None for c in [*tl.spine, *tl.connected]}
+    changed: list[Clip] = []
+    for c in analysis.clips:
+        if c.id not in used or c.role == "sfx" or c.library or not c.media.fingerprint:
+            continue  # sounds and Studio songs have their own checks; a reading without a fingerprint has nothing to compare
+        try:
+            now = bounded(fingerprint, Path(c.media.path), seconds=FOOTAGE_CHECK_SECONDS, what=c.media.name)
+        except Stalled:
+            break  # missing_media has already said that this drive didn't answer
+        except OSError:
+            continue  # gone, or unreadable: missing_media's
+        if now != c.media.fingerprint:
+            changed.append(c)
+    if not changed:
+        return []
+    n = len(changed)
+    named = ", ".join(c.media.name for c in changed[:3]) + (f" and {n - 3} more" if n > 3 else "")
+    return [
+        f"{n} file{'s' if n != 1 else ''} this cut uses {'have' if n != 1 else 'has'} changed since Roughcut read {'them' if n != 1 else 'it'} "
+        f"(another size, edit date or place): {named}. The words and pauses this cut is made on may no longer match "
+        f"{'them' if n != 1 else 'it'}. Build the footage again to read {'them' if n != 1 else 'it'} anew."
+    ]
 
 
 def run_analysis(opts: Options, out_dir: Path, skipped: list[str] | None = None) -> Analysis:
@@ -1168,6 +1215,28 @@ def _log_studio(warning: str | None, note: str | None) -> None:
             log(line)
 
 
+@contextmanager
+def project_lock(out_dir: Path):
+    """The output folder is this run's alone while it writes there (locking.py): a second build, re-cut or revision in it
+    is refused with a message instead of numbering the same version and pruning the other's files."""
+    try:
+        with folder_lock(out_dir):
+            yield
+    except FolderBusy as e:  # only ever raised on the way in
+        raise RoughcutError(str(e)) from None
+
+
+def in_locked_folder(fn):
+    """A run on an existing output folder (its first argument) holds the folder's lock from its first line to its last."""
+
+    @functools.wraps(fn)
+    def inner(out_dir, *args, **kwargs):
+        with project_lock(Path(out_dir).expanduser()):
+            return fn(out_dir, *args, **kwargs)
+
+    return inner
+
+
 def start_log(out_dir: Path, command: str) -> None:
     """Every run leaves roughcut.log in its output folder: what ran, and how it ended."""
     from .analyze import log_to
@@ -1215,12 +1284,18 @@ def _store_references(opts: Options, out_dir: Path, warnings: list[str]) -> Opti
 
 def build(opts: Options) -> Result:
     t_start = time.monotonic()
-    timings: dict[str, float] = {}
     out_dir = (opts.out or default_out_dir(opts.inputs)).expanduser().resolve()
     name = opts.name or (opts.inputs[0].resolve().name if opts.inputs[0].is_dir() else opts.inputs[0].stem)
     _plan_saved_at(None)
     studio_warning, studio_note = studio_guard(out_dir, opts.cache_dir)  # before the folder is created
     sounds = sfx_sources(opts, strict=True)  # a Studio collection typed for this build that doesn't exist stops it here
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with project_lock(out_dir):
+        return _build(opts, out_dir, name, t_start, studio_warning, studio_note, sounds)
+
+
+def _build(opts: Options, out_dir: Path, name: str, t_start: float, studio_warning, studio_note, sounds) -> Result:
+    timings: dict[str, float] = {}
     start_log(out_dir, "build")
     _log_studio(studio_warning, studio_note)
 
@@ -1350,6 +1425,7 @@ def _finish_build(
     sfx_report = place_accents(rough, analysis, pool, opts, plan)
     with_sfx = accents.with_clips(analysis, rough, pool)
     extra_warnings += missing_media(with_sfx, rough, stringout, sounds=False)
+    extra_warnings += changed_media(with_sfx, rough, stringout) if command != "build" else []  # a build has just read the footage
     sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
     entry = {"style": opts.style, "planner": planner_label(plan.source), **(entry_extra or {})}
     extra = report_extra(rough) if report_extra else {}
@@ -1474,6 +1550,7 @@ def _finish_build(
     return result
 
 
+@in_locked_folder
 def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None, design_missing: bool = False) -> Result:
     """Rebuild the FCPXML from a saved analysis + plan (no model calls).
 
@@ -1538,7 +1615,9 @@ def rerender(out_dir: Path, opts: Options, *, overrides: set[str] | None = None,
     pool, pool_warnings = sound_pool(opts, record, sources=sfx_sources(opts) if fresh else None)
     sfx_report = place_accents(rough, analysis, pool, opts, plan)
     with_sfx = accents.with_clips(analysis, rough, pool)
-    graphics_warnings: list[str] = ([studio_warning] if studio_warning else []) + pool_warnings + missing_media(with_sfx, rough, stringout, sounds=False)
+    graphics_warnings: list[str] = (
+        ([studio_warning] if studio_warning else []) + pool_warnings + missing_media(with_sfx, rough, stringout, sounds=False) + changed_media(with_sfx, rough, stringout)
+    )
     sound_warnings = missing_media(with_sfx, rough, stringout, footage=False)  # again for the cut that is written, once graphics are on it
     placed, with_graphics = [], with_sfx
     planned_graphics, graphics_note = None, None
@@ -2260,6 +2339,7 @@ def _pick_provider(settings: dict, source: str, provider: str | None, model: str
     return name, None
 
 
+@in_locked_folder
 def revise(
     out_dir: Path,
     notes: str,
