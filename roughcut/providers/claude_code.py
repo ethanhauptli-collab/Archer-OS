@@ -71,7 +71,7 @@ PICTURE_RULES = (
 # the file's text (a picture's pixels, a folder's listing) goes into the request. A transcript line, a clip's notes or text
 # read off a frame is untrusted and reaches the prompt, so it can ask for ~/.config/anything. Its notion of "the start of a
 # word" is JavaScript's whitespace, which is wider than Python's (a byte order mark is whitespace to it and not to `str.isspace`;
-# a no-break space, an ideographic space, a line separator are both), so this doesn't try to copy it: an `@` that is not part
+# a no-break space, an ideographic space and a line separator are too), so this doesn't try to copy it: an `@` that is not part
 # of a plain word (right after an ASCII letter or digit, as in an address) gets an invisible mark ahead of it, which puts it
 # inside a word for Claude Code too. The mark is taken back out of what the model answers (restore_mentions), so a handle the
 # model copies comes back as written. The read fence (fence_args) is the second lock should this ever miss one.
@@ -239,7 +239,8 @@ class ClaudeCodeProvider:
         """The installed Claude Code's version (None: unreadable). Looked up once, by the first request."""
         with self._lock:
             if not self._version_known:
-                self._version = installed_version(self.binary, self._run)
+                with progress.doing("checking which version of Claude Code is installed", external=True):  # bounded by installed_version
+                    self._version = installed_version(self.binary, self._run)
                 self._version_known = True
             return self._version
 
