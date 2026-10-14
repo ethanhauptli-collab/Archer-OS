@@ -10,7 +10,7 @@ struct SettingsView: View {
             KeySettings()
                 .tabItem { Label("API Keys", systemImage: "key") }
         }
-        .frame(width: 560, height: 400)
+        .frame(width: 560, height: 480)
     }
 }
 
@@ -38,6 +38,16 @@ struct GeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Versions") {
+                CheckRow(ok: versionStamp.warning == nil, title: "Roughcut", detail: versionStamp.line)
+                if let warning = versionStamp.warning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(Color.orange)
+                        .textSelection(.enabled)
+                }
+            }
+
             Section("Setup check") {
                 if let doctor = model.doctor {
                     CheckRow(ok: true, title: "roughcut \(doctor.version)", detail: "Python \(doctor.python)")
@@ -59,6 +69,11 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The commit this app was built from (build-app.sh writes it into Info.plist) next to the one the engine runs.
+    private var versionStamp: VersionStamp {
+        VersionStamp(app: AppStamp(infoDictionary: Bundle.main.infoDictionary), engine: model.doctor)
     }
 
     private func keyDetail(_ doctor: DoctorReport) -> String {
@@ -108,16 +123,15 @@ struct CheckRow: View {
 
 struct KeySettings: View {
     @Environment(AppModel.self) private var model
-    @State private var anthropic = ""
-    @State private var openai = ""
+    @State private var keys = KeyForm()
     @State private var status = ""
     @State private var importing = false
 
     var body: some View {
         Form {
             Section {
-                SecureField("Claude (Anthropic)", text: $anthropic, prompt: Text("sk-ant-…"))
-                SecureField("OpenAI or compatible", text: $openai, prompt: Text("Optional"))
+                keyField(.anthropic, prompt: "sk-ant-…")
+                keyField(.openai, prompt: "Optional")
             } footer: {
                 Text("Stored in your macOS Keychain and handed to roughcut only while it runs. Apps opened from the Dock don't see keys exported in ~/.zshrc, which is why they're stored here.")
                     .font(.caption)
@@ -138,15 +152,27 @@ struct KeySettings: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            anthropic = Keychain.read(.anthropic) ?? ""
-            openai = Keychain.read(.openai) ?? ""
+            keys.load(from: Keychain.store)
+        }
+    }
+
+    /// One account's box and, under it, what saving did for that account alone.
+    @ViewBuilder
+    private func keyField(_ account: KeyAccount, prompt: String) -> some View {
+        SecureField(account.title, text: Binding(get: { keys[account] }, set: { keys[account] = $0 }), prompt: Text(prompt))
+        if let note = keys.note(for: account) {
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(keys.noteIsProblem(for: account) ? Color.orange : Color.secondary)
         }
     }
 
     private func save() {
-        let ok = Keychain.save(anthropic, for: .anthropic) && Keychain.save(openai, for: .openai)
-        status = ok ? "Saved" : "Keychain error"
-        Task { await model.refreshDoctor() }
+        let results = keys.save(to: Keychain.store)
+        status = KeyForm.summary(results)
+        if results.contains(where: { $0.outcome == .saved || $0.outcome == .removed }) {
+            Task { await model.refreshDoctor() }
+        }
     }
 
     private func importFromShell() {
@@ -154,10 +180,10 @@ struct KeySettings: View {
         status = "Reading your shell profile…"
         Task {
             let found = await Task.detached {
-                (ShellEnvironment.value(of: "ANTHROPIC_API_KEY"), ShellEnvironment.value(of: "OPENAI_API_KEY"))
+                (ShellEnvironment.value(of: KeyAccount.anthropic.rawValue), ShellEnvironment.value(of: KeyAccount.openai.rawValue))
             }.value
-            if let key = found.0 { anthropic = key }
-            if let key = found.1 { openai = key }
+            if let key = found.0 { keys[.anthropic] = key }
+            if let key = found.1 { keys[.openai] = key }
             status = (found.0 == nil && found.1 == nil) ? "No keys found in your shell profile" : "Found. Click Save."
             importing = false
         }

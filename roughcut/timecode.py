@@ -41,6 +41,11 @@ _FORMAT_RATE_TOKENS = {
 }
 
 
+# The frame rates a sequence can be asked for (--format WxH@fps); footage is measured, not limited.
+MIN_SEQUENCE_FPS = 1
+MAX_SEQUENCE_FPS = 1000
+
+
 def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
     """Parse an ffprobe rate ("30000/1001", "29.97", 0/0) into frames/second."""
     if rate is None:
@@ -48,7 +53,10 @@ def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
     if isinstance(rate, Fraction):
         return rate if rate > 0 else None
     if isinstance(rate, (int, float)):
-        return Fraction(rate).limit_denominator(1001000) if rate > 0 else None
+        try:
+            return Fraction(rate).limit_denominator(1001000) if rate > 0 else None
+        except OverflowError:  # inf
+            return None
     text = str(rate).strip()
     if not text:
         return None
@@ -60,7 +68,7 @@ def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
             value = Fraction(int(float(num)), int(float(den)))
         else:
             value = Fraction(text)
-    except (ValueError, ZeroDivisionError):
+    except (ValueError, ZeroDivisionError, OverflowError):  # "nan", "inf", "1e999/1" are not rates
         return None
     return value if value > 0 else None
 
@@ -70,10 +78,14 @@ def snap_frame_duration(rate: str | float | Fraction | None) -> tuple[Fraction, 
 
     Phone footage is often variable-frame-rate and reports rates like
     "2997/100" or "30.02"; Final Cut treats these as the nearest standard rate.
-    Returns (frame_duration, label) or None when the rate is unusable.
+    Returns (frame_duration, label) or None when the rate is unusable (a number too large for a float, "1e999", is).
     """
     fps = parse_rate(rate)
     if fps is None:
+        return None
+    try:
+        float(fps)
+    except OverflowError:
         return None
     best_label, best_err = None, None
     for label, fd in STANDARD_FRAME_DURATIONS.items():
@@ -183,9 +195,16 @@ def timecode_to_seconds(tc: str, frame_duration: Fraction) -> Fraction | None:
     return frames * frame_duration
 
 
+# What a clock can show; beyond it (or not a number at all) the text is "--:--" rather than an error.
+_CLOCK_LIMIT = 10**12
+NO_CLOCK = "--:--"
+
+
 def seconds_to_clock(seconds: float | Fraction, *, millis: bool = False) -> str:
-    """Human clock string for reports: 1:02:03 / 2:03 / 2:03.4."""
+    """Human clock string for reports: 1:02:03 / 2:03 / 2:03.4. Not a time (inf, nan, absurdly large): "--:--"."""
     total = float(seconds)
+    if not math.isfinite(total) or abs(total) > _CLOCK_LIMIT:
+        return NO_CLOCK
     sign = "-" if total < 0 else ""
     total = abs(total)
     h = int(total // 3600)
@@ -200,21 +219,49 @@ def seconds_to_clock(seconds: float | Fraction, *, millis: bool = False) -> str:
     return f"{sign}{m}:{sec}"
 
 
+# The lengths a cut can be asked for (--target, a preset's target, the Mac app's Target length): from a second to a day.
+MIN_DURATION_SECONDS = 1
+MAX_DURATION_SECONDS = 24 * 3600
+
+# A length is typed in a few characters; more is refused before it is looked at (the unit pattern below can backtrack
+# on a long run of spaces, and a message must not echo a megabyte). The app's twin has the same limit.
+MAX_DURATION_TEXT = 64
+
+# ASCII digits only: float() and \d also read other scripts' digits, which the app's twin of this parser does not.
+_NUMBER = r"[0-9]+(?:\.[0-9]+)?"
+_NUMBER_ONLY = re.compile(_NUMBER)
+_UNITS = re.compile(rf"(?:({_NUMBER})\s*h(?:rs?|ours?)?)?\s*(?:({_NUMBER})\s*m(?:ins?)?)?\s*(?:({_NUMBER})\s*(?:s(?:ec)?)?)?")
+
+
+def _bad_duration(text: str) -> ValueError:
+    shown = text if len(text) <= 40 else text[:40] + "..."
+    return ValueError(f"can't read {shown!r} as a length: it should look like 8m, 90s or 8:30 (from 1 second to 24 hours)")
+
+
 def parse_duration(text: str) -> float:
-    """Parse "8m", "90s", "8:30", "1h5m", "480" into seconds."""
+    """Parse "8m", "90s", "8:30", "1h5m", "480" into seconds.
+
+    A length is more than a second and at most 24 hours: no signs, exponents, "nan"/"inf", digits other than 0-9, or more
+    than hours:minutes:seconds. Anything else (including numbers so large they overflow to infinity) is a ValueError.
+    """
     raw = text.strip().lower()
     if not raw:
         raise ValueError("empty duration")
+    if len(raw) > MAX_DURATION_TEXT:
+        raise _bad_duration(raw)
     if ":" in raw:
-        parts = [float(p) for p in raw.split(":")]
+        parts = [p.strip() for p in raw.split(":")]
+        if len(parts) > 3 or not all(_NUMBER_ONLY.fullmatch(p) for p in parts):
+            raise _bad_duration(text)
         total = 0.0
         for p in parts:
-            total = total * 60 + p
-        return total
-    m = re.fullmatch(
-        r"(?:(\d+(?:\.\d+)?)\s*h(?:rs?|ours?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:ins?)?)?\s*(?:(\d+(?:\.\d+)?)\s*s?(?:ec)?)?", raw
-    )
-    if not m or not any(m.groups()):
-        raise ValueError(f"can't parse duration: {text!r}")
-    h, mi, s = (float(g) if g else 0.0 for g in m.groups())
-    return h * 3600 + mi * 60 + s
+            total = total * 60 + float(p)
+    else:
+        m = _UNITS.fullmatch(raw)
+        if not m or not any(m.groups()):
+            raise _bad_duration(text)
+        h, mi, s = (float(g) if g else 0.0 for g in m.groups())
+        total = h * 3600 + mi * 60 + s
+    if not math.isfinite(total) or not MIN_DURATION_SECONDS <= total <= MAX_DURATION_SECONDS:
+        raise _bad_duration(text)
+    return total

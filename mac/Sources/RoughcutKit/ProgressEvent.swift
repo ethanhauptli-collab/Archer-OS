@@ -252,6 +252,12 @@ public struct UsageSummary: Codable, Equatable, Sendable {
 /// `roughcut doctor --json`.
 public struct DoctorReport: Decodable, Equatable, Sendable {
     public var version: String
+    /// The short commit of the clone the engine runs from (`abc1234`, `abc1234-dirty` with uncommitted engine changes);
+    /// nil when it isn't an editable install from a git clone, and from CLIs before this key.
+    public var commit: String?
+    /// The last commit in that clone that touched the app's own files (`mac/Sources`, `Package.swift`, `Resources`, `scripts`; not
+    /// `mac/`'s README or tests): what tells whether an app built earlier is behind.
+    public var appSourceCommit: String?
     public var python: String
     public var executable: String
     public var ffmpeg: String?

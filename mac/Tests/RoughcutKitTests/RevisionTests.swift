@@ -170,7 +170,7 @@ final class RevisionTests: XCTestCase {
 
     func testReviseLengthThatDoesNotReadIsCaught() {
         // It used to be dropped without a word, and the revision kept the build's length.
-        XCTAssertEqual(ReviseOptions.lengthProblem("about a minute"), "New length should look like 8m, 90s or 8:30.")
+        XCTAssertEqual(ReviseOptions.lengthProblem("about a minute"), "New length should look like 8m, 90s or 8:30 (1 second to 24 hours).")
         XCTAssertNil(ReviseOptions.lengthProblem(""))
         XCTAssertNil(ReviseOptions.lengthProblem("  "))
         XCTAssertNil(ReviseOptions.lengthProblem("60 sec"))

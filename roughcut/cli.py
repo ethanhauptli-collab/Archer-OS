@@ -33,6 +33,16 @@ GRAPHICS_REF_HELP = (
 )
 
 
+class _VersionAction(argparse.Action):
+    """`--version`: ``roughcut 1.0.0 (commit abc1234)``. The commit is looked up only when asked (git is not run for any other command)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .update import commit_info
+
+        print(f"roughcut {__version__} (commit {commit_info()['commit'] or 'unknown'})")
+        parser.exit()
+
+
 def _level(text: str) -> float | str:
     """--dialogue-level: LUFS (-16, -16LUFS) or off."""
     t = text.strip().lower().removesuffix("lufs").strip()
@@ -47,6 +57,21 @@ def _level(text: str) -> float | str:
     return value
 
 
+DB_RANGE = (-60.0, 12.0)
+
+
+def _db(text: str) -> float:
+    """--music-db / --broll-db: a level in dB relative to the dialogue. Finite and within DB_RANGE: nan and inf stop the mix
+    late (or are written into the FCPXML as they are), and no cut wants music 60 dB down or 12 dB over the speech."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a level in dB like -14 ({DB_RANGE[0]:g} to {DB_RANGE[1]:g}), got {text!r}") from None
+    if not DB_RANGE[0] <= value <= DB_RANGE[1]:  # also false for nan
+        raise argparse.ArgumentTypeError(f"{text.strip()!r} is outside {DB_RANGE[0]:g} to {DB_RANGE[1]:g} dB")
+    return value
+
+
 def _add_render_args(p: argparse.ArgumentParser) -> None:
     # Defaults are None so `render` can tell "not given" (keep the saved run's setting) from a choice.
     g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
@@ -56,8 +81,8 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
-    g.add_argument("--broll-db", type=float, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
-    g.add_argument("--music-db", type=float, help="music bed level in dB, relative to the dialogue (default: -14)")
+    g.add_argument("--broll-db", type=_db, help="B-roll nat sound level in dB, relative to the dialogue, -60 to 12 (default: -20)")
+    g.add_argument("--music-db", type=_db, help="music bed level in dB, relative to the dialogue, -60 to 12 (default: -14)")
     g.add_argument(
         "--dialogue-level", type=_level, metavar="LUFS",
         help="match every clip's speech to this loudness in LUFS, e.g. -16 (default), -14 or -14LUFS; 'off' keeps clip levels as recorded",
@@ -100,7 +125,7 @@ class _StyleAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="roughcut", description="Dump footage in, get a Final Cut Pro rough cut out.")
-    parser.add_argument("--version", action="version", version=f"roughcut {__version__}")
+    parser.add_argument("--version", action=_VersionAction, nargs=0, default=argparse.SUPPRESS, help="show the version and the commit this install runs, then exit")
     sub = parser.add_subparsers(dest="command", required=True)
 
     b = sub.add_parser("build", help="analyze footage and build a rough cut FCPXML")
@@ -110,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("-c", "--context", default="", help="what this video is, who it's for, tone, must-keep moments")
     brief.add_argument("--context-file", help="read the brief from a text/markdown file")
     brief.add_argument("--script", help="script, outline or reference transcript to follow (text file)")
-    brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30")
+    brief.add_argument("-t", "--target", help="target length, e.g. 8m, 90s, 8:30 (from 1 second to 24 hours)")
     brief.add_argument("--preset", help="start from a preset's brief, length, pacing and graphics look (`roughcut preset list`); flags you type win")
     brief.add_argument("--preset-brief", default="", help=argparse.SUPPRESS)  # filled in by --preset, or by the app with its brief
     ai = b.add_argument_group("model")
@@ -171,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--notes-file", help="read the notes from a text file")
     rv.add_argument("--keep", action="append", default=[], metavar="IDS", help="segment or clip IDs the new cut must keep (comma-separated or repeated)")
     rv.add_argument("--avoid", action="append", default=[], metavar="IDS", help="segment IDs, clip IDs or CLIP@start-end ranges to leave out")
-    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30 (default: the build's)")
+    rv.add_argument("-t", "--target", help="new target length, e.g. 60s or 1:30, from 1 second to 24 hours (default: the build's)")
     rv.add_argument("--provider", choices=[p for p in PROVIDERS if p != "none"], help="who re-plans (default: the one that planned this cut)")
     rv.add_argument("--model", help="model for the revision (default: the one that planned this cut)")
     rv.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="reasoning effort (default: the build's)")
@@ -354,6 +379,20 @@ def _library_info(asset, given: str) -> dict:
     }
 
 
+def _format_problem(args) -> str | None:
+    """A --format that can't be read (a size or a frame rate no sequence has), found before the output folder is made."""
+    spec = args.format
+    if not spec or str(spec).strip().lower() in FORMAT_FROM_FOOTAGE:
+        return None
+    from .timeline import parse_format
+
+    try:
+        parse_format(spec)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def _music_problem(args) -> str | None:
     """A --music file that's missing or not audio, found before the output folder is made."""
     if args.command != "build":
@@ -502,6 +541,13 @@ def check_anthropic_key(offline: bool = False, pasted: str | None = None) -> tup
     return "ok", ""
 
 
+def _commit_fields() -> dict:
+    """doctor's ``commit`` and ``app_source_commit`` (add-only keys): None when this isn't a git clone."""
+    from .update import commit_info
+
+    return commit_info()
+
+
 def doctor_report(offline: bool = False) -> dict:
     mlx = importlib.util.find_spec("mlx_whisper") is not None
     fw = importlib.util.find_spec("faster_whisper") is not None
@@ -510,6 +556,7 @@ def doctor_report(offline: bool = False) -> dict:
     key_status, key_message = check_anthropic_key(offline)
     return {
         "version": __version__,
+        **_commit_fields(),
         "python": sys.version.split()[0],
         "executable": sys.executable,
         "ffmpeg": shutil.which("ffmpeg"),
@@ -614,7 +661,7 @@ def _print_doctor(r: dict) -> int:
     vs = r.get("venture_studio")
     if isinstance(vs, dict):  # informational: never changes doctor's exit code
         rows.append(("Venture Studio", bool(vs.get("available")) and not vs.get("notes"), _studio_detail(vs)))
-    print(f"roughcut {r['version']} (Python {r['python']}, {r['executable']})")
+    print(f"roughcut {r['version']} (commit {r.get('commit') or 'unknown'}, Python {r['python']}, {r['executable']})")
     for label, ok, detail in rows:
         print(f"  {'ok ' if ok else '-- '} {label:<15} {detail}")
     return 0 if (r["ffmpeg"] and r["ffprobe"]) else 1
@@ -707,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("build", "render", "revise"):
         # Before anything runs or any folder is created.
         args, problem = _apply_preset(args, argv) if args.command != "revise" else (args, None)
-        problem = problem or _resolve_paths(args, argv) or _studio_songs(args) or _music_problem(args)
+        problem = problem or _resolve_paths(args, argv) or _format_problem(args) or _studio_songs(args) or _music_problem(args)
         if problem:
             progress.enable(bool(args.progress_json))
             print(f"roughcut: {problem}", file=sys.stderr)

@@ -29,7 +29,7 @@ Then choose how the AI steps are paid for:
 - **Your Claude Pro/Max plan** (no API key): install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude` once and type `/login`. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
 - **An API key** from [console.anthropic.com](https://console.anthropic.com) → API Keys: `roughcut key set` (or the app's Settings → API Keys) saves it in the macOS Keychain.
 
-`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)).
+`roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)). `roughcut --version` prints the version and the commit this install runs (`commit abc1234`, `-dirty` after it with uncommitted changes in `roughcut/` or `pyproject.toml`; `unknown` unless it's an editable install from a git clone), and `doctor --json` has the same as `commit`.
 
 **Updating:** `roughcut update` from any folder, or **Roughcut → Update Roughcut…** in the app. It pulls the latest code, reinstalls only when the dependencies changed, and lists what's new. If the Mac app changed, it prints the one command that rebuilds it. A copy too old to have `roughcut update` (it says "invalid choice: 'update'") updates once with:
 
@@ -41,7 +41,7 @@ cd ~/Archer-OS && git pull && .venv/bin/python -m pip install -e '.[mac,graphics
 
 1. Drop your footage folder (or clips) on the window.
 2. Pick a **Preset** (Venture OC or Save the Kid fill in the brief, length, pacing and graphics look), then add to the brief what's special about this video: who's in it, the must-keep moments, the angle.
-3. Optional: a **Music bed** song, **Sound effects** (a folder of whooshes, pops and hits, or a Venture Studio collection), a different **Dialogue level**, **Motion graphics** with a logo and **Reference images** (paste or drop screenshots of the look you want).
+3. Optional: a **Music bed** song, **Sound effects** (a folder of whooshes, pops and hits, or a Venture Studio collection), a different **Dialogue level**, **Motion graphics** with a logo and **Reference images** (paste or drop screenshots of the look you want; graphics are designed by the AI, so picking *None* as the planner turns them off).
 4. **Build Rough Cut**. The checklist shows each step; you can switch to another app, and the Mac stays awake and tells you when it's done.
 5. **Open in Final Cut Pro**, choose a library, and open the project the result screen names (for example "OC Food Fest - Rough Cut v1 (tight, Opus)"). Importing a later version into the event that already holds the one before it (same name, same day), Final Cut may ask about items with the same names: choose Keep Both, since each version is its own project.
 
@@ -149,7 +149,7 @@ Every later run with that preset shows those designs to the designer, which matc
 | Option | Default | |
 |---|---|---|
 | `--dialogue-level LUFS` | -16 | Every clip's speech is matched to this loudness (-14 is louder, for phones). `off` keeps clips as recorded |
-| `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue |
+| `--broll-db`, `--music-db` | -20, -14 | B-roll nat sound and music, in dB under the dialogue (-60 to 12; `nan`, `inf` and the like are refused up front) |
 | `--music FILE` | | A song to lay under the cut (repeatable; when Claude doesn't pick one, or without AI, the first one given plays). It ducks under speech, comes up between lines, fades in, and is back-timed so its real ending lands on the last frame. `studio:ID` is a [Venture Studio](#venture-studio) song |
 | `--music-from NAME`, `--music-max N` | none, 4 | Up to N songs from a Venture Studio collection or kit for Claude to choose from, after your own `--music` |
 | `--fades on/off` | on | Short de-click fades at audio edits and soft fades on B-roll sound (never over a word) |
@@ -209,13 +209,13 @@ Roughcut only ever reads, and only a verified copy of Studio's own daily catalog
 | Option | Default | |
 |---|---|---|
 | `--preset NAME` | | A brand's or channel's usual brief, length, pacing and graphics look |
-| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` |
+| `-t, --target` | none | Target length: `8m`, `90s`, `8:30` (a second to 24 hours, at most 64 characters; digits 0-9 only, no signs or `nan`/`inf`/`1e3`) |
 | `-c, --context` / `--context-file` | | The brief: what it is, audience, tone, must-keep moments |
 | `--script FILE` | | A script, outline or transcript to follow |
 | `--style` | `auto` | `tight`, `medium`, `loose`: how much pause is kept. `auto`: Claude reads the brief while it plans and says which pacing it asks for (tight for tight cuts, snappy or no dead air; loose for let it breathe or slow and reflective; medium when it doesn't say), and the log says what it read. Your own words win over a preset's brief; a preset's pacing wins over `auto`. Claude sees each line's kept length at medium and how much shorter tight and longer loose play this footage, so it plans your target length at the pacing it picks. Without AI (`--provider none`, or the stringout when the model fails) a few plain wording rules stand in: tight for "tight", "tighter", "snappy", "punchy", "fast-paced" or "no dead air", loose for "let it breathe", "keep it loose", "looser", "loose pacing" or "slow-paced", not when turned down in the same sentence ("don't cut it too tight") or about something else ("a tight deadline", "tight shots"); otherwise medium |
 | `--keep-fillers` | off | Don't cut um/uh (narration still loses the short ones) |
 | `--punch-in` / `--no-punch-in` | when the brief asks for punch-ins | At each jump cut no B-roll covers, alternate the shot as framed with a 112% punch-in (Transform > Scale; select the clips and reset Transform to undo). A clip that doesn't fill the frame (16:9 in a vertical cut) isn't punched, since its black bars would jump in size; in a cut Claude planned, those cuts get to-do markers like other jump cuts. Re-cuts keep it. Without the flag, Claude reads the brief while it plans: punch-ins asked for at the jump cuts turn them on, a single reframe like "punch in on Roy's face" doesn't, and the log says which way it read the brief. Without AI, the wording rules turn them on only for "punch-ins", "zoom-ins" or "punch in on the (jump) cuts", not turned down ("no punch-ins", "Punch-ins: none") |
-| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` |
+| `--format` | from footage | `1080p`, `4k`, `vertical`, `square`, or `WxH@fps` (1 to 1000 fps) |
 | `--provider` | `anthropic` | `anthropic` (API key), `claude-code` (your Claude Pro/Max plan), `openai`, `ollama`, `openai-compatible`, `none` |
 | `--model` | menu in Terminal, else Opus | `opus` or `sonnet` (Claude Sonnet 5.5: faster, half the price). Any spelling works: `Sonnet 5.5`, `claude-sonnet-5-5`. Leave it off and `build` shows a menu; `--no-menu` skips it (and the offer of a folder outside a [Venture Studio](#venture-studio) library) |
 | `--effort` | `high` | Claude reasoning effort: `low` … `max` |

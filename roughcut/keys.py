@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SERVICE = "com.roughcut.app"  # must match mac/Sources/Roughcut/Keychain.swift
+SERVICE = "com.roughcut.app"  # must match KeyAccount in mac/Sources/RoughcutKit/Credentials.swift (tests/test_keys.py checks)
 ACCOUNTS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 _KEY_CHARS = re.compile(r"^[A-Za-z0-9_\-]+$")
 

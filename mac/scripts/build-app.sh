@@ -21,6 +21,31 @@ CLI_PATH="$REPO_ROOT/.venv/bin/roughcut"
 APP="$MAC_DIR/build/Roughcut.app"
 VERSION="$(grep -m1 '^version' "$REPO_ROOT/pyproject.toml" | cut -d'"' -f2)"
 
+# Which code this app is built from, written into Info.plist for Settings to show beside the engine's commit
+# (`roughcut --version`). RoughcutAppCommit: the checkout's short commit, with -dirty after it when the app's own files
+# (APP_PATHS: not mac/'s README or tests) have uncommitted changes, edited or new. RoughcutAppSourceCommit: the last commit
+# that touched them, which is what says whether the app is behind after `roughcut update`. Both are "unknown" outside a
+# git checkout of its own (a folder inside some other repository is not one) and when git can't say whether the files are
+# changed: never a clean commit nobody checked. The same git commands and the same list as roughcut/update.py's commit_info
+# (tests/test_presets_paths_update.py runs this block), so the two compare. --no-optional-locks: don't touch .git/index.
+# --- app stamp (begin)
+APP_PATHS=(mac/Sources mac/Package.swift mac/Resources mac/scripts)
+APP_COMMIT="unknown"
+APP_SOURCE_COMMIT="unknown"
+TOP="$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$TOP" ] && [ "$TOP" -ef "$REPO_ROOT" ]; then
+    if SHA="$(git -C "$REPO_ROOT" rev-parse --short=7 HEAD 2>/dev/null)" && [ -n "$SHA" ] \
+        && CHANGED="$(git --no-optional-locks -C "$REPO_ROOT" status --porcelain -- "${APP_PATHS[@]}" 2>/dev/null)"; then
+        APP_COMMIT="$SHA"
+        if [ -n "$CHANGED" ]; then
+            APP_COMMIT="${APP_COMMIT}-dirty"
+        fi
+        APP_SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-list -1 --abbrev-commit --abbrev=7 HEAD -- "${APP_PATHS[@]}" 2>/dev/null || true)"
+        APP_SOURCE_COMMIT="${APP_SOURCE_COMMIT:-unknown}"
+    fi
+fi
+# --- app stamp (end)
+
 cd "$MAC_DIR"
 swift build -c release --product Roughcut
 BIN_DIR="$(swift build -c release --show-bin-path)"
@@ -63,11 +88,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 # Added with plutil so any characters in the path are escaped properly.
 plutil -insert RoughcutCLIPath -string "$CLI_PATH" "$APP/Contents/Info.plist"
+plutil -insert RoughcutAppCommit -string "$APP_COMMIT" "$APP/Contents/Info.plist"
+plutil -insert RoughcutAppSourceCommit -string "$APP_SOURCE_COMMIT" "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # Enough to run locally on Apple Silicon. Not notarized.
 codesign --force --sign "${ROUGHCUT_SIGN_IDENTITY:--}" "$APP" >/dev/null
-echo "Built $APP"
+echo "Built $APP (commit $APP_COMMIT, app source $APP_SOURCE_COMMIT)"
 
 if [ ! -x "$CLI_PATH" ]; then
     echo "Note: $CLI_PATH doesn't exist yet. Set up the Python CLI (repo README) or pick it in Settings."

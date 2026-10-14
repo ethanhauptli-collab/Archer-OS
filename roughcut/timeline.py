@@ -165,8 +165,9 @@ def parse_format(spec: str) -> tuple[int, int, Fraction | None]:
     fd = None
     if rate:
         snapped = tc.snap_frame_duration(rate)
-        if snapped is None:
-            raise ValueError(f"can't read frame rate in {spec!r}")
+        fps = tc.parse_rate(rate)
+        if snapped is None or fps is None or not tc.MIN_SEQUENCE_FPS <= fps <= tc.MAX_SEQUENCE_FPS:
+            raise ValueError(f"can't read frame rate in {spec!r} (from {tc.MIN_SEQUENCE_FPS} to {tc.MAX_SEQUENCE_FPS} frames per second)")
         fd = snapped[0]
     return w, h, fd
 

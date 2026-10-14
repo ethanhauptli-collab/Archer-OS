@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from fractions import Fraction
 
@@ -453,3 +454,17 @@ def test_the_first_music_file_given_plays_end_to_end(footage, tmp_path):
     assert analysis_digest(Analysis.from_json(saved)) == digest
     assert main(["render", str(out)]) == 0
     assert _song_in_cut(out / "footage v2.fcpxml") == "Older Song"
+
+
+@pytest.mark.parametrize(
+    "ref", ["I01@0-" + "9" * 400, "I01@" + "9" * 400 + "-5", "V02@0-" + "9" * 400, "V02@1e400-5"], ids=["still-end", "still-start", "clip-end", "exponent"]
+)
+def test_a_range_with_an_endless_time_is_skipped_not_kept(ref):
+    # float() turns a long run of digits into inf; a still of infinite length would stop the cut much later.
+    a = Analysis(clips=[make_clip("V01", seconds=20, sentences=SPEECH), make_clip("V02", seconds=30), make_clip("I01", kind="image")])
+    plan = normalize({"sections": [{"name": "x", "items": ["V01.S001", ref], "broll": []}]}, a)
+    for item in plan.sections[0].items:
+        assert math.isfinite(item.start) and math.isfinite(item.end), item
+    if ref.startswith("I01"):
+        assert [i.ref for i in plan.sections[0].items] == ["V01.S001"]
+        assert any("can't read the times" in w for w in plan.warnings)

@@ -90,7 +90,7 @@ def test_doctor_json(capsys, monkeypatch):
     assert main(["doctor", "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
     for key in ("version", "python", "executable", "ffmpeg", "ffprobe", "transcriber", "anthropic_key", "anthropic_key_status",
-                "anthropic_key_message", "openai_key", "openai_installed", "venture_studio"):
+                "anthropic_key_message", "openai_key", "openai_installed", "venture_studio", "commit", "app_source_commit"):
         assert key in report
     assert report["anthropic_key_status"] == "missing" and "console.anthropic.com" in report["anthropic_key_message"]
     # What the app's Settings row decodes (StudioStatus): no Studio on this machine, so no row.
@@ -280,3 +280,17 @@ def test_every_run_leaves_a_log_that_says_how_it_ended(footage, tmp_path):
     empty.mkdir()
     assert main(["build", str(empty), "-o", str(tmp_path / "out2"), "--provider", "none", "--transcriber", "none"]) == 1
     assert "STOPPED: No media files" in (tmp_path / "out2" / "roughcut.log").read_text()
+
+
+def test_swift_doctor_fixture_matches_the_cli_contract(capsys, monkeypatch):
+    """doctor-sample.json is `roughcut doctor --json --offline` as the Mac app's tests decode it (DoctorReport). Keys are only
+    ever added: this fails when the CLI gains or loses one without the fixture (and so the Swift side) being looked at."""
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    fixture = Path(__file__).parents[1] / "mac" / "Tests" / "RoughcutKitTests" / "Fixtures" / "doctor-sample.json"
+    sample = json.loads(fixture.read_text())
+    assert main(["doctor", "--json", "--offline"]) == 0
+    live = json.loads(capsys.readouterr().out)
+    assert set(sample) == set(live)
+    assert set(sample["venture_studio"]) == set(live["venture_studio"])
+    assert isinstance(sample["commit"], str) and isinstance(sample["app_source_commit"], str)

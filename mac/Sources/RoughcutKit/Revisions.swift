@@ -53,6 +53,8 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
         if let sfxFrom, !sfxFrom.isEmpty {
             options.sfxFrom = sfxFrom
         }
+        // A preset with graphics on, while the provider is None: graphics are designed by the AI, so they stay off.
+        options.settle()
     }
 }
 
@@ -199,13 +201,13 @@ public struct ReviseOptions: Equatable, Sendable {
     public static func lengthProblem(_ text: String) -> String? {
         let length = text.trimmed
         guard !length.isEmpty, TimeText.seconds(from: length) == nil else { return nil }
-        return "New length should look like 8m, 90s or 8:30."
+        return "New length \(TimeText.shouldLookLike)."
     }
 
     public func arguments() -> [String] {
         var args = ["revise", outputFolder.path, "--progress-json", "--notes-file=\(notesFile.path)"]
-        if let seconds = TimeText.seconds(from: targetLength) {
-            args.append("--target=\(Int(seconds.rounded()))")
+        if let seconds = TimeText.wholeSeconds(from: targetLength) {
+            args.append("--target=\(seconds)")
         }
         if let provider, provider != .none {
             args += ["--provider", provider.rawValue]

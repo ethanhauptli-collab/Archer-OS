@@ -56,7 +56,7 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertEqual(o.problems.first, "Add footage: drop folders or clips above.")
         o = options()
         o.targetLength = "about eight minutes"
-        XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30."])
+        XCTAssertEqual(o.problems, ["Target length should look like 8m, 90s or 8:30 (1 second to 24 hours)."])
     }
 
     func testOutputFolderAndName() {
@@ -102,9 +102,9 @@ final class BuildOptionsTests: XCTestCase {
         let args = o.arguments()
         XCTAssertTrue(args.contains("--graphics"))
         XCTAssertTrue(args.contains("--graphics-style=navy and orange, bold"))
-        o.provider = .none
+        o.provider = .none  // set directly, past the form's rules (FormStateTests drives the picker)
         XCTAssertFalse(o.arguments().contains("--graphics"))
-        XCTAssertEqual(o.problems, ["Motion graphics are designed by the AI: choose a provider other than None."])
+        XCTAssertEqual(o.problems, ["Motion graphics are designed by the AI: choose a provider other than None, or turn motion graphics off."])
     }
 
     func testReferenceImagesGoWithGraphicsOnly() {
