@@ -41,6 +41,11 @@ _FORMAT_RATE_TOKENS = {
 }
 
 
+# The frame rates a sequence can be asked for (--format WxH@fps); footage is measured, not limited.
+MIN_SEQUENCE_FPS = 1
+MAX_SEQUENCE_FPS = 1000
+
+
 def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
     """Parse an ffprobe rate ("30000/1001", "29.97", 0/0) into frames/second."""
     if rate is None:
@@ -48,7 +53,10 @@ def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
     if isinstance(rate, Fraction):
         return rate if rate > 0 else None
     if isinstance(rate, (int, float)):
-        return Fraction(rate).limit_denominator(1001000) if rate > 0 else None
+        try:
+            return Fraction(rate).limit_denominator(1001000) if rate > 0 else None
+        except OverflowError:  # inf
+            return None
     text = str(rate).strip()
     if not text:
         return None
@@ -60,7 +68,7 @@ def parse_rate(rate: str | float | Fraction | None) -> Fraction | None:
             value = Fraction(int(float(num)), int(float(den)))
         else:
             value = Fraction(text)
-    except (ValueError, ZeroDivisionError):
+    except (ValueError, ZeroDivisionError, OverflowError):  # "nan", "inf", "1e999/1" are not rates
         return None
     return value if value > 0 else None
 
@@ -70,10 +78,14 @@ def snap_frame_duration(rate: str | float | Fraction | None) -> tuple[Fraction, 
 
     Phone footage is often variable-frame-rate and reports rates like
     "2997/100" or "30.02"; Final Cut treats these as the nearest standard rate.
-    Returns (frame_duration, label) or None when the rate is unusable.
+    Returns (frame_duration, label) or None when the rate is unusable (a number too large for a float, "1e999", is).
     """
     fps = parse_rate(rate)
     if fps is None:
+        return None
+    try:
+        float(fps)
+    except OverflowError:
         return None
     best_label, best_err = None, None
     for label, fd in STANDARD_FRAME_DURATIONS.items():

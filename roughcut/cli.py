@@ -57,6 +57,21 @@ def _level(text: str) -> float | str:
     return value
 
 
+DB_RANGE = (-60.0, 12.0)
+
+
+def _db(text: str) -> float:
+    """--music-db / --broll-db: a level in dB relative to the dialogue. Finite and within DB_RANGE: nan and inf stop the mix
+    late (or are written into the FCPXML as they are), and no cut wants music 60 dB down or 12 dB over the speech."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a level in dB like -14 ({DB_RANGE[0]:g} to {DB_RANGE[1]:g}), got {text!r}") from None
+    if not DB_RANGE[0] <= value <= DB_RANGE[1]:  # also false for nan
+        raise argparse.ArgumentTypeError(f"{text.strip()!r} is outside {DB_RANGE[0]:g} to {DB_RANGE[1]:g} dB")
+    return value
+
+
 def _add_render_args(p: argparse.ArgumentParser) -> None:
     # Defaults are None so `render` can tell "not given" (keep the saved run's setting) from a choice.
     g = p.add_argument_group("cut style (render and revise: the earlier run's settings unless given)")
@@ -66,8 +81,8 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--keep-fillers", action=argparse.BooleanOptionalAction, help="don't cut um/uh (--no-keep-fillers cuts them again)")
     g.add_argument("--format", help="sequence format: 1080p, 4k, vertical, square, WxH@fps, or auto (from the footage; the default)")
-    g.add_argument("--broll-db", type=float, help="B-roll nat sound level in dB, relative to the dialogue (default: -20)")
-    g.add_argument("--music-db", type=float, help="music bed level in dB, relative to the dialogue (default: -14)")
+    g.add_argument("--broll-db", type=_db, help="B-roll nat sound level in dB, relative to the dialogue, -60 to 12 (default: -20)")
+    g.add_argument("--music-db", type=_db, help="music bed level in dB, relative to the dialogue, -60 to 12 (default: -14)")
     g.add_argument(
         "--dialogue-level", type=_level, metavar="LUFS",
         help="match every clip's speech to this loudness in LUFS, e.g. -16 (default), -14 or -14LUFS; 'off' keeps clip levels as recorded",
@@ -362,6 +377,20 @@ def _library_info(asset, given: str) -> dict:
         "studio_id": asset.id, "title": asset.title, "provider": asset.provider, "license": asset.license,
         "tags": list(asset.tags), "notes": asset.notes, "favorite": asset.favorite, "from": given,
     }
+
+
+def _format_problem(args) -> str | None:
+    """A --format that can't be read (a size or a frame rate no sequence has), found before the output folder is made."""
+    spec = args.format
+    if not spec or str(spec).strip().lower() in FORMAT_FROM_FOOTAGE:
+        return None
+    from .timeline import parse_format
+
+    try:
+        parse_format(spec)
+    except ValueError as e:
+        return str(e)
+    return None
 
 
 def _music_problem(args) -> str | None:
@@ -680,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("build", "render", "revise"):
         # Before anything runs or any folder is created.
         args, problem = _apply_preset(args, argv) if args.command != "revise" else (args, None)
-        problem = problem or _resolve_paths(args, argv) or _studio_songs(args) or _music_problem(args)
+        problem = problem or _resolve_paths(args, argv) or _format_problem(args) or _studio_songs(args) or _music_problem(args)
         if problem:
             progress.enable(bool(args.progress_json))
             print(f"roughcut: {problem}", file=sys.stderr)
