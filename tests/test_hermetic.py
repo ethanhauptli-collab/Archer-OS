@@ -68,6 +68,20 @@ def test_no_key_proxy_or_setting_of_the_machine_reaches_a_test():
     assert urllib.request.proxy_bypass_environment("api.anthropic.com")
 
 
+def test_every_test_of_the_session_gets_the_sandbox_or_is_marked_as_a_check_of_the_real_machine(request):
+    """The sandbox is an autouse fixture of the plugin. A module that defined a `hermetic_sandbox` of its own, or marked
+    itself out of it some other way, would run on the machine: looks at every test collected for this session (the whole
+    suite in a normal run, so a new test file is covered the day it is added)."""
+    unsandboxed = []
+    for item in request.session.items:
+        if item.get_closest_marker(hermetic.MARKER):
+            continue  # a check of the real machine: skipped unless ROUGHCUT_TESTS_REAL=1 (test_checks_of_the_real_machine_are_skipped_unless_asked)
+        definitions = item._fixtureinfo.name2fixturedefs.get("hermetic_sandbox") or ()
+        if not definitions or getattr(definitions[-1].func, "__module__", "") != "hermetic":
+            unsandboxed.append(item.nodeid)
+    assert not unsandboxed, f"{len(unsandboxed)} tests run outside the sandbox, e.g. {unsandboxed[:5]}"
+
+
 def test_home_caches_presets_fonts_and_studio_are_the_tests_own(hermetic_sandbox):
     from roughcut import brand_fonts, presets, studio
     from roughcut.analyze import default_cache_dir
@@ -183,6 +197,23 @@ def test_programs_other_than_the_local_tools_are_refused(tmp_path):
         with pytest.raises(HermeticViolation):
             subprocess.Popen(["caffeinate"], executable="/usr/bin/caffeinate")
     assert len(refused) == 6 and all("(program)" in r for r in refused)
+
+
+def test_one_more_program_can_be_allowed_for_one_block_and_no_more():
+    """`allowing_programs` is how the stamp tests start bash: the names given, inside the block, nothing else."""
+    with expecting_violations() as refused:
+        with hermetic.allowing_programs("sh"):
+            assert subprocess.run(["sh", "-c", "echo hi"], capture_output=True, text=True).stdout.strip() == "hi"
+            with pytest.raises(HermeticViolation):  # only the names given
+                subprocess.run(["/bin/echo", "hi"], capture_output=True)
+        with pytest.raises(HermeticViolation):  # and only inside the block
+            subprocess.run(["sh", "-c", "true"], capture_output=True)
+    assert len(refused) == 2 and all("(program)" in r for r in refused)
+    for not_a_name in ("/bin/sh", "bin/sh", "", "../sh"):  # a path would let a program of that name run from anywhere
+        with pytest.raises(ValueError):
+            with hermetic.allowing_programs(not_a_name):
+                pass
+    assert hermetic._STATE.extra_programs == frozenset()
 
 
 @pytest.mark.skipif(not hasattr(os, "spawnv") or shutil.which("touch") is None, reason="needs os.spawnv and touch")

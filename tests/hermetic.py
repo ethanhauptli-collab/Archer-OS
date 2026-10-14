@@ -43,7 +43,8 @@ a sandbox. This module is a pytest plugin (tests/conftest.py names it in `pytest
   * `@pytest.mark.real_environment` marks a check that needs the real machine (a doctor smoke): it is skipped
     unless `ROUGHCUT_TESTS_REAL=1`, and then runs without any of the above.
 
-A test that proves the guard works wraps the forbidden call in `expecting_violations()`.
+A test that proves the guard works wraps the forbidden call in `expecting_violations()`. A test that has to start one
+other program (`bash`, for the app build script's stamp block) wraps just that call in `allowing_programs("bash")`.
 """
 
 from __future__ import annotations
@@ -178,6 +179,7 @@ class _State:
         self.violations: list[str] = []
         self.own: tuple[str, ...] = ()  # the test's folders: may be written, run from, connected to
         self.readable: tuple[str, ...] = ()  # under the real home, but fine to read
+        self.extra_programs: frozenset[str] = frozenset()  # allowed for the length of one `allowing_programs` block
 
 
 _STATE = _State()
@@ -410,6 +412,8 @@ def _check_program(event: str, name, env=None, cwd=None) -> None:
         return
     if os.path.basename(found) in ALLOWED_PROGRAMS or os.path.basename(real) in ALLOWED_PROGRAMS:
         return
+    if os.path.basename(found) in _STATE.extra_programs:  # named by the test, for this block only (`allowing_programs`)
+        return
     if _PYTHON.match(os.path.basename(found)) or _PYTHON.match(os.path.basename(real)) or _inside(real, _package_roots()):
         return  # a Python (of a venv too), or a program an installed package brings (Playwright's driver)
     _refuse("program", f"{event} would start {found}; only ffmpeg, ffprobe, git, sips, this Python and programs inside the test's folders may run")
@@ -494,6 +498,25 @@ def expecting_violations():
         del _STATE.violations[mark:]
 
 
+@contextmanager
+def allowing_programs(*names: str):
+    """For the one call in a test that has to start a program the guard refuses everywhere else.
+
+    The programs are named (`"bash"`, as the app build script's stamp block is bash), found where Python itself would
+    look, and allowed for the length of the block only: no other test, and no other call in this one, may start them, and
+    everything else stays judged as before. What the program does once started is not watched (as for the allow-list).
+    """
+    for name in names:
+        if not name or os.sep in name or name != os.path.basename(name):
+            raise ValueError(f"allowing_programs takes bare program names, not {name!r}")
+    before = _STATE.extra_programs
+    _STATE.extra_programs = before | frozenset(names)
+    try:
+        yield
+    finally:
+        _STATE.extra_programs = before
+
+
 # ------------------------------------------------------------------ the sandbox
 
 
@@ -574,6 +597,7 @@ def _apply_environment(monkeypatch, sandbox: Sandbox) -> None:
 def _activate(label: str, own: tuple[str, ...]) -> None:
     _STATE.test, _STATE.own, _STATE.readable = label, own, _readable_roots()
     _STATE.violations = []
+    _STATE.extra_programs = frozenset()
     _STATE.active = True
 
 

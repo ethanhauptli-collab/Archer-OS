@@ -16,10 +16,12 @@ Claude to another file would:
   before any model or permission rule is asked: every form of it must reach the model as plain text, with each layer
   (the marked text, the read fence) alone and with both.
 
-It starts the real program a few times, so it only runs when asked for: `ROUGHCUT_CLAUDE_CANARY=1 pytest
-tests/test_claude_code_boundary.py` (and `claude` is installed; the picture tests need MIN_PICTURE_VERSION or newer, the text
-ones run on any version). Run it after updating Claude Code: it is how the owner's Mac checks that the controls still hold in
-the version they have.
+It starts the real program a few times, so it is a check of the real machine (tests/hermetic.py: marked `real_environment`, out
+of the sandbox) and runs only when asked for: `ROUGHCUT_TESTS_REAL=1 pytest tests/test_claude_code_boundary.py` (and `claude` is
+installed; the picture tests need MIN_PICTURE_VERSION or newer, the text ones run on any version). It builds the program's whole
+environment itself (nothing inherited, a fake home and token, the stand-in's loopback address as the API), so the rest of the real
+machine is as out of reach as in any other test. Run it after updating Claude Code: it is how the owner's Mac checks that the
+controls still hold in the version they have.
 """
 
 from __future__ import annotations
@@ -45,10 +47,10 @@ PNG = bytes.fromhex(
 )
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("ROUGHCUT_CLAUDE_CANARY") != "1" or not shutil.which("claude"),
-    reason="runs the real `claude` program against a loopback stand-in: set ROUGHCUT_CLAUDE_CANARY=1 (needs Claude Code installed)",
-)
+pytestmark = [
+    pytest.mark.real_environment,  # skipped unless ROUGHCUT_TESTS_REAL=1, then run outside the sandbox: it starts the machine's own `claude`
+    pytest.mark.skipif(not shutil.which("claude"), reason="needs Claude Code installed: it runs the real `claude` program against a loopback stand-in"),
+]
 
 
 class FakeMessagesAPI(ThreadingHTTPServer):

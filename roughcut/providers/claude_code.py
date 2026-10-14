@@ -52,7 +52,7 @@ _EXTENSIONS = {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 # mid-read; restricted sessions opened a cross-session socket), and 2.1.295 (`--tools` and `--restricted` not applying to
 # built-in tools that register after launch). An older Claude Code is not shown any pictures (see picture_problem).
 # Canary-checked, with the real program against a loopback stand-in for the API, on 2.1.295 and 2.1.299
-# (tests/test_claude_code_boundary.py, ROUGHCUT_CLAUDE_CANARY=1).
+# (tests/test_claude_code_boundary.py, ROUGHCUT_TESTS_REAL=1).
 MIN_PICTURE_VERSION = (2, 1, 295)
 MIN_PICTURE_TEXT = ".".join(str(n) for n in MIN_PICTURE_VERSION)
 MIN_FENCE_VERSION = (2, 1, 257)  # permissions.blockReadsOutsideWorkingDirectories (see fence_args)

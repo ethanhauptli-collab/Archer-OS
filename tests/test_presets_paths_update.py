@@ -585,8 +585,11 @@ def _stamp(repo: Path) -> list[str]:
     import shlex
     import subprocess
 
+    import hermetic
+
     shell = f'REPO_ROOT={shlex.quote(str(repo))}\n{_stamp_block()}\necho "$APP_COMMIT $APP_SOURCE_COMMIT"'
-    return subprocess.run(["bash", "-c", shell], capture_output=True, text=True, check=True).stdout.split()
+    with hermetic.allowing_programs("bash"):  # the script is bash; the sandbox's guard lets only this call start it
+        return subprocess.run(["bash", "-c", shell], capture_output=True, text=True, check=True).stdout.split()
 
 
 def test_the_app_build_script_stamps_what_commit_info_reports(clone, tmp_path):
