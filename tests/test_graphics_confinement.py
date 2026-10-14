@@ -310,8 +310,8 @@ def test_a_design_that_navigates_its_page_away_is_left_out_and_says_so(listeners
 
 @needs_renderer
 def test_the_content_policy_alone_holds_most_of_it(listeners):
-    """connect-src 'none' and default-src 'none': every request a script or the markup can start from inside the page,
-    workers and frames included, and the design can't lift it by removing its tag or rewriting its document."""
+    """connect-src (data: and blob: only) and default-src 'none': every request a script or the markup can start from inside
+    the page, workers and frames included, and the design can't lift it by removing its tag or rewriting its document."""
     names = ["websocket", "fetch", "xhr", "beacon", "eventsource", "image", "iframe-srcdoc", "popup-write", "stylesheet", "css-import",
              "css-background", "font", "prefetch", "preload", "script", "module", "media", "object", "ping", "worker", "webrtc",
              "rewrite-document", "remove-policy"]
@@ -354,6 +354,19 @@ DOCS = {
     "no head, script first": "<script>{js}</script><body>{x}</body>",
     "bare script": "<script>{js}</script>",
     "script in head": "<!doctype html><html><head><script>{js}</script></head><body></body></html>",
+    # The parser takes these for comments before a doctype and stays in standards mode, so the policy goes after the doctype
+    # here too (a <meta> ahead of it would have put the page in quirks mode and changed its layout).
+    "xml prolog": '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html><html><head></head><body>{x}</body></html>',
+    "bogus comment": "<!x><!DOCTYPE html><html><body>{x}</body></html>",
+    "bogus comment, one dash": "<!-x><!DOCTYPE html><html><body>{x}</body></html>",
+    "cdata, bogus": "<![CDATA[ plain ]]><!doctype html><html><body>{x}</body></html>",
+    "bogus end tag": "</3><!doctype html><html><body>{x}</body></html>",
+    "empty end tag": "</><!doctype html><html><body>{x}</body></html>",
+    "prolog, comment, space": '<?xml version="1.0"?> <!-- c --> \n<!doctype html><html><body>{x}</body></html>',
+    # ...and these are not skipped: the first script runs ahead of the doctype, so the policy must be ahead of the script
+    "script hidden in a bogus comment's tail": "<?x --><script>{js}</script><!doctype html><body>{x}</body>",
+    "text before the doctype": "<![CDATA[ a > b ]]><!doctype html><html><body>{x}</body></html>",
+    "unclosed prolog": "<?xml <script>{js}</script><!doctype html><body>{x}</body>",
 }
 
 
@@ -396,7 +409,25 @@ def test_confine_html_puts_the_policy_after_the_doctype_or_first():
     assert graphics.confine_html("<!-- c --><!DOCTYPE html><p>").index("<meta") == len("<!-- c --><!DOCTYPE html>")
     # a doctype hidden behind something that isn't a plain comment is not looked past
     assert graphics.confine_html("<!--><x><!doctype html>").startswith("<meta")
-    assert tag in graphics.confine_html("x") and "connect-src 'none'" in tag and "default-src 'none'" in tag
+    assert tag in graphics.confine_html("x") and "connect-src data: blob:" in tag and "default-src 'none'" in tag
+
+
+@pytest.mark.parametrize("before", ['<?xml version="1.0" encoding="UTF-8"?>\n', "<!x>", "<!-x >", "<![CDATA[ plain ]]>", "</3>", "</>", "  <?p?>\n<!-- c -->\t<!y>\n"])
+def test_confine_html_looks_past_what_the_parser_takes_for_a_comment_before_a_doctype(before):
+    html = before + "<!DOCTYPE html><p>x"
+    assert graphics.confine_html(html).index("<meta") == len(before + "<!DOCTYPE html>")
+
+
+@pytest.mark.parametrize("before", ["<?x --><script>1</script>", "<![CDATA[ a > b ]]>", "<?xml <script>1</script>", "</a>", "<!--", "<!-->", "x"])
+def test_confine_html_puts_the_policy_first_when_something_else_comes_before_the_doctype(before):
+    assert graphics.confine_html(before + "<!doctype html>").startswith("<meta")
+
+
+def test_confine_html_is_quick_on_pathological_input():
+    for junk in ("<?x>" * 80_000, "<!--" * 80_000, " \n" * 150_000, "<!x" * 100_000, "<?" + "a" * 300_000):
+        t0 = time.monotonic()
+        graphics.confine_html(junk + "<!doctype html>")
+        assert time.monotonic() - t0 < 2.0
 
 
 # --------------------------------------------------------------- what a normal design needs still works, pixel for pixel
@@ -655,5 +686,77 @@ def test_the_policy_lets_a_design_that_only_draws_through():
     directives = {d.split()[0]: d.split()[1:] for d in graphics.CSP.split("; ")}
     for name, sources in allowed.items():
         assert all(s in directives[name] for s in sources), name
-    assert directives["connect-src"] == ["'none'"] and directives["default-src"] == ["'none'"]
+    # fetch and XHR of a data: or blob: URL reach no network, and a design that decodes its own embedded data with them still works
+    assert directives["connect-src"] == ["data:", "blob:"] and directives["default-src"] == ["'none'"]
     assert re.search(r"(?<![\w-])(https?|wss?|\*)(?![\w-])", graphics.CSP) is None  # no network source anywhere in it
+
+
+# --------------------------------------------------------------- a design that reads its own embedded data still works
+
+
+READS_ITS_OWN_DATA = (
+    "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#p{position:absolute;left:0;top:0;width:100%;height:100%;background:#f00}</style></head>"
+    "<body><div id=p></div><script>"
+    "let ok = 0;"
+    "try { const x = new XMLHttpRequest(); x.open('GET', 'data:text/plain,loaded', false); x.send(); if (x.responseText === 'loaded') ok++; } catch (e) {}"
+    "try { const u = URL.createObjectURL(new Blob(['hello'])); const y = new XMLHttpRequest(); y.open('GET', u, false); y.send(); if (y.responseText === 'hello') ok++; } catch (e) {}"
+    "window.seek = function (t) { document.getElementById('p').style.background = ok === 2 ? '#0f0' : '#f00'; };</script></body></html>"
+)
+
+
+@needs_renderer
+def test_a_design_that_reads_a_data_or_blob_url_with_xhr_is_not_blocked_or_noted(tmp_path):
+    """connect-src 'none' refused these too, though neither touches a network, and the note said a `data:` URL was not
+    self-contained. A design that decodes data it carries must draw as it did before the policy."""
+    job = {"id": "G01", "slug": "G01-test", "html": READS_ITS_OWN_DATA, "frames": 3, "fps": 30.0, "rate": "30/1",
+           "canvas": graphics.canvas(320, 180), "out": str(tmp_path / "G01-test.mov"), "size": (320, 180)}
+    result = graphics._render_one(job)
+    assert result["error"] is None
+    assert [n for n in result["notes"] if "tried to" in n or "blocked" in n or "error" in n] == []  # (the plate fills the frame: other notes are about that)
+    rgb = subprocess.run(["ffmpeg", "-v", "error", "-i", str(tmp_path / "G01-test.mov"), "-frames:v", "1", "-vf", "scale=4:4,format=rgb24", "-f", "rawvideo", "-"],
+                         capture_output=True, check=True).stdout
+    assert rgb[1] > 200 and rgb[0] < 60 and rgb[2] < 60, rgb[:3]  # green: both reads worked
+
+
+@needs_renderer
+def test_the_same_reads_of_the_network_are_still_refused(listeners):
+    names = ["fetch", "xhr", "beacon", "websocket", "eventsource", "worker"]
+    found = asyncio.run(hear(listeners, names, POLICY_ONLY))
+    assert {n: h for n, h in found.items() if h} == {}
+
+
+# --------------------------------------------------------------- Playwright old enough to lack the WebSocket route
+
+
+def test_a_playwright_older_than_the_websocket_route_is_a_renderer_problem(monkeypatch):
+    monkeypatch.setattr(graphics, "playwright_version", lambda: (1, 47, 0))
+    problem = graphics.renderer_problem()
+    assert problem and "1.48" in problem and "1.47" in problem and "pip install" in problem
+    monkeypatch.setattr(graphics, "playwright_version", lambda: (1, 48, 0))
+    assert graphics.renderer_problem() != problem  # (None where a browser is installed)
+    monkeypatch.setattr(graphics, "playwright_version", lambda: None)  # a version that can't be read isn't held against it
+    assert graphics.renderer_problem() != problem
+
+
+def test_the_installed_playwright_version_is_read():
+    v = graphics.playwright_version()
+    assert v is None or (len(v) == 3 and all(isinstance(n, int) for n in v))
+
+
+def test_a_context_without_the_websocket_route_is_said_once_and_still_confined(capsys, monkeypatch):
+    class Old(_Context):
+        route_web_socket = None  # Playwright before 1.48
+
+    class OldBrowser(_Browser):
+        async def new_context(self, **options):
+            self.calls.append(("new_context", options))
+            return Old(self.calls)
+
+    monkeypatch.setattr(graphics, "_SAID", set())
+    for _ in range(3):
+        browser = OldBrowser()
+        asyncio.run(graphics._confined_page(browser, (640, 360, 1.0), []))
+        names = [c[0] for c in browser.calls]
+        assert "route" in names and "route_web_socket" not in names  # the rest of the layers are all there
+    said = capsys.readouterr().err
+    assert said.count("no WebSocket route") == 1 and "1.48" in said

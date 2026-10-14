@@ -988,10 +988,11 @@ def _no_browser() -> GraphicsError:
 # Each layer stops what another might miss, and a design that only ever draws notices none of them. Every layer is
 # checked against a loopback listener (HTTP, WebSocket, TCP, UDP) in tests/test_graphics_confinement.py.
 #
-#   content policy (confine_html)     connect-src 'none' (fetch, XHR, beacons, WebSocket, EventSource, in the page and
-#                                     in workers) and 'none' for every other load (default-src: frames, objects, forms,
-#                                     prefetch, stylesheets, scripts); inline scripts and styles, data: and blob: pictures,
-#                                     fonts and media are allowed, which is all a self-contained design uses
+#   content policy (confine_html)     connect-src limited to data: and blob: (fetch, XHR, beacons, WebSocket, EventSource, in
+#                                     the page and in workers reach no network address) and 'none' for every other load
+#                                     (default-src: frames, objects, forms, prefetch, stylesheets, scripts); inline scripts
+#                                     and styles, data: and blob: pictures, fonts and media are allowed, which is all a
+#                                     self-contained design uses (a fetch or XHR of data it carries itself reaches nothing)
 #   the context (_confined_page)      HTTP routed and refused, WebSockets routed and closed (set up before the page
 #                                     exists: Playwright wraps window.WebSocket in a script it injects), service workers
 #                                     blocked, the context offline, downloads refused, WebRTC removed, and any window
@@ -1003,20 +1004,23 @@ def _no_browser() -> GraphicsError:
 
 CSP = (
     "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline' data:; img-src data: blob:; "
-    "font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; "
+    "font-src data: blob:; media-src data: blob:; connect-src data: blob:; frame-src 'none'; child-src 'none'; object-src 'none'; "
     "worker-src 'none'; form-action 'none'; base-uri 'none'; manifest-src 'none'"
 )
 _COMMENT = r"<!--(?!-?>)(?:(?!--!?>).)*--!?>"
-_DOCTYPE_FIRST = re.compile(rf"(?:[ \t\n\f\r]|{_COMMENT})*<!doctype[^>]*>", re.IGNORECASE | re.DOTALL)
+# What the HTML parser also takes for a comment (a "bogus comment", up to the first `>`) and so leaves in standards mode when
+# it comes before a doctype: `<?xml ... ?>`, `<!x>` and `<![CDATA[ ... ]]>`, and an end tag with no name (`</3>`, `</>`).
+_BOGUS_COMMENT = r"<\?[^>]*>|<!(?!--|doctype)[^>]*>|</(?![a-z])[^>]*>"
+_DOCTYPE_FIRST = re.compile(rf"(?:[ \t\n\f\r]|{_COMMENT}|{_BOGUS_COMMENT})*<!doctype[^>]*>", re.IGNORECASE | re.DOTALL)
 
 
 def confine_html(html: str) -> str:
     """The design with a content policy as the first thing in it, ahead of every script and resource.
 
     Right after the doctype when the page opens with one (putting anything ahead of it would put the page in quirks
-    mode and change its layout), else at the very start. Only whitespace and well-formed comments are looked past, so
-    nothing the design writes can hide the policy inside a comment, a script or a tag. A policy of the design's own
-    can only narrow this one.
+    mode and change its layout), else at the very start. Only whitespace and what the parser takes for a comment are looked
+    past (well-formed comments, `<?xml ...?>` and other bogus comments), so nothing the design writes can hide the policy
+    inside a comment, a script or a tag. A policy of the design's own can only narrow this one.
     """
     tag = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
     m = _DOCTYPE_FIRST.match(html)
@@ -1159,6 +1163,12 @@ def renderer_problem() -> str | None:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return INSTALL_HELP
+    found = playwright_version()
+    if found is not None and found[:2] < MIN_PLAYWRIGHT:  # the WebSocket route is part of the page's confinement
+        return (
+            f"Motion graphics need Playwright {'.'.join(map(str, MIN_PLAYWRIGHT))} or newer (this is {'.'.join(map(str, found))}). "
+            f"Update it with:  {_PY} -m pip install -U 'playwright>={'.'.join(map(str, MIN_PLAYWRIGHT))}'"
+        )
     try:
         with sync_playwright() as p:
             launch_browser(p).close()
@@ -1278,6 +1288,32 @@ def _blocker(notes: list[str]):
     return block
 
 
+MIN_PLAYWRIGHT = (1, 48)  # BrowserContext.route_web_socket
+
+
+def playwright_version() -> tuple[int, int, int] | None:
+    """The installed Playwright's version, None when it can't be read."""
+    try:
+        from importlib.metadata import version
+
+        found = [int(n) for n in re.findall(r"\d+", version("playwright"))[:3]]
+    except Exception:  # noqa: BLE001
+        return None
+    return (*found, *([0] * (3 - len(found))))[:3] if found else None  # type: ignore[return-value]
+
+
+_SAID: set[str] = set()
+_SAID_LOCK = threading.Lock()
+
+
+def _say_once(key: str, message: str) -> None:
+    with _SAID_LOCK:
+        if key in _SAID:
+            return
+        _SAID.add(key)
+    log(message)
+
+
 def _socket_blocker(notes: list[str]):
     async def block(ws) -> None:  # nor open a WebSocket (it is closed before it connects to anything)
         _note(notes, f"tried to load {ws.url[:120]} (blocked: designs must be self-contained)")
@@ -1307,6 +1343,12 @@ async def _confined_page(browser, canvas_: tuple[int, int, float], notes: list[s
     route_socket = getattr(context, "route_web_socket", None)  # Playwright 1.48+
     if route_socket is not None:
         await route_socket(re.compile(r".*"), _socket_blocker(notes))  # before the page exists: it wraps window.WebSocket in an injected script
+    else:
+        _say_once(
+            "no-websocket-route",
+            "graphics: this Playwright has no WebSocket route (it needs 1.48 or newer: update it with the pip command `roughcut doctor` shows); "
+            "the content policy and the blocked network still refuse every socket",
+        )
     await context.route("**/*", _blocker(notes))  # the context's, so a window the page opens is covered too
     page = await context.new_page()
     context.on("page", _stray_window(notes))  # ours is made; any other is the design's
