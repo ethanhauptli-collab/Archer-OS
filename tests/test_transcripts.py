@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from roughcut.ffmpeg_ops import parse_silencedetect, sound_regions
 from roughcut.segments import build_segments, drop_words_in_silence, segments_from_regions
@@ -155,3 +156,28 @@ def test_faster_whisper_backend_glue(monkeypatch, tmp_path):
     assert seen["hotwords"] == seen["initial_prompt"]  # re-sent every window
     assert [w.text for w in t.words] == ["Real", "words."]
     assert t.language == "en"
+
+
+def test_the_same_file_reached_another_way_is_read_with_the_path_it_was_given(footage, tmp_path):
+    """The analysis cache is keyed by the file itself (its resolved path, size and edit date), so a folder of links to a file an
+    earlier run read returned that run's reading, path and all: the sidecar transcript was looked for next to the first path."""
+    import shutil
+
+    from roughcut.analyze import Cache, probe_cached
+
+    first = tmp_path / "first"
+    first.mkdir()
+    shutil.copy(footage / "talk.mov", first / "talk.mov")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "talk.mov").symlink_to(first / "talk.mov")
+    cache = Cache(tmp_path / "cache")
+
+    a = probe_cached(first / "talk.mov", cache)
+    b = probe_cached(second / "talk.mov", cache)  # a cache hit: the same file
+    assert a.fingerprint == b.fingerprint
+    assert a.path == str(first / "talk.mov") and b.path == str(second / "talk.mov") and b.name == "talk.mov"
+    # ... so each finds its own sidecar.
+    (first / "talk.json").write_text(json.dumps({"words": [{"start": 1.0, "end": 1.4, "text": "first"}]}))
+    (second / "talk.json").write_text(json.dumps({"words": [{"start": 2.0, "end": 2.4, "text": "second"}]}))
+    assert find_sidecar(Path(a.path)).parent == first and find_sidecar(Path(b.path)).parent == second

@@ -283,7 +283,12 @@ def probe_cached(path: Path, cache: Cache) -> MediaInfo:
     fp = fingerprint(path)
     cached = cache.get(fp, "probe.json")
     if cached:
-        return MediaInfo.from_json(cached)
+        info = MediaInfo.from_json(cached)
+        # The cache is keyed by the file (its resolved path, size and edit date), so the same file reached another way (a link, a folder
+        # of links) returns the first reading: this run's path and name are the ones it was given, where its sidecar transcript is looked
+        # for and the FCPXML points.
+        info.path, info.name = str(path), path.name
+        return info
     info = probe(path)
     cache.put(fp, "probe.json", info.to_json())
     return info

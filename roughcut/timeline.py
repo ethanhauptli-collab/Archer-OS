@@ -42,6 +42,14 @@ STYLES = {
 }
 
 
+# Padding keeps a cut a little outside a word, which covers a transcript edge that is off by up to that much. Beyond it the cut lands
+# inside the word: Whisper's word times are right to within a few tens of milliseconds on clean speech and can be a hundred or more
+# off in noise. When the silence map shows the sound beginning (or ending) between the padded cut and the nearest silence, and no
+# neighbouring word's sound is in between, the edge moves to where the silence is, so a cut is never inside sound that way for an
+# edge off by up to the padding plus EDGE_SLACK. Nothing changes while the padded cut is already outside the sound.
+EDGE_SLACK = 0.10
+
+
 @dataclass
 class Marker:
     frame: int  # absolute timeline frame
@@ -236,6 +244,26 @@ class _Spans:
             i += 1
         return t
 
+    def onset_before(self, t: float, floor: float, least: float, within: float) -> float:
+        """Where the sound after the silence just before `t` begins, when that is more than `least` and at most `within` seconds
+        before `t` (the padding, and the padding plus the slack) and no earlier than `floor` (where a neighbouring word's sound
+        stops): the start of a word the transcript put too late. `t` itself when it is inside a silence (clamp_start's case) or
+        no silence ends near enough before it."""
+        i = bisect.bisect_right(self.starts, t) - 1  # the last silence that starts at or before t
+        if i < 0 or self.spans[i][1] > t:
+            return t
+        e = self.spans[i][1]
+        return e if least + 1e-6 < t - e <= within + 1e-6 and e >= floor else t
+
+    def release_after(self, t: float, ceil: float, least: float, within: float) -> float:
+        """Where the sound before the silence just after `t` ends, when that is more than `least` and at most `within` seconds after
+        `t` and no later than `ceil` (where a neighbouring word's sound starts): the end of a word the transcript put too early."""
+        i = bisect.bisect_right(self.starts, t)  # the first silence that starts after t
+        if i >= len(self.spans) or (i > 0 and self.spans[i - 1][1] > t):
+            return t
+        s = self.spans[i][0]
+        return s if least + 1e-6 < s - t <= within + 1e-6 and s <= ceil else t
+
     def pause_between(self, prev_start: float, next_end: float, eps: float = 0.05) -> float:
         """Longest measured silence between two words.
 
@@ -416,6 +444,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         # Padding never reaches into a neighbouring word (including cut fillers).
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
+        wa = sil.onset_before(wa, floor=lo - 0.02, least=style.pad_in, within=style.pad_in + EDGE_SLACK)
+        wb = sil.release_after(wb, ceil=hi + 0.02, least=style.pad_out, within=style.pad_out + EDGE_SLACK)
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:
