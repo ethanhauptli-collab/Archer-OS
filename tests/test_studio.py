@@ -62,7 +62,10 @@ class FakeStudio:
 
     def snapshot(self, sid: str, created: int, *, name: str = "Catalog snapshot", assets=(), collections=None, kits=None,
                  schema: int = 3, user_version: int = 3, drop_column: str | None = None, libraries=None, after: str = "") -> Path:
-        """`after`: more SQL, run once the rows are in (Project history tables, a search index...)."""
+        """`created`: NOW minus an age, as the tests think of it. NOW was read when this module was imported and a full run takes
+        tens of minutes, so the age is counted from this call: a snapshot made "an hour ago" is an hour old when the test looks.
+        `after`: more SQL, run once the rows are in (Project history tables, a search index...)."""
+        created += int(time.time()) - NOW
         db = self.staging / f"{sid}.sqlite"
         con = sqlite3.connect(db)
         sql = re.sub(rf"\b{drop_column} [^,\n]*,\s*", "", CATALOG_SQL) if drop_column else CATALOG_SQL
@@ -174,6 +177,14 @@ def _asset(i, rel, **kw):
 
 
 # ---------------------------------------------------------------- snapshots
+
+
+@pytest.mark.parametrize("age,said", [(3600, "1 h old"), (3 * 3600, "3 h old")])
+def test_a_snapshots_age_does_not_depend_on_how_long_the_run_has_taken(fake, monkeypatch, age, said):
+    """NOW is read when this module is imported and a full run takes tens of minutes: a snapshot made an hour ago says "1 h old" all the same."""
+    monkeypatch.setitem(globals(), "NOW", NOW - 2400)  # a run that is 40 minutes in
+    fake.snapshot("1700000500-1-1", NOW - age)
+    assert said in studio.status(offline=True)["summary"]
 
 
 def test_the_newest_snapshot_is_copied_and_minus_10_beats_minus_9(fake, tmp_path, only_the_cache_is_opened):
