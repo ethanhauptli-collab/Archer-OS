@@ -438,6 +438,58 @@ def test_failures_are_explained(result, error):
         assert "usage limit" in str(e.value)
 
 
+def test_a_reply_cut_off_at_the_models_cap_says_so():
+    class Proc:
+        returncode = 1
+        stdout = json.dumps({"type": "result", "is_error": True, "result": (
+            "API Error: Claude's response exceeded the 128000 output token maximum. To configure this behavior, "
+            "set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.")})
+        stderr = ""
+
+    provider = ClaudeCodeProvider(binary="/bin/true", run=lambda *a, **k: Proc())
+    with pytest.raises(ProviderError) as e:
+        provider.complete_json("s", [TextPart("x")], {"type": "object"}, schema_name="plan", purpose="edit plan")
+    message = str(e.value)
+    assert "128000 tokens" in message and "target length" in message and "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in message
+
+
+@pytest.mark.parametrize(
+    "asked,owners,sent",
+    [
+        (128000, None, "128000"),  # a plan or revision: the room the API provider sends
+        (64000, None, "64000"),  # the default for any other request
+        (16000, None, None),  # the visual log asks for less than Claude Code's own default: nothing is lowered
+        (32000, None, None),
+        (64000, "100000", "100000"),  # what the owner set in their shell is never lowered
+        (128000, "100000", "128000"),
+        (128000, "lots", "128000"),  # an owner value that isn't a number doesn't stop the request
+    ],
+)
+def test_the_reply_size_is_the_one_the_request_asks_for(monkeypatch, asked, owners, sent):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-would-bill-the-api-not-the-plan")
+    monkeypatch.delenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", raising=False)
+    if owners is not None:
+        monkeypatch.setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", owners)
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = json.dumps({"type": "result", "is_error": False, "result": "", "structured_output": {"title": "x"}})
+        stderr = ""
+
+    def run(*args, **kwargs):
+        seen.update(kwargs["env"])
+        return Proc()
+
+    provider = ClaudeCodeProvider(binary="/bin/true", run=run)
+    provider.complete_json("s", [TextPart("x")], {"type": "object"}, schema_name="plan", purpose="edit plan", max_tokens=asked)
+    assert "ANTHROPIC_API_KEY" not in seen  # still never billed to an API key
+    if sent is None:
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in seen
+    else:
+        assert seen["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == sent
+
+
 def test_plain_text_json_reply_still_parses():
     class Proc:
         returncode = 0

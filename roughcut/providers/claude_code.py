@@ -135,6 +135,29 @@ def subscription_env() -> dict[str, str]:
     return env
 
 
+# Claude Code caps one reply at a number of output tokens (CLAUDE_CODE_MAX_OUTPUT_TOKENS; its default is 32,000 for a model it
+# doesn't know, and the model's thinking counts toward it) and answers a longer one with an error instead of the text so far.
+# The edit plan of a long shoot (a section per few minutes, the B-roll, the notes, and the thinking before them) can pass that,
+# and the pipeline already asks every provider for room (max_tokens=128000 for a plan, as the API provider sends it). Claude Code
+# lowers a value above a model's own cap to that cap, so asking for the pipeline's number is safe; it is never lowered below what
+# the owner set in their own shell.
+OUTPUT_TOKENS_VAR = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+DEFAULT_REPLY_TOKENS = 32000
+_OVER_REPLY_CAP = re.compile(r"exceeded the ([\d,]+) output token maximum", re.IGNORECASE)
+
+
+def request_env(max_tokens: int) -> dict[str, str]:
+    """subscription_env() for a request that may need more than Claude Code's default reply size."""
+    env = subscription_env()
+    try:
+        own = int(env.get(OUTPUT_TOKENS_VAR, "0"))
+    except ValueError:
+        own = 0
+    if max_tokens > max(own, DEFAULT_REPLY_TOKENS):
+        env[OUTPUT_TOKENS_VAR] = str(int(max_tokens))
+    return env
+
+
 def auth_status(binary: str, run=subprocess.run) -> dict:
     """`claude auth status --json`: {"loggedIn": bool, "authMethod": "claude.ai" | "oauth_token" | "api_key" ...}."""
     try:
@@ -342,7 +365,7 @@ class ClaudeCodeProvider:
             try:
                 with progress.doing(f"waiting for Claude Code ({self.model}, {purpose})", external=True):  # bounded by self.timeout
                     proc = self._run(
-                        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", env=subscription_env(), cwd=staged, timeout=self.timeout
+                        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", env=request_env(max_tokens), cwd=staged, timeout=self.timeout
                     )
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"Claude Code took longer than {self.timeout / 60:.0f} minutes on the {purpose} request.") from e
@@ -361,6 +384,12 @@ class ClaudeCodeProvider:
                 raise ProviderAuthError(f"Claude Code couldn't use your account: {message} {SIGN_IN_HELP}")
             if plan_limit_reached(lowered):
                 raise ProviderLimitError(f"Your Claude plan's usage limit was reached during the {purpose} request{_reset_time(message)}.")
+            over = _OVER_REPLY_CAP.search(message)
+            if over:
+                raise ProviderError(
+                    f"Claude's reply to the {purpose} request was longer than Claude Code allows in one reply ({over.group(1)} tokens), "
+                    "so it was cut off. Ask for a shorter cut (a target length) or build the footage in two parts."
+                )
             raise ProviderError(f"Claude Code failed on the {purpose} request: {message}")
 
         u = data.get("usage") or {}
