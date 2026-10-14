@@ -1,5 +1,9 @@
 """Synthetic footage for end-to-end tests, generated with ffmpeg.
 
+Every test, and every session, module or class fixture, also runs in a sandbox (tests/hermetic.py, named in
+`pytest_plugins` below): no real Keychain, Claude Code, network, home folder or Venture Studio. Read that module's
+docstring before adding a test that needs the machine.
+
 The "talking" clip has tone bursts where speech would be and a sidecar
 transcript whose words line up with those bursts, so the whole pipeline runs
 without a Whisper model or an API key.
@@ -13,6 +17,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+# The sandbox: its fixtures, the hook that gives wider fixtures the same sandbox, the real_environment marker and the
+# report header. A plugin rather than imported names, so a throwaway project (tests/test_hermetic.py) needs one line.
+pytest_plugins = ["hermetic"]
 
 # (start, end, sentence) for the fake talking-head clip.
 SPEECH = [
@@ -33,13 +41,6 @@ def spread_words(start: float, end: float, sentence: str) -> list[dict]:
         {"start": round(start + i * step, 3), "end": round(start + (i + 1) * step - 0.02, 3), "text": tok, "prob": 0.95}
         for i, tok in enumerate(tokens)
     ]
-
-
-@pytest.fixture(autouse=True)
-def _no_venture_studio(tmp_path_factory, monkeypatch):
-    """No test reads a real Venture Studio folder on the machine running it: Studio "isn't installed"
-    unless a test points ROUGHCUT_STUDIO_DIR at a fake one."""
-    monkeypatch.setenv("ROUGHCUT_STUDIO_DIR", str(tmp_path_factory.getbasetemp() / "no-venture-studio"))
 
 
 def ffmpeg(*args: str) -> None:

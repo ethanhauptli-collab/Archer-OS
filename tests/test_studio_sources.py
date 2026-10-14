@@ -17,7 +17,6 @@ import pytest
 from conftest import FakeProvider
 from test_studio import (  # noqa: F401 - fixtures
     NOW,
-    _now,
     _asset,
     _reset_progress,
     fake,
@@ -87,7 +86,7 @@ def catalog_rows(fake):
     after = HISTORY + "INSERT INTO project_history_events VALUES (1, 'prepared'), (2, 'confirmed_used');\n" + "".join(
         f"INSERT INTO project_history_items VALUES (1, {aid}, '{out}');\n" for aid, out in prepared
     ) + f"INSERT INTO project_history_items VALUES (2, 6, '{ROOT}/Music/Somewhere else.wav');\n"  # not a prepared event: no mapping
-    fake.snapshot("1700000500-1-1", _now() - 3600, libraries=[(ROOT, "Studio Library")], assets=assets, after=after)
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[(ROOT, "Studio Library")], assets=assets, after=after)
     return rows, prepared
 
 
@@ -156,14 +155,14 @@ def test_disabled_clips_and_audition_alternatives_dont_count(fake, catalog_rows)
 
 
 def test_a_snapshot_without_project_history_has_no_prepared_outputs(fake):
-    fake.snapshot("1700000500-1-1", _now() - 3600, libraries=[(ROOT, "Studio Library")], assets=[_asset(2, "Music/Old Ballad.wav", kind="audio")])
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[(ROOT, "Studio Library")], assets=[_asset(2, "Music/Old Ballad.wav", kind="audio")])
     pack = "/Users/editor/Desktop/Pack/Media/Old Ballad.wav"
     record = studio.match_media(fcpxml([(f"{ROOT}/Music/Old Ballad.wav", {}), (pack, {})]))
     assert [f["status"] for f in record["files"].values()] == ["matched", "outside"]
 
 
 def test_a_catalog_row_studio_refuses_stops_its_review_of_any_file(fake):
-    fake.snapshot("1700000500-1-1", _now() - 3600, libraries=[(ROOT, "Studio Library")], assets=[
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[(ROOT, "Studio Library")], assets=[
         _asset(1, "Music/Sunrise.m4a", kind="audio"), _asset(2, "../elsewhere.wav", kind="audio"),
     ])
     xml = fcpxml([(CUT[0], {})])
@@ -227,7 +226,7 @@ def shoot_in_library(footage, library, fake) -> Path:
         shutil.copy2(footage / name, folder / name)
     (library / "Music").mkdir()
     shutil.copy2(footage / "music" / "music.m4a", library / "Music" / "Sunrise.m4a")
-    fake.snapshot("1700000500-1-1", _now() - 3600, assets=[
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[
         _asset(1, "Projects/Promo shoot/talk.mov", kind="video", provider="Our crew", license="Owned"),
     ])
     return folder
@@ -295,7 +294,7 @@ def test_installed_but_unavailable_is_one_line(footage, fake, tmp_path):
 
 
 def test_no_section_without_studio_or_without_studio_files(footage, fake, tmp_path, monkeypatch):
-    fake.snapshot("1700000500-1-1", _now() - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")])
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")])
     out = tmp_path / "out"
     pipeline.build(Options(inputs=[footage], out=out, provider="none", transcriber="none", cache_dir=tmp_path / "cache"))
     assert "Venture Studio" not in (out / "edit_report.md").read_text()  # nothing in the cut is Studio's

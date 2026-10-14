@@ -2,16 +2,14 @@
 
 The first Mac setup failed because the key lived in one place (the app's
 Keychain entry, or an unreloaded ~/.zshrc) and Terminal looked in another.
-macOS's `security` tool is replaced by a fake that keeps a JSON store and logs
-its command lines, so we can check the key never appears in argv.
+macOS's `security` tool is replaced by the sandbox's stand-in (tests/hermetic.py), which
+keeps a JSON store and logs its command lines, so we can check the key never appears in argv.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import stat
-import sys
 from pathlib import Path
 
 import anthropic  # imported before the fixture pretends to be macOS (urllib then wants _scproxy)
@@ -21,56 +19,15 @@ import pytest
 from roughcut import keys
 from roughcut.cli import main
 
-FAKE_SECURITY = r'''#!{python}
-import json, os, sys
-store_path = os.environ["FAKE_KEYCHAIN"]
-store = json.load(open(store_path)) if os.path.exists(store_path) else {{}}
-with open(store_path + ".argv", "a") as log:
-    log.write(json.dumps(sys.argv[1:]) + "\n")
-
-def opt(args, flag):
-    return args[args.index(flag) + 1] if flag in args else None
-
-def run(args):
-    cmd = args[0]
-    if cmd == "find-generic-password":
-        key = opt(args, "-s") + "/" + opt(args, "-a")
-        if key not in store:
-            sys.exit(44)
-        print(store[key])
-    elif cmd == "add-generic-password":
-        store[opt(args, "-s") + "/" + opt(args, "-a")] = opt(args, "-w")
-    elif cmd == "delete-generic-password":
-        key = opt(args, "-s") + "/" + opt(args, "-a")
-        if store.pop(key, None) is None:
-            sys.exit(44)
-
-if sys.argv[1] == "-i":
-    for line in sys.stdin:
-        if line.strip():
-            run(line.split())
-else:
-    run(sys.argv[1:])
-json.dump(store, open(store_path, "w"))
-'''
-
 KEY = "sk-ant-api03-" + "a" * 40
 
 
 @pytest.fixture
-def keychain(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "security"
-    fake.write_text(FAKE_SECURITY.format(python=sys.executable))
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    store = tmp_path / "keychain.json"
-    monkeypatch.setenv("FAKE_KEYCHAIN", str(store))
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+def keychain(hermetic_sandbox, monkeypatch):
+    """A Mac with an empty Keychain: the sandbox's stand-in `security` (tests/hermetic.py), which keeps a JSON store
+    and logs its command lines, so we can check the key never appears in argv."""
     monkeypatch.setattr(keys.sys, "platform", "darwin")
-    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
-    return store
+    return hermetic_sandbox.keychain
 
 
 def argv_log(store: Path) -> str:

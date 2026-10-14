@@ -18,7 +18,6 @@ import pytest
 from conftest import ffmpeg, make_clip
 from test_studio import (  # noqa: F401 - fixtures
     NOW,
-    _now,
     _asset,
     _reset_progress,
     fake,
@@ -66,7 +65,7 @@ FTS = "CREATE VIRTUAL TABLE assets_fts USING fts5(name, tags); INSERT INTO asset
 
 
 def test_the_listing_is_studios_standalone_audio_with_a_guess(fake, library):
-    fake.snapshot("1700000500-1-1", _now() - 3600, assets=LISTED, collections={"Promo Music": [1, 2, 7, 8], "Calm": [8]})
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=LISTED, collections={"Promo Music": [1, 2, 7, 8], "Calm": [8]})
     with untouched(fake.dir, library):
         listing = studio.music_listing()
         promo = studio.music_listing(collection="promo music")
@@ -90,12 +89,12 @@ def test_a_known_length_beats_the_name():
 
 
 def test_search_uses_studios_index_and_otherwise_escapes_wildcards(fake, library):
-    fake.snapshot("1700000500-1-1", _now() - 3600, assets=LISTED, after=FTS)
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=LISTED, after=FTS)
     with untouched(fake.dir):
         assert [r["id"] for r in studio.music_listing(["cafe"]).rows] == [11]  # the index folds accents, as Studio's does
         assert [r["id"] for r in studio.music_listing(["sun", "warm"]).rows] == [1]  # every word, each as a word start
         assert studio.music_listing(["%"]).rows == [] and studio.music_listing(["_"]).rows == []
-    fake.snapshot("1700000900-1-1", _now() - 60, assets=LISTED)  # no index: a substring match, wildcards escaped
+    fake.snapshot("1700000900-1-1", NOW - 60, assets=LISTED)  # no index: a substring match, wildcards escaped
     assert [r["id"] for r in studio.music_listing(["piano"]).rows] == [8]
     assert [r["id"] for r in studio.music_listing(["50"]).rows] == [12]
     assert studio.music_listing(["%"]).rows == []
@@ -103,7 +102,7 @@ def test_search_uses_studios_index_and_otherwise_escapes_wildcards(fake, library
 
 
 def test_the_json_listing_is_an_array_and_the_text_says_how_old(fake, library, capsys):
-    fake.snapshot("1700000500-1-1", _now() - 3 * 3600, assets=LISTED)
+    fake.snapshot("1700000500-1-1", NOW - 3 * 3600, assets=LISTED)
     assert main(["studio", "music", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
     assert isinstance(rows, list) and rows and all(isinstance(r, dict) and "event" not in r for r in rows)
@@ -138,7 +137,7 @@ def test_a_kit_file_lists_its_audio(tmp_path, monkeypatch, capsys):
 
 
 def _sample_rows(fake) -> list[dict]:
-    fake.snapshot("1700000500-1-1", _now() - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")], assets=LISTED[:2] + LISTED[4:8],
+    fake.snapshot("1700000500-1-1", NOW - 3600, libraries=[("/Volumes/Media/Studio Library", "Studio Library")], assets=LISTED[:2] + LISTED[4:8],
                   collections={"Promo Music": [1, 7]})
     return [{**r, "as_of": "the catalog snapshot from 12 Oct 21:04 (14 h old)"} for r in studio.music_listing().rows]
 
@@ -183,7 +182,7 @@ def songs(library, fake, audio) -> dict[str, Path]:
         shutil.copy2(audio["sting" if key in ("sting", "whoosh") else "song"], path)
     old = time.time() - 30 * 86400
     os.utime(files["ballad"], (old, old))  # the oldest file: it must not win just for being older
-    fake.snapshot("1700000500-1-1", _now() - 3600, assets=[
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=[
         _asset(1, "Music/Sunrise.m4a", kind="audio", duration=50.0, favorite=1, provider="Vendor A", license="Standard", tags="warm"),
         _asset(2, "Music/Old Ballad.m4a", kind="audio", tags="upbeat, energetic"),  # length unknown: measured
         _asset(3, "Music/Short Sting.m4a", kind="audio"),  # measured: too short for a song
@@ -528,7 +527,7 @@ def test_a_search_that_finds_many_items_binds_none_of_them(fake, library):
     if not hasattr(sqlite3.Connection, "setlimit"):
         pytest.skip("this Python can't lower SQLite's variable limit")
     many = [_asset(i, f"Library/file {i}.wav", kind="audio") for i in range(1, 301)]
-    fake.snapshot("1700000500-1-1", _now() - 3600, assets=many, after=FTS)
+    fake.snapshot("1700000500-1-1", NOW - 3600, assets=many, after=FTS)
     copy = studio.newest_copy()
     with studio.catalog(copy) as con:
         con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 50)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from .analyze import ROLE_LABELS, Analysis
 from .media import frame_rate_warnings, vfr_warning_covered
@@ -186,7 +187,6 @@ def studio_section(
     nothing in the cut is Studio's (or Studio isn't installed and nothing was saved).
     """
     import shlex
-    import time
 
     from .studio import STALE_HOURS, _age, _when
 
