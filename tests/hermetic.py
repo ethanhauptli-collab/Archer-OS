@@ -2,8 +2,8 @@
 
 The suite used to depend on whoever ran it: a Mac with saved Keychain entries, a signed-in Claude Code, an
 exported API key, a proxy, or a cache folder full of earlier runs gave different answers than CI (two tests
-failed on the owner's Mac for exactly that reason). Every test now runs in a sandbox that `hermetic_sandbox`
-(an autouse fixture, wired in conftest.py) builds around it:
+failed on the owner's Mac for exactly that reason). Every test, and every fixture wider than a test, now runs in
+a sandbox. This module is a pytest plugin (tests/conftest.py names it in `pytest_plugins`); it provides:
 
   * **Environment.** Secrets and settings the code reads are removed (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE*`,
     `ROUGHCUT_*`, `XDG_*`, `GIT_*`, cloud and proxy variables, anything named like a token or key); `HOME`,
@@ -14,16 +14,32 @@ failed on the owner's Mac for exactly that reason). Every test now runs in a san
   * **Tools that look at the machine.** `security` (the Keychain), `caffeinate`, `osascript` and `open` are
     stand-ins first on `PATH`: the Keychain is empty and per test, the rest do nothing. `find_claude()` finds
     only a `claude` a test put in its own folder, never the Claude Code installed on the machine.
-  * **A guard** (a Python audit hook, active only while a test runs) refuses what a test must not reach, with
-    a loud `HermeticViolation` (a `PermissionError`, so code that already copes with a missing tool or share
-    behaves as it does on CI) and, because code may swallow that error, also fails the test at teardown:
-      - the network: any connection or name lookup that is not loopback (and no unix socket outside the
-        test's folder);
-      - programs: only ffmpeg, ffprobe, git, sips, this Python, Playwright's driver, the stand-ins above and
-        anything inside the test's own folders may start;
-      - files: nothing is written outside the test's folders (or a `__pycache__`), and nothing under the real
-        home folder is read or listed, apart from the repository, the Python installation and Playwright's
-        browsers.
+  * **Wider fixtures.** Pytest sets a session, package, module or class fixture up before any test's own
+    autouse fixtures, so `hermetic_sandbox` cannot cover it. `pytest_fixture_setup` below gives each such
+    fixture of the tests (not pytest's own, not a `_helper`) the same environment and guard around its setup
+    and its teardown, then puts the process back as it was.
+  * **A guard** (a Python audit hook, on only while a test or a wider fixture's setup or teardown runs)
+    refuses what they must not reach, with a loud `HermeticViolation` (a `PermissionError`, so code that
+    already copes with a missing tool or share behaves as it does on CI) and, because code may swallow that
+    error, also fails the test at teardown (a wider fixture: when it was set up or torn down). It judges this
+    Python process's calls to:
+      - the network: connect, send and name lookups to anything but loopback (and a unix socket outside the
+        test's folders);
+      - programs: only programs named ffmpeg, ffprobe, git or sips, a Python, a program an installed package
+        brings (Playwright's driver), the stand-ins above, or anything inside the test's own folders may start,
+        looked up where Python itself would look (`env`'s PATH, else `os.defpath`); `os.system` is refused;
+      - writes: opening for writing, mkdir, rmdir, remove, rename, symlink, link, chmod, chown, utime, truncate,
+        extended attributes, shutil copy/rmtree/move, and a SQLite database opened read-write: nothing outside
+        the test's folders (a `__pycache__` and /dev apart), also when it is reached through a link inside them,
+        and a call relative to a directory the program holds open is judged by that directory;
+      - reads: opening a file or listing a folder under the real home folder, also through a link (the
+        repository, the Python installation and Playwright's browsers apart); a SQLite database opened
+        read-only counts as a read.
+    What it cannot see, so does not claim: `stat`/`exists`; `os.open(..., dir_fd=...)` and `os.mkfifo`/`mknod`
+    (Python raises no event for them); `ctypes` and other native code; `os.spawn*` (refused only inside the
+    process it forks, which exits 127); what a program it lets run does (ffmpeg, git, sips, a Python child,
+    Chromium); a program the allow-list lets through by name wherever the file is; other threads once a
+    test has ended; and a machine whose HOME is `/` (there the read guard is off, and the header says so).
   * `@pytest.mark.real_environment` marks a check that needs the real machine (a doctor smoke): it is skipped
     unless `ROUGHCUT_TESTS_REAL=1`, and then runs without any of the above.
 
@@ -527,14 +543,8 @@ def _restored_process_state():
     os.environ.update(env)
 
 
-@pytest.fixture(autouse=True)
-def hermetic_sandbox(request, _restored_process_state, monkeypatch, tmp_path_factory, _stand_in_folder):
-    if request.node.get_closest_marker(MARKER):
-        yield None  # a check of the real machine: no sandbox
-        return
-    sandbox = Sandbox(tmp_path_factory.mktemp("sandbox"), _stand_in_folder)
-    base = tmp_path_factory.getbasetemp()
-
+def _apply_environment(monkeypatch, sandbox: Sandbox) -> None:
+    """The scrubbed environment, HOME, the PATH stand-ins and the Studio and Claude Code stubs, for `monkeypatch` to undo."""
     env = scrubbed(dict(os.environ))
     for name in [k for k in os.environ if k not in env]:
         monkeypatch.delenv(name)
@@ -559,18 +569,143 @@ def hermetic_sandbox(request, _restored_process_state, monkeypatch, tmp_path_fac
 
     monkeypatch.setattr(claude_code, "find_claude", find_claude)
 
-    _STATE.test = request.node.nodeid
-    _STATE.own = _own_roots(base, sandbox)
-    _STATE.readable = _readable_roots()
+
+def _activate(label: str, own: tuple[str, ...]) -> None:
+    _STATE.test, _STATE.own, _STATE.readable = label, own, _readable_roots()
     _STATE.violations = []
     _STATE.active = True
+
+
+def _deactivate() -> list[str]:
+    """Turn the guard off; what it refused meanwhile."""
+    _STATE.active = False
+    found, _STATE.violations = _STATE.violations, []
+    return found
+
+
+REMEDY = (
+    f"Use a loopback listener or a fake in its place; a check that really needs this machine is marked "
+    f"@pytest.mark.{MARKER} and runs only with {REAL_FLAG}=1 (see tests/hermetic.py)."
+)
+
+
+def _failure(who: str, found: list[str], when: str = "") -> str:
+    return f"{who} reached outside its sandbox{when}:\n  " + "\n  ".join(found) + "\n" + REMEDY
+
+
+@pytest.fixture(autouse=True)
+def hermetic_sandbox(request, _restored_process_state, monkeypatch, tmp_path_factory, _stand_in_folder):
+    if request.node.get_closest_marker(MARKER):
+        yield None  # a check of the real machine: no sandbox
+        return
+    sandbox = Sandbox(tmp_path_factory.mktemp("sandbox"), _stand_in_folder)
+    _apply_environment(monkeypatch, sandbox)
+    _activate(request.node.nodeid, _own_roots(tmp_path_factory.getbasetemp(), sandbox))
     try:
         yield sandbox
     finally:
-        _STATE.active = False
-    if _STATE.violations:
-        found, _STATE.violations = _STATE.violations, []
-        pytest.fail("the test reached outside its sandbox:\n  " + "\n  ".join(found), pytrace=False)
+        found = _deactivate()
+    if found:
+        pytest.fail(_failure("the test", found), pytrace=False)
+
+
+# ------------------------------------------------------------------ fixtures wider than a test
+
+
+class _SessionSandbox:
+    """What a wider fixture needs to build a sandbox of its own: pytest's temp folder factory and the stand-ins' folder."""
+
+    def __init__(self, factory, stand_ins: Path) -> None:
+        self.factory, self.stand_ins = factory, stand_ins
+
+
+@pytest.fixture(scope="session")
+def _hermetic_session(tmp_path_factory, _stand_in_folder) -> _SessionSandbox:
+    return _SessionSandbox(tmp_path_factory, _stand_in_folder)
+
+
+def _wider_than_a_test(fixturedef) -> bool:
+    """A session, package, module or class fixture the tests define: not one of pytest's or another plugin's (code in
+    the Python installation or an installed package), not a `_helper` of this module."""
+    if fixturedef.scope == "function" or fixturedef.argname.startswith("_"):
+        return False
+    source = getattr(getattr(getattr(fixturedef, "func", None), "__code__", None), "co_filename", "")
+    return bool(source) and not _inside(os.path.realpath(source), _python_roots() + _package_roots())
+
+
+class _WiderGuard:
+    """The sandbox around one phase (its setup, or its teardown) of a fixture wider than a test."""
+
+    def __init__(self, session: _SessionSandbox, label: str, phase: str) -> None:
+        self.session, self.label, self.phase = session, label, phase
+        self.patches: pytest.MonkeyPatch | None = None
+
+    def enter(self) -> None:
+        if _STATE.active or self.patches is not None:
+            return  # a test's own sandbox is in force: the fixture was asked for in the middle of the test
+        factory = self.session.factory
+        sandbox = Sandbox(factory.mktemp("wider"), self.session.stand_ins)
+        self.patches = pytest.MonkeyPatch()
+        _apply_environment(self.patches, sandbox)
+        _activate(f"{self.label} ({self.phase})", _own_roots(factory.getbasetemp(), sandbox))
+
+    def leave(self) -> list[str]:
+        if self.patches is None:
+            return []
+        found, patches, self.patches = _deactivate(), self.patches, None
+        patches.undo()
+        return found
+
+    def fail(self, found: list[str]) -> None:
+        pytest.fail(_failure(f"the {self.label}", found, f" while it was {self.phase}"), pytrace=False)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    """Pytest sets a wider fixture up before any test's autouse fixtures, so give its setup and its teardown the same
+    environment and guard (see the module docstring). What the fixture did to os.environ itself is left alone."""
+    if not _wider_than_a_test(fixturedef):
+        return (yield)
+    session = request.getfixturevalue("_hermetic_session")
+    if not isinstance(session, _SessionSandbox):
+        return (yield)  # `--setup-plan`: no fixture really runs, so there is nothing to sandbox
+    label = f"{fixturedef.scope}-scoped fixture {fixturedef.argname}"
+    setting_up, tearing_down = _WiderGuard(session, label, "set up"), _WiderGuard(session, label, "torn down")
+
+    def leave_after_teardown() -> None:
+        found = tearing_down.leave()
+        if found:
+            tearing_down.fail(found)
+
+    request.addfinalizer(leave_after_teardown)  # first registered, so last to run
+    setting_up.enter()
+    try:
+        result = yield
+    finally:
+        found = setting_up.leave()
+    request.addfinalizer(tearing_down.enter)  # registered after the fixture's own finalizers, so the first to run
+    if found:
+        setting_up.fail(found)
+    return result
+
+
+# ------------------------------------------------------------------ pytest hooks (tests/conftest.py names this module in pytest_plugins)
+
+
+def report_header(real_home: str | None = None) -> str:
+    text = f"hermetic: every test runs in a sandbox (a check of the real machine: {REAL_FLAG}=1, marker {MARKER})"
+    home = REAL_HOME if real_home is None else real_home
+    if not home or home == os.sep:
+        text += "; the read guard is off because HOME is /, so reads are not judged (writes, programs and the network still are)"
+    return text
+
+
+def pytest_report_header(config):
+    return report_header()
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", f"{MARKER}: needs the real machine (Keychain, Claude Code, network); runs only with {REAL_FLAG}=1")
 
 
 def apply_real_environment_marker(items) -> None:
@@ -581,3 +716,7 @@ def apply_real_environment_marker(items) -> None:
     for item in items:
         if item.get_closest_marker(MARKER):
             item.add_marker(skip)
+
+
+def pytest_collection_modifyitems(config, items):
+    apply_real_environment_marker(items)

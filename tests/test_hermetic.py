@@ -51,6 +51,13 @@ def test_the_environment_the_code_reads_is_scrubbed():
     assert clean["NO_PROXY"] == clean["no_proxy"] == "*"
 
 
+def test_the_report_header_says_when_the_read_guard_cannot_work():
+    normal = hermetic.report_header("/Users/someone")
+    assert normal.startswith("hermetic: every test runs in a sandbox") and "read guard" not in normal
+    off = hermetic.report_header(os.sep)  # HOME is /: every path is "inside the home folder"
+    assert "read guard is off" in off and "HOME is /" in off
+
+
 def test_no_key_proxy_or_setting_of_the_machine_reaches_a_test():
     assert not [k for k in os.environ if k.upper().startswith(("ANTHROPIC_", "OPENAI_", "CLAUDE", "XDG_"))]
     assert not [k for k in os.environ if k.upper().startswith("ROUGHCUT_") and k not in hermetic.KEEP | {"ROUGHCUT_STUDIO_DIR"}]
@@ -379,14 +386,18 @@ def _run_pytest(args: list[str], env: dict[str, str], **kw) -> subprocess.Comple
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args], cwd=REPO, env=env, capture_output=True, text=True, timeout=600, **kw)
 
 
-def test_a_refusal_the_code_swallows_still_fails_the_test_and_nothing_leaks_into_the_next(tmp_path):
+def _project(tmp_path: Path, **modules: str) -> Path:
+    """A throwaway pytest project that uses the sandbox the way tests/conftest.py does: one line, `pytest_plugins`."""
     project = tmp_path / "project"
     project.mkdir()
-    (project / "conftest.py").write_text(
-        f"import sys\nsys.path.insert(0, {str(REPO / 'tests')!r})\n"
-        "from hermetic import _restored_process_state, _stand_in_folder, hermetic_sandbox  # noqa\n"
-    )
-    (project / "test_probe.py").write_text(textwrap.dedent('''
+    (project / "conftest.py").write_text(f"import sys\nsys.path.insert(0, {str(REPO / 'tests')!r})\npytest_plugins = ['hermetic']\n")
+    for name, source in modules.items():
+        (project / f"test_{name}.py").write_text(textwrap.dedent(source))
+    return project
+
+
+def test_a_refusal_the_code_swallows_still_fails_the_test_and_nothing_leaks_into_the_next(tmp_path):
+    project = _project(tmp_path, probe='''
         import os, socket
 
         def test_a_sets_things_itself():
@@ -401,12 +412,251 @@ def test_a_refusal_the_code_swallows_still_fails_the_test_and_nothing_leaks_into
                 socket.create_connection(("hermetic-probe.invalid", 443), timeout=1)
             except OSError:
                 pass                                # "unreachable": the code handles it, the test passes...
-    '''))
+    ''')
     done = _run_pytest([str(project)], dict(os.environ))
     report = done.stdout + done.stderr
     assert "3 passed, 1 error" in report, report  # ...but the sandbox still reports what was reached
     assert "ERROR at teardown of test_c_copes_with_a_network_error" in report and "hermetic test violation (network)" in report, report
     assert done.returncode != 0
+    # and says what to do about it, not only what happened
+    assert "loopback listener" in report and f"@pytest.mark.{hermetic.MARKER}" in report and "tests/hermetic.py" in report, report
+
+
+# ------------------------------------------------------------------ fixtures wider than a test
+
+WIDE_PROBE = '''
+    import json, os, shutil, socket, tempfile
+    from pathlib import Path
+
+    import pytest
+    from hermetic import HermeticViolation, expecting_violations
+
+    MAC_HOME = os.environ["PROBE_MAC_HOME"]
+    BASETEMP = os.path.realpath(os.environ["PROBE_BASETEMP"])
+    WATCHED = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTPS_PROXY", "HTTP_PROXY", "ROUGHCUT_CONFIG_DIR")
+
+
+    def seen():
+        """What the code running right now can see of the machine."""
+        from roughcut import studio
+
+        return {
+            "keys": [k for k in WATCHED if os.environ.get(k)],
+            "no_proxy": os.environ.get("NO_PROXY"),
+            "home": str(Path.home()),
+            "studio_installed": studio.installed(),
+            "security": shutil.which("security") or "",
+            "tmp": os.path.realpath(tempfile.gettempdir()),
+        }
+
+
+    def problems(saw):
+        found = []
+        if saw["keys"]:
+            found.append("could see " + ", ".join(saw["keys"]))
+        if saw["no_proxy"] != "*":
+            found.append("proxies were not turned off")
+        if saw["home"].startswith(MAC_HOME):
+            found.append("HOME was the machine's")
+        if saw["studio_installed"]:
+            found.append("Venture Studio was reachable")
+        if Path(saw["security"]).parent.name[:9] != "stand-ins":
+            found.append("`security` was not the stand-in: " + saw["security"])
+        if not saw["tmp"].startswith(BASETEMP):
+            found.append("Python's temp folder was the machine's")
+        return found
+
+
+    @pytest.fixture(scope="session")
+    def session_saw():
+        return seen()
+
+
+    @pytest.fixture(scope="module")
+    def module_saw():
+        return seen()
+
+
+    @pytest.fixture(scope="module")
+    def sets_a_variable():
+        os.environ["PROBE_FLAG"] = "kept"
+        return 1
+
+
+    @pytest.fixture(scope="module")
+    def seen_at_teardown(tmp_path_factory):
+        base = tmp_path_factory.getbasetemp()
+        yield 1
+        (base / "teardown-saw.json").write_text(json.dumps(problems(seen())))
+
+
+    @pytest.fixture(scope="module")
+    def late():
+        return seen()
+
+
+    @pytest.fixture(scope="class")
+    def class_saw():
+        return seen()
+
+
+    class TestAClass:
+        def test_a_class_fixture(self, class_saw):
+            assert problems(class_saw) == []
+
+
+    def test_a_session_fixture(session_saw):
+        assert problems(session_saw) == []
+
+
+    def test_a_module_fixture(module_saw):
+        assert problems(module_saw) == []
+
+
+    def test_a_variable_a_fixture_set_itself_is_still_there(sets_a_variable):
+        assert os.environ.get("PROBE_FLAG") == "kept"
+
+
+    def test_the_teardown_runs_in_the_sandbox_too(seen_at_teardown):
+        assert seen_at_teardown == 1
+
+
+    def test_a_fixture_asked_for_late_in_a_test_is_sandboxed_and_the_guard_stays_on(request):
+        assert problems(request.getfixturevalue("late")) == []
+        with expecting_violations() as refused:
+            with pytest.raises(HermeticViolation):
+                socket.create_connection(("hermetic-probe.invalid", 443), timeout=1)
+        assert len(refused) == 1
+
+
+    def test_a_test_itself():
+        assert problems(seen()) == []
+'''
+
+SWALLOWED_AT_SETUP = '''
+    import socket
+
+    import pytest
+
+
+    @pytest.fixture(scope="module")
+    def reaches_out():
+        try:
+            socket.create_connection(("hermetic-probe.invalid", 443), timeout=1)
+        except OSError:
+            pass  # the code under test copes with an unreachable host...
+        return 1
+
+
+    def test_uses_it_at_setup(reaches_out):
+        assert reaches_out == 1
+'''
+
+SWALLOWED_AT_TEARDOWN = '''
+    import socket
+
+    import pytest
+
+
+    @pytest.fixture(scope="module")
+    def reaches_out_when_done():
+        yield 1
+        try:
+            socket.create_connection(("hermetic-probe.invalid", 443), timeout=1)
+        except OSError:
+            pass  # ...here too
+
+
+    def test_uses_it_at_teardown(reaches_out_when_done):
+        assert reaches_out_when_done == 1
+'''
+
+
+def _lived_in_home(tmp_path: Path) -> Path:
+    """A Mac's home folder: a shell profile with a key, and Venture Studio at its default place with a real snapshot."""
+    from test_studio import FakeStudio
+
+    from roughcut import studio
+
+    home = tmp_path / "mac-home"
+    (home / "Library" / "Application Support").mkdir(parents=True)
+    (home / ".zshrc").write_text("export ANTHROPIC_API_KEY=sk-ant-api03-" + "z" * 40 + "\n")
+    fake = FakeStudio(tmp_path / "studio-source")
+    fake.snapshot("1700000500-1-1", int(__import__("time").time()) - 3600, libraries=[("/Volumes/Some Library", "Some Library")])
+    shutil.copytree(fake.dir, home / "Library" / "Application Support" / studio.BUNDLE_ID)
+    return home
+
+
+def _machine_env(home: Path, **extra: str) -> dict[str, str]:
+    """The environment a pytest run starts with on a machine where Roughcut is in daily use (not this test's sandbox)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("FAKE_KEYCHAIN", "NO_PROXY", "no_proxy")}
+    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if "stand-ins" not in p)
+    env.update(
+        HOME=str(home), PROBE_MAC_HOME=str(home), ANTHROPIC_API_KEY="sk-ant-api03-" + "e" * 40, OPENAI_API_KEY="sk-" + "e" * 40,
+        CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-" + "e" * 40, HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
+        ROUGHCUT_CONFIG_DIR=str(home / "Library" / "Application Support" / "roughcut"),
+    )  # fmt: skip
+    env.update(extra)
+    return env
+
+
+def test_session_module_and_class_fixtures_run_in_the_sandbox_too(tmp_path):
+    """Pytest sets up a wider fixture before any test's own autouse fixtures. `built` in test_audio_fcp.py runs a whole
+    pipeline.build there; without this it read the machine's Venture Studio folder and copied its catalog snapshot."""
+    home = _lived_in_home(tmp_path)
+    base = tmp_path / "child-base"
+    project = _project(tmp_path, wide=WIDE_PROBE)
+    done = _run_pytest([str(project), f"--basetemp={base}"], _machine_env(home, PROBE_BASETEMP=str(base)))
+    report = done.stdout + done.stderr
+    assert done.returncode == 0 and " passed" in report and "failed" not in report and "error" not in report, report
+    assert json.loads((base / "teardown-saw.json").read_text()) == [], "a fixture's teardown saw the machine"
+
+
+def test_only_fixtures_the_tests_define_get_a_sandbox_of_their_own():
+    import types
+
+    from _pytest.tmpdir import TempPathFactory
+
+    def mine():  # a fixture's function, defined in a test file
+        return 1
+
+    def fixture(scope, name, func):
+        return types.SimpleNamespace(scope=scope, argname=name, func=func)
+
+    assert hermetic._wider_than_a_test(fixture("module", "built", mine)) and hermetic._wider_than_a_test(fixture("session", "footage", mine))
+    assert hermetic._wider_than_a_test(fixture("class", "shared", mine)) and hermetic._wider_than_a_test(fixture("package", "shared", mine))
+    assert not hermetic._wider_than_a_test(fixture("function", "fake", mine))  # the test's own sandbox covers it
+    assert not hermetic._wider_than_a_test(fixture("session", "_stand_in_folder", mine))  # this module's own helpers
+    assert not hermetic._wider_than_a_test(fixture("session", "tmp_path_factory", TempPathFactory.getbasetemp))  # pytest's and plugins' own
+    assert not hermetic._wider_than_a_test(fixture("module", "something", None))  # no function to place
+
+
+def test_listing_what_would_be_set_up_still_works(tmp_path):
+    """`--setup-plan` replaces every fixture by a dummy: the hook must not ask those dummies for anything."""
+    project = _project(tmp_path, plan="""
+        import pytest
+
+        @pytest.fixture(scope="module")
+        def shared():
+            return 1
+
+        def test_uses_it(shared):
+            assert shared == 1
+    """)
+    for flag in ("--setup-plan", "--setup-only"):
+        done = _run_pytest([flag, str(project)], dict(os.environ))
+        report = done.stdout + done.stderr
+        assert done.returncode == 0 and "SETUP    M shared" in report and "error" not in report.lower(), (flag, report)
+
+
+def test_a_wide_fixture_that_swallows_a_refusal_still_fails(tmp_path):
+    project = _project(tmp_path, at_setup=SWALLOWED_AT_SETUP, at_teardown=SWALLOWED_AT_TEARDOWN)
+    done = _run_pytest([str(project)], dict(os.environ))
+    report = done.stdout + done.stderr
+    assert "1 passed, 2 errors" in report, report  # the code coped, so the tests would have passed; the fixtures did not stay in the sandbox
+    assert "ERROR at setup of test_uses_it_at_setup" in report and "ERROR at teardown of test_uses_it_at_teardown" in report, report
+    assert "module-scoped fixture reaches_out" in report and "module-scoped fixture reaches_out_when_done" in report, report
+    assert report.count("hermetic test violation (network)") >= 2 and done.returncode != 0, report
 
 
 def test_checks_of_the_real_machine_are_skipped_unless_asked():
@@ -429,6 +679,7 @@ CHILD_TESTS = [
     "tests/test_progress.py::test_plain_mode_prints_no_json",  # a build: keeps a Mac awake with caffeinate
     "tests/test_claude_code.py::test_signed_out_or_api_key_sign_in_stops_before_analysis",
     "tests/test_keys.py",
+    "tests/test_audio_fcp.py::test_report_warns_about_the_2398_clip_in_a_2997_cut",  # a whole build inside a module-scoped fixture
 ]
 
 
@@ -437,7 +688,8 @@ def test_a_lived_in_mac_changes_nothing(tmp_path):
     """The reviewer's two failures, reproduced as the stand-in for a Mac that has keys saved and Claude Code signed in:
     an exported API key and OpenAI key, a proxy, Roughcut and Venture Studio folders of its own, a home folder with a
     shell profile and cache. The tests run on it must pass, never run the Mac's `security`, `claude` or `caffeinate`,
-    and leave its home folder exactly as it was."""
+    never read its Venture Studio (not even from a fixture shared by a whole module) and leave its home folder
+    exactly as it was."""
     host = tmp_path / "mac"
     home = host / "home"
     for name, text in {
@@ -450,6 +702,12 @@ def test_a_lived_in_mac_changes_nothing(tmp_path):
     }.items():
         (home / name).parent.mkdir(parents=True, exist_ok=True)
         (home / name).write_text(text)
+    from test_studio import FakeStudio
+
+    studio_folder = home / "Library/Application Support/com.example.studio"
+    fake = FakeStudio(host / "studio-source")
+    fake.snapshot("1700000500-1-1", int(__import__("time").time()) - 3600, libraries=[("/Volumes/Some Library", "Some Library")])
+    shutil.copytree(fake.dir, studio_folder, dirs_exist_ok=True)  # Studio's newest snapshot: a reader that looks copies it
     before = _tree(home)
 
     env = {k: v for k, v in os.environ.items() if k not in ("FAKE_KEYCHAIN",)}
@@ -462,10 +720,13 @@ def test_a_lived_in_mac_changes_nothing(tmp_path):
     )  # fmt: skip
     if not hermetic.PLAYWRIGHT_BROWSERS:
         env.pop("PLAYWRIGHT_BROWSERS_PATH")
-    done = _run_pytest(["-p", "mac_host", *CHILD_TESTS], env)
+    base = host / "pytest-base"
+    done = _run_pytest(["-p", "mac_host", f"--basetemp={base}", *CHILD_TESTS], env)
     report = done.stdout[-6000:] + done.stderr[-2000:]
     assert done.returncode == 0, report
     assert (host / "bin" / "security").exists(), "the stand-in Mac was not in place: " + report
     log = host / "host.log"
     assert not log.exists() or log.read_text() == "", f"a test ran the Mac's own tools:\n{log.read_text()}"
     assert _tree(home) == before, "a test touched the Mac's home folder"
+    copies = sorted(str(p.relative_to(base)) for p in base.rglob("venture-studio"))
+    assert not copies, f"something read the Mac's Venture Studio and copied its snapshot: {copies}"
