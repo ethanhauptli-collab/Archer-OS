@@ -303,6 +303,16 @@ final class BuildOptionsTests: XCTestCase {
         XCTAssertTrue(back.arguments().contains("--format=1080x1920@29.97"))
     }
 
+    func testALogoOrApprovedGraphicOnAnotherVolumeIsNeverAskedAbout() {
+        // A drive or network share can take minutes to answer and this runs on every keystroke: the CLI checks these files
+        // when the build starts.
+        var o = options()
+        o.graphics = true
+        o.graphicsLogo = "/Volumes/No Such Share \(UUID().uuidString)/logo.png"
+        o.graphicsLook = ["/Volumes/No Such Share \(UUID().uuidString)/G01.html"]
+        XCTAssertEqual(o.problems, [])
+    }
+
     func testGraphicsFilesThatAreGoneStopTheBuildBeforeItStarts() throws {
         var o = options()
         o.graphics = true

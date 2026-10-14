@@ -114,9 +114,11 @@ public enum ReferenceImages {
         list.prefix(maxCount).map { "--graphics-ref=\($0.path)" }
     }
 
-    /// A remembered list as it can still be used: the pictures that are still there, at most `maxCount`.
+    /// A remembered list as it can still be used: the pictures that are still there, at most `maxCount`. A picture on another
+    /// volume (a drive or a network share, which can take minutes to answer, and this runs as the app starts) is kept as it is:
+    /// the CLI names one it can't read when the build starts.
     public static func restoring(_ saved: [URL]) -> [URL] {
-        Array(saved.filter { FileManager.default.fileExists(atPath: $0.path) }.prefix(maxCount))
+        Array(saved.filter { BuildOptions.onAnotherVolume($0.path) || FileManager.default.fileExists(atPath: $0.path) }.prefix(maxCount))
     }
 
     // MARK: Pasted bitmaps

@@ -12,6 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // A drive may have been unplugged or mounted while the app was behind: look again at the recent cuts' files.
+        guard let model else { return }
+        Task { await model.refreshRecents() }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Child processes outlive their parent; stop a build still running.
         model?.cancel()
@@ -43,7 +49,9 @@ struct RoughcutApp: App {
                 .onAppear { appDelegate.model = model }
                 .task {
                     model.tidyReferences()
+                    async let recents: Void = model.refreshRecents()
                     await model.refreshDoctor()
+                    await recents
                 }
         }
         .windowResizability(.contentMinSize)

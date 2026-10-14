@@ -123,7 +123,8 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var captionsURL: URL? { captions.map { URL(fileURLWithPath: $0) } }
     public var reportURL: URL { URL(fileURLWithPath: report) }
 
-    /// The paper edit to open: the web page when there is one.
+    /// The paper edit to open: the web page when there is one. This asks the disk, so not from the window's own thread when the
+    /// folder may be on a network share (the app uses `PathProbe`).
     public var paperEditURL: URL {
         if let reportHtml, FileManager.default.fileExists(atPath: reportHtml) {
             return URL(fileURLWithPath: reportHtml)

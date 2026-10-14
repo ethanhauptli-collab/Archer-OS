@@ -105,6 +105,13 @@ final class ReferenceImagesTests: XCTestCase {
         XCTAssertEqual(ReferenceImages.restoring(many).count, 8)
     }
 
+    func testAPictureOnAnotherVolumeComesBackWithoutAskingItsDrive() {
+        // The list is read as the app starts: a drive or network share that has stopped answering must not hold the window up.
+        // The CLI names a picture it can't read when the build starts.
+        let onShare = URL(fileURLWithPath: "/Volumes/No Such Share \(UUID().uuidString)/look.png")
+        XCTAssertEqual(ReferenceImages.restoring([onShare]), [onShare])
+    }
+
     private let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3])
 
     func testPastedBitmapsAreKeptInAFolderMadeOnDemand() throws {

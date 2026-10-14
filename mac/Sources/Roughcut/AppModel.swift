@@ -65,6 +65,8 @@ final class AppModel {
 
     // Finished runs, newest first
     private(set) var recentRuns: [RecentRun] = AppModel.loadRecents()
+    /// Recent runs whose Final Cut file the last check (`refreshRecents`) did not find.
+    private var goneRecents: Set<String> = []
 
     // Presets from `roughcut preset list --json`
     private(set) var presets: [Preset] = []
@@ -578,15 +580,38 @@ final class AppModel {
         }
     }
 
+    /// Opens the paper edit: the web page when there is one. Whether it is there is asked off the main thread (the output
+    /// folder may be on a network share that has stopped answering, and the window must not wait on it).
     func openReport(_ result: RunResult) {
-        NSWorkspace.shared.open(result.paperEditURL)
+        Task {
+            var url = result.reportURL
+            if let html = result.reportHtml, await PathProbe.presence(of: html) == .there {
+                url = URL(fileURLWithPath: html)
+            }
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: Recent runs
 
-    /// Recent runs whose Final Cut file is still on disk.
+    /// Recent runs whose Final Cut file was still there the last time they were checked (`refreshRecents`). It never asks the
+    /// disk itself: a run's folder is often on a network share, and a share that has stopped answering would freeze the window
+    /// each time the form is drawn.
     var availableRecents: [RecentRun] {
-        recentRuns.filter { FileManager.default.fileExists(atPath: $0.result.fcpxml) }
+        recentRuns.filter { !goneRecents.contains($0.id) }
+    }
+
+    /// Looks for the recent runs' Final Cut files, off the main thread and at most a couple of seconds each. A file whose drive
+    /// doesn't answer keeps what was known of it (shown, until a check finds it gone).
+    func refreshRecents() async {
+        let answers = await PathProbe.presence(of: recentRuns.map(\.id))
+        for (path, answer) in answers {
+            switch answer {
+            case .gone: goneRecents.insert(path)
+            case .there: goneRecents.remove(path)
+            case .silent: break
+            }
+        }
     }
 
     func showRecent(_ run: RecentRun) {
@@ -603,6 +628,7 @@ final class AppModel {
     }
 
     private func remember(_ result: RunResult) {
+        goneRecents.remove(result.fcpxml)  // written just now, whatever an earlier check found
         recentRuns.removeAll { $0.result.fcpxml == result.fcpxml }
         recentRuns.insert(RecentRun(result: result, finishedAt: Date()), at: 0)
         recentRuns = Array(recentRuns.prefix(12))

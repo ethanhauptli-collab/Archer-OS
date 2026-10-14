@@ -372,7 +372,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
             // Only reachable by setting the fields directly: the form's own controls settle it first.
             list.append("Motion graphics are designed by the AI: choose a provider other than None, or turn motion graphics off.")
         }
-        // Not a song on another volume (a network share can take minutes to answer, and this runs on every
+        // Not a file on another volume (a network share can take minutes to answer, and this runs on every
         // keystroke): the CLI checks those with a deadline when the build starts.
         if let missing = music.first(where: { !Self.onAnotherVolume($0.path) && !FileManager.default.fileExists(atPath: $0.path) }) {
             list.append("The music file \(missing.lastPathComponent) isn't there any more: remove it or pick it again.")
@@ -380,10 +380,10 @@ public struct BuildOptions: Codable, Equatable, Sendable {
         if graphicsActive {
             // Remembered from a preset or an earlier session: the CLI would stop on a missing file after launch.
             let logo = graphicsLogo.trimmed
-            if !logo.isEmpty && !Self.fileExists(logo) {
+            if !logo.isEmpty && !Self.onAnotherVolume(logo) && !Self.fileExists(logo) {
                 list.append("The logo \(URL(fileURLWithPath: logo).lastPathComponent) isn't there any more: clear it or choose it again.")
             }
-            if let missing = graphicsLook.first(where: { !Self.fileExists($0) }) {
+            if let missing = graphicsLook.first(where: { !Self.onAnotherVolume($0) && !Self.fileExists($0) }) {
                 list.append("The approved graphic \(URL(fileURLWithPath: missing).lastPathComponent) from an earlier video isn't there any more: click Don't match.")
             }
         }
