@@ -160,7 +160,7 @@ def test_a_pause_the_silence_map_sees_still_splits_it():
 
 
 def test_without_a_silence_map_the_transcripts_gap_is_the_pause():
-    assert len(_pair(0.5, silences=[])) == 2
+    assert len(_pair(0.7, silences=[])) == 2
 
 
 def test_without_a_silence_map_a_gap_a_word_end_early_could_make_is_not_a_pause():
@@ -199,7 +199,7 @@ def test_a_pause_the_map_sees_still_cuts_between_two_sentences():
 
 
 def test_the_sentences_of_a_clip_without_a_pause_map_keep_their_transcript_gap(monkeypatch):
-    assert len(_two_sentences(0.5, silences=[])) == 2
+    assert len(_two_sentences(0.7, silences=[])) == 2
 
 
 # ------------------------------------------------------------------ the whole build

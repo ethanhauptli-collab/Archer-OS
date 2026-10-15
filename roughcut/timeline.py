@@ -58,7 +58,7 @@ END_REACH = 0.80  # for a word's end: seconds after the transcript's end in whic
 # style's pause by no more than FAKE_GAP, with no silence in it, is not a pause. On a clip whose map shows none (a loud room or wind
 # hides them), the transcript is all there is to go by, and only the bias itself can be allowed for: EARLY_END.
 FAKE_GAP = 0.45
-EARLY_END = 0.10
+EARLY_END = 0.15
 
 
 @dataclass
