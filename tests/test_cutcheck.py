@@ -234,10 +234,15 @@ def test_a_click_in_a_pause_does_not_end_it():
         smack[i] = -40.0
     args = ([(path, 0.0, 2.0, Fraction(0))], {path: smack}, {path: QUIET})
     assert max(r[0] for r in cutcheck.quiet_runs(*args)) < 1.0
-    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD})) == pytest.approx(1.2, abs=0.02)
+    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD})) < 1.0  # no transcript to keep the click out of a word: only the cut's own rule
+    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD}, spoken={path: []})) == pytest.approx(1.2, abs=0.02)
     knock = list(smack)
     knock[80] = LOUD - 6.0  # within 12 dB of the words: a sound, not a click
-    assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: knock}, {path: QUIET}, louds={path: LOUD})) < 1.0
+    assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: knock}, {path: QUIET}, louds={path: LOUD}, spoken={path: []})) < 1.0
+    # A burst under the speech that lies in a transcribed word is speech, not a click: the stretch is not a pause.
+    spoken = {path: [(0.78, 0.84)]}
+    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD}, spoken=spoken)) < 1.0
+    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD}, spoken={path: [(1.0, 1.1)]})) == pytest.approx(1.2, abs=0.02)  # a word elsewhere changes nothing
 
 
 class _Fake:

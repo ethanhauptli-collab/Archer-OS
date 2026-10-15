@@ -15,6 +15,7 @@ within 12 dB of the speech the clip is counted but not judged, and the report sa
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import sys
@@ -288,13 +289,15 @@ def judge(
     return d.found, d.small, d.floor
 
 
-def _quiet_mask(levels: list[float], i: int, end: int, floor: float, loud: float | None = None) -> list[bool]:
+def _quiet_mask(levels: list[float], i: int, end: int, floor: float, loud: float | None = None, spoken=None, offset: float = 0.0) -> list[bool]:
     """For each reading in [i, end): is it part of a pause? A pause is at most QUIET_OVER_FLOOR over the floor; a click (a rise of at
-    most LEVEL_CLICK_MAX that stays under floor + LEVEL_CLICK_OVER, or CLICK_UNDER_SPEECH under the speech) between two quiet
-    stretches doesn't end it: the cut treats a pause that way (ffmpeg_ops.level_silences; pauses.py for a quiet breath or click)."""
+    most LEVEL_CLICK_MAX that stays under floor + LEVEL_CLICK_OVER) between two quiet stretches doesn't end it, as in the loudness
+    map that cuts the pauses (ffmpeg_ops.level_silences). A louder one (up to CLICK_UNDER_SPEECH under the speech: a lip smack, a
+    knock) doesn't either where no transcribed word is: `spoken` is the file's words as (start, end) on the file's clock, and a burst
+    inside a word is speech (a soft syllable in a noisy room looks just like a click to the readings alone)."""
     quiet, click = floor + QUIET_OVER_FLOOR, floor + ffmpeg_ops.LEVEL_CLICK_OVER
-    if loud is not None:
-        click = max(click, loud - CLICK_UNDER_SPEECH)
+    louder = max(click, loud - CLICK_UNDER_SPEECH) if loud is not None and spoken is not None else click
+    starts = [s for s, _ in spoken] if spoken else []
     longest_click = int(round(ffmpeg_ops.LEVEL_CLICK_MAX / WINDOW))
     low = [levels[k] <= quiet for k in range(i, end)]
     k = 0
@@ -305,9 +308,13 @@ def _quiet_mask(levels: list[float], i: int, end: int, floor: float, loud: float
         j = k
         while j < len(low) and not low[j]:
             j += 1
-        if 0 < k and j < len(low) and j - k <= longest_click and all(levels[i + m] <= click for m in range(k, j)):
-            for m in range(k, j):
-                low[m] = True
+        if 0 < k and j < len(low) and j - k <= longest_click:
+            peak = max(levels[i + m] for m in range(k, j))
+            a, b = (i + k) * WINDOW + offset, (i + j) * WINDOW + offset
+            in_a_word = bool(spoken) and any(ws < b and we > a for ws, we in spoken[max(0, bisect.bisect_left(starts, a - 5.0)) : bisect.bisect_right(starts, b)])
+            if peak <= click or (peak <= louder and not in_a_word):
+                for m in range(k, j):
+                    low[m] = True
         k = j
     return low
 
@@ -319,6 +326,7 @@ def quiet_runs(
     at_least: float = 0.0,
     louds: dict[str, float] | None = None,
     offsets: dict[str, float] | None = None,
+    spoken: dict[str, list[tuple[float, float]]] | None = None,
 ) -> list[tuple[float, Fraction, str, float]]:
     """Every quiet stretch inside the kept dialogue longer than `at_least`: (seconds, where in the cut, the file, seconds into it).
 
@@ -332,7 +340,7 @@ def quiet_runs(
             continue
         off = (offsets or {}).get(path, 0.0)
         i, end = max(0, int(round((a - off) / WINDOW))), min(len(levels), int(round((b - off) / WINDOW)))
-        low = _quiet_mask(levels, i, end, floor, (louds or {}).get(path))
+        low = _quiet_mask(levels, i, end, floor, (louds or {}).get(path), sorted((spoken or {}).get(path, [])) if spoken is not None else None, off)
         run_from = None
         for m in range(len(low) + 1):
             quiet = m < len(low) and low[m]
@@ -353,9 +361,10 @@ def pauses(
     floors: dict[str, float],
     louds: dict[str, float] | None = None,
     offsets: dict[str, float] | None = None,
+    spoken: dict[str, list[tuple[float, float]]] | None = None,
 ) -> tuple[tuple[float, Fraction] | None, int]:
     """The longest quiet stretch inside the kept dialogue (seconds, where in the cut) and how many are over a second."""
-    runs = quiet_runs(ranges, levels_by_file, floors, louds=louds, offsets=offsets)
+    runs = quiet_runs(ranges, levels_by_file, floors, louds=louds, offsets=offsets, spoken=spoken)
     longest = max(runs, key=lambda r: r[0], default=None)
     return (None if longest is None else (longest[0], longest[1])), sum(1 for r in runs if r[0] > 1.0)
 
@@ -553,8 +562,9 @@ def check(target: Path, *, progress=None) -> Report:
     for group in (report.flagged, report.beside_fillers, report.tight_gaps):
         group.sort(key=lambda f: f.edge.timeline)
     report.fillers.sort(key=lambda f: f[1])
-    report.longest_pause, report.long_pauses = pauses(ranges, levels_by_file, floors, louds, offsets)
-    report.long_runs = sorted(quiet_runs(ranges, levels_by_file, floors, at_least=1.0, louds=louds, offsets=offsets), key=lambda r: -r[0])
+    spans = {path: [(x.start, x.end) for x in w] for path, w in texts.items() if w}  # a file with no transcript has no words to keep a click out of
+    report.longest_pause, report.long_pauses = pauses(ranges, levels_by_file, floors, louds, offsets, spans)
+    report.long_runs = sorted(quiet_runs(ranges, levels_by_file, floors, at_least=1.0, louds=louds, offsets=offsets, spoken=spans), key=lambda r: -r[0])
     return report
 
 
