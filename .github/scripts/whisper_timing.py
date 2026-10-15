@@ -456,6 +456,25 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
         print(f"        {w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}: inside a loudness pause {'yes' if in_pause else 'no'}, {over} of {len(r)} readings over the pause level, loudest {max(r):.0f} dB")
 
 
+def room_overview(media: Path, words: list[dict]) -> None:
+    """A noisy clip's loudness map two ways, the whole band and the high-passed readings the cut uses: whether there is a map at all,
+    how many pauses, and how far over the room the words stand at their loud quarter (the cut uses the map only past 12 dB)."""
+    from roughcut import ffmpeg_ops
+
+    for name, hp in (("whole band", None), ("high-passed at 250 Hz (as the cut reads it)", 250.0)):
+        levels = ffmpeg_ops.window_rms(media, 0.01, highpass=hp)
+        found = ffmpeg_ops.level_silences(levels, len(levels) * 0.01)
+        if found is None:
+            print(f"    loudness map, {name}: none; the loud twentieth is within {ffmpeg_ops.LEVEL_MIN_SEPARATION:g} dB of the room")
+            continue
+        inside = sorted(v for w in words for v in levels[int(w["start"] / 0.01) : max(int(w["start"] / 0.01) + 1, int(w["end"] / 0.01))])
+        stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
+        print(
+            f"    loudness map, {name}: room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; "
+            f"the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}"
+        )
+
+
 def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
     """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists. With `detail`,
     what is around each pause over a second that the cut left; with `edits`, what is around each edit that goes through sound
@@ -594,6 +613,8 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         f"silence map: {len(clip.get('silences', []))} silences, {100 * quiet / truth['seconds']:.0f}% of the clip quiet, found at {clip.get('silence_db')} dB over a background of {clip.get('background_db')} dB; "
         f"it {'shows' if len(clip.get('silences', [])) >= 2 and quiet >= 0.03 * truth['seconds'] else 'does not show'} the clip's pauses"
     )
+    if (clip.get("silence_db") or -35.0) > -35.0:
+        room_overview(shoot / "talk.mov", heard)
     return {"n": n, "shoot": shoot, "truth": truth, "heard": heard, "matched": matched, "results": results}
 
 
