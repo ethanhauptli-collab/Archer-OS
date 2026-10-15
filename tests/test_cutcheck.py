@@ -239,7 +239,12 @@ def test_a_click_in_a_pause_does_not_end_it():
     knock = list(smack)
     knock[80] = LOUD - 6.0  # within 12 dB of the words: a sound, not a click
     assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: knock}, {path: QUIET}, louds={path: LOUD}, spoken={path: []})) < 1.0
-    # A burst under the speech that lies in a transcribed word is speech, not a click: the stretch is not a pause.
+    # A burst that lies in a transcribed word is speech, not a click, however quiet: the stretch is not a pause.
+    inside = list(levels)
+    for i in range(80, 82):
+        inside[i] = QUIET + 10.0  # a burst the cut's own rule would bridge
+    assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: inside}, {path: QUIET})) == pytest.approx(1.2, abs=0.02)  # no transcript: bridged
+    assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: inside}, {path: QUIET}, spoken={path: [(0.78, 0.84)]})) < 1.0
     spoken = {path: [(0.78, 0.84)]}
     assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD}, spoken=spoken)) < 1.0
     assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD}, spoken={path: [(1.0, 1.1)]})) == pytest.approx(1.2, abs=0.02)  # a word elsewhere changes nothing

@@ -293,8 +293,9 @@ def _quiet_mask(levels: list[float], i: int, end: int, floor: float, loud: float
     """For each reading in [i, end): is it part of a pause? A pause is at most QUIET_OVER_FLOOR over the floor; a click (a rise of at
     most LEVEL_CLICK_MAX that stays under floor + LEVEL_CLICK_OVER) between two quiet stretches doesn't end it, as in the loudness
     map that cuts the pauses (ffmpeg_ops.level_silences). A louder one (up to CLICK_UNDER_SPEECH under the speech: a lip smack, a
-    knock) doesn't either where no transcribed word is: `spoken` is the file's words as (start, end) on the file's clock, and a burst
-    inside a word is speech (a soft syllable in a noisy room looks just like a click to the readings alone)."""
+    knock) doesn't either. With a transcript, `spoken` (the file's words as (start, end) on the file's clock), neither does a burst
+    inside a word: that is speech, and in a noisy room a soft syllable is as quiet as a click (the floor plus 14 dB is nearly the
+    speech there), so the readings alone would call a stretch of soft speech a pause."""
     quiet, click = floor + QUIET_OVER_FLOOR, floor + ffmpeg_ops.LEVEL_CLICK_OVER
     louder = max(click, loud - CLICK_UNDER_SPEECH) if loud is not None and spoken is not None else click
     starts = [s for s, _ in spoken] if spoken else []
@@ -312,7 +313,7 @@ def _quiet_mask(levels: list[float], i: int, end: int, floor: float, loud: float
             peak = max(levels[i + m] for m in range(k, j))
             a, b = (i + k) * WINDOW + offset, (i + j) * WINDOW + offset
             in_a_word = bool(spoken) and any(ws < b and we > a for ws, we in spoken[max(0, bisect.bisect_left(starts, a - 5.0)) : bisect.bisect_right(starts, b)])
-            if peak <= click or (peak <= louder and not in_a_word):
+            if not in_a_word and peak <= louder:
                 for m in range(k, j):
                     low[m] = True
         k = j
