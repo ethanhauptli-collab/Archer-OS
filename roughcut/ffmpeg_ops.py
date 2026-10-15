@@ -61,6 +61,26 @@ def window_peaks(path: Path, window: float = 0.05) -> list[float]:
     return peaks
 
 
+def window_rms(path: Path, window: float = 0.01, rate: int = 16000) -> list[float]:
+    """RMS level (dBFS) of each `window` seconds of the first audio track, mixed down to mono at `rate`; [] if it can't be read."""
+    af = (
+        f"aformat=channel_layouts=mono,aresample={rate},asetnsamples=n={int(rate * window)}:p=0,"
+        "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-"
+    )
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
+    proc = run_text(cmd)
+    if proc.returncode != 0:
+        return []
+    levels = []
+    for line in proc.stdout.splitlines():
+        if "RMS_level=" in line:
+            try:
+                levels.append(max(-120.0, float(line.split("=", 1)[1])))
+            except ValueError:  # "-inf": digital silence
+                levels.append(-120.0)
+    return levels
+
+
 def noise_threshold(peaks: list[float], default: float = DEFAULT_NOISE_DB) -> tuple[float, float | None]:
     """(silencedetect level, background level) for one clip.
 

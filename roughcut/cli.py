@@ -212,6 +212,13 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--workers", type=int, default=4)
     _add_render_args(rv)
 
+    ck = sub.add_parser(
+        "check", help="listen to a finished cut and list the dialogue edits that go through the middle of a sound (read only; no model, no key)",
+    )
+    ck.add_argument("out_dir", nargs="+", metavar="out_dir", help="a folder written by `roughcut build`, or one of its .fcpxml files")
+    ck.add_argument("--limit", type=_positive, default=15, help="how many edits to list (default 15)")
+    ck.add_argument("--json", action="store_true", help="print the report as JSON")
+
     d = sub.add_parser("doctor", help="check that ffmpeg, transcription and API keys are set up")
     d.add_argument("--json", action="store_true", help="print the report as JSON")
     d.add_argument("--offline", action="store_true", help="don't test the API key against Anthropic or check whether Venture Studio's folders are online")
@@ -764,6 +771,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"roughcut: {problem}", file=sys.stderr)
             progress.emit("error", message=problem)
             return 1
+    if args.command == "check":
+        from .cutcheck import command as check_command
+
+        return check_command(" ".join(args.out_dir), limit=args.limit, as_json_=bool(args.json))
     if args.command == "studio":
         return _studio_command(args)
     if args.command == "key":

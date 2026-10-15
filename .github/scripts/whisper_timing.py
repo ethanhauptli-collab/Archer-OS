@@ -428,6 +428,17 @@ def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
     DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
 
 
+def checked(out: Path, label: str) -> None:
+    """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists."""
+    from roughcut import cutcheck
+
+    report = cutcheck.check(out)
+    pauses = f", the longest pause left {report.longest_pause[0]:.2f} s" if report.longest_pause else ""
+    print(f"roughcut check on {label}: {report.edits} dialogue edits, {len(report.flagged)} go through sound, {report.small} only just{pauses}")
+    for f in report.flagged[:4]:
+        print(f"    {cutcheck.timecode(f.edge.timeline, report.frame_duration)} {f.edge.kind} {1000 * f.cut_off:.0f} ms of sound cut off: {f.words}")
+
+
 def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> None:
     """`roughcut build --provider none` on the shoot; in this process (output held back) when many are made one after another."""
     args = ["build", str(shoot), "--provider", "none", *engine, "--style", style, "-o", str(out), "--cache-dir", str(cache), "--no-menu"]
@@ -492,6 +503,7 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         out = root / f"out{n}_{style}"
         build(shoot, out, style, root / "cache", engine)
         results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
+    checked(root / f"out{n}_tight", "the tight cut")
     dump(n, truth, heard, root / f"out{n}_tight")
     clip = json.loads((root / f"out{n}_tight" / "analysis.json").read_text())["clips"][0]
     quiet = sum(e - s_ for s_, e in clip.get("silences", []))
@@ -554,6 +566,7 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
         out = root / f"outR_{style}"
         build(shoot, out, style, root / "cache", ["--transcriber", "none"])
         results[style] = judge_audio(out, shoot / "talk.mov", style)
+        checked(out, f"the {style} cut of the reading")
     return {"shoot": shoot, "results": results}
 
 
