@@ -1,0 +1,320 @@
+"""How far off are Whisper's word times on speech, and what does the cut do with them?
+
+Every word is said on its own by a speech synthesizer (macOS `say`; `espeak-ng` for a dry run elsewhere), so each word's true start
+and end are known to the sample. The words become sentences, the sentences a few minutes of talk over a noise bed (room tone, a
+60 Hz hum, wind gusts), as AAC in a MOV, like a phone's. Then:
+
+  1. Whisper (the model the app uses by default, or $WHISPER_MODEL) transcribes it and its word times are compared with the truth:
+     how many words, and how far off their starts and ends are;
+  2. `roughcut build --provider none` cuts it from that transcript (no sidecar), at tight and medium pacing, and the cut is measured
+     against the audio itself: words clipped, cut edges inside speech, pauses left.
+
+It prints the numbers and exits 0 unless the cut is plainly bad. Synthetic speech is cleaner than a person talking outdoors, so these
+are the best case for Whisper, not the typical one.
+
+    python .github/scripts/whisper_timing.py [--minutes 3] [--dry] [--keep DIR]
+`--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison and the cut can be tried
+without a model.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import wave
+import xml.etree.ElementTree as ET
+from fractions import Fraction
+from pathlib import Path
+
+import numpy as np
+
+SR = 48000
+VOCAB = (
+    "we climbed the ridge before rain and kids led way up to lake this is a long day honestly I think that it was better than expected "
+    "because the trail steep cold warm quiet river bridge morning coffee camera battery tent fire stars sleep wind storm clouds "
+    "water fresh bread map packed every thing happy tired proud simple first last again always never maybe really actually "
+    "sunrise sunset breakfast dinner family friends dog car road village market harbor boat sound shot frame light shade stone"
+).split()
+
+
+# ------------------------------------------------------------------ the speech
+
+
+def say(word: str, work: Path, voice: str | None, rate: int) -> np.ndarray:
+    """One word as 48 kHz mono floats."""
+    raw = work / f"{voice or 'default'}_{rate}_{word}.aiff"
+    out = work / f"{voice or 'default'}_{rate}_{word}.wav"
+    if not out.exists():
+        if shutil.which("say"):
+            cmd = ["say", "-r", str(rate), "-o", str(raw), "--", word] if not voice else ["say", "-v", voice, "-r", str(rate), "-o", str(raw), "--", word]
+            subprocess.run(cmd, check=True, capture_output=True)
+        else:  # a dry run on Linux
+            raw = raw.with_name(raw.stem + "_raw.wav")
+            subprocess.run(["espeak-ng", "-s", str(rate), "-w", str(raw), word], check=True, capture_output=True)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(raw), "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(out)], check=True)
+    with wave.open(str(out)) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+
+
+def extent(x: np.ndarray, floor: float = 0.004) -> tuple[int, int]:
+    idx = np.flatnonzero(np.abs(x) > floor)
+    return (int(idx[0]), int(idx[-1]) + 1) if len(idx) else (0, len(x))
+
+
+def make_talk(out: Path, minutes: float, seed: int, voice: str | None, rate: int, noise_db: float) -> dict:
+    out.mkdir(parents=True, exist_ok=True)
+    work = out / ".work"
+    work.mkdir(exist_ok=True)
+    rng = random.Random(seed)
+    seconds = minutes * 60
+    n = int(seconds * SR)
+    audio = np.zeros(n, dtype=np.float32)
+    words, pauses = [], []
+    t = 1.2
+    while t < seconds - 8:
+        gain = 10 ** (rng.uniform(-3, 2) / 20)
+        for _ in range(rng.randint(6, 13)):
+            text = rng.choice(VOCAB)
+            x = say(text, work, voice, rate)
+            a, b = extent(x)
+            if a >= b:
+                continue
+            x = x[a:b] * gain
+            i = int(t * SR)
+            if i + len(x) >= n:
+                break
+            audio[i : i + len(x)] += x
+            words.append({"text": text, "start": round(i / SR, 4), "end": round((i + len(x)) / SR, 4)})
+            t += len(x) / SR + rng.uniform(0.03, 0.11)
+        gap = rng.uniform(0.35, 1.5) + (rng.uniform(3, 8) if rng.random() < 0.07 else 0)
+        pauses.append({"after": words[-1]["end"], "length": round(gap, 3)})
+        t += gap
+    audio *= 0.5 / max(np.max(np.abs(audio)), 1e-9)
+    nr = np.random.default_rng(seed)
+    white = nr.standard_normal(n).astype(np.float32)
+    bed = np.convolve(white, np.ones(8, dtype=np.float32) / 8, mode="same") * 0.7 + white * 0.3
+    bed *= 10 ** (noise_db / 20) / (np.sqrt(np.mean(bed**2)) + 1e-9)
+    tt = np.arange(n) / SR
+    bed += 0.5 * 10 ** ((noise_db - 10) / 20) * (np.sin(2 * np.pi * 60 * tt) + 0.5 * np.sin(2 * np.pi * 120 * tt))
+    k = 0
+    while True:
+        k += int(nr.uniform(8, 25) * SR)
+        length = int(nr.uniform(1.0, 2.5) * SR)
+        if k + length >= n:
+            break
+        low = np.convolve(nr.standard_normal(length), np.ones(40) / 40, mode="same").astype(np.float32)
+        bed[k : k + length] += np.hanning(length).astype(np.float32) * low * 10 ** ((noise_db + 7) / 20) / (np.sqrt(np.mean(low**2)) + 1e-9)
+    mix = np.clip(audio + bed, -1, 1)
+    wav = out / ".mix.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes((mix * 32767).astype("<i2").tobytes())
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"color=c=0x203040:size=480x270:rate=30000/1001:duration={seconds}",
+         "-i", str(wav), "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest", str(out / "talk.mov")],
+        check=True,
+    )
+    wav.unlink()
+    truth = {"words": words, "pauses": pauses, "seconds": seconds, "noise_db": noise_db}
+    (out / "truth.json").write_text(json.dumps(truth))
+    return truth
+
+
+# ------------------------------------------------------------------ whisper against the truth
+
+
+def norm(text: str) -> str:
+    return re.sub(r"[^a-z']", "", text.lower())
+
+
+def compare(truth_words: list[dict], heard: list[dict]) -> None:
+    a = [norm(w["text"]) for w in truth_words]
+    b = [norm(w["text"]) for w in heard]
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    pairs = [(i + k, j + k) for i, j, size in matcher.get_matching_blocks() for k in range(size)]
+    print(f"Whisper heard {len(heard)} words for {len(truth_words)} said; {len(pairs)} line up with a word that was said ({100 * len(pairs) / len(truth_words):.1f}%)")
+    start_err, end_err, end_err_pause = [], [], []
+    for i, j in pairs:
+        t, h = truth_words[i], heard[j]
+        start_err.append((h["start"] - t["start"]) * 1000)
+        followed_by_pause = i + 1 < len(truth_words) and truth_words[i + 1]["start"] - t["end"] > 0.3
+        (end_err_pause if followed_by_pause else end_err).append((h["end"] - t["end"]) * 1000)
+
+    def line(name: str, errs: list[float]) -> None:
+        if not errs:
+            return
+        e = np.array(errs)
+        a_ = np.abs(e)
+        print(
+            f"  {name:<34} n={len(e):<4} bias {np.median(e):+6.0f} ms (median signed)  |err| median {np.median(a_):4.0f}  90th {np.percentile(a_, 90):4.0f}  "
+            f"99th {np.percentile(a_, 99):4.0f}  >60 ms {100 * np.mean(a_ > 60):4.1f}%  >100 ms {100 * np.mean(a_ > 100):4.1f}%  >150 ms {100 * np.mean(a_ > 150):4.1f}%"
+        )
+        late = e[e > 60]
+        early = e[e < -60]
+        print(f"  {'':<34}        later than the truth by >60 ms: {100 * len(late) / len(e):4.1f}%   earlier by >60 ms: {100 * len(early) / len(e):4.1f}%")
+
+    line("word starts", start_err)
+    line("word ends (next word follows)", end_err)
+    line("word ends (a pause follows)", end_err_pause)
+
+
+def fake_heard(truth_words: list[dict], seed: int = 5) -> list[dict]:
+    """--dry: the truth with the kinds of error Whisper makes."""
+    rng = random.Random(seed)
+    out = []
+    for i, w in enumerate(truth_words):
+        nxt = truth_words[i + 1]["start"] if i + 1 < len(truth_words) else w["end"] + 1
+        s = w["start"] + rng.gauss(0, 0.04) - (rng.uniform(0.1, 0.3) if rng.random() < 0.1 else 0)
+        e = w["end"] + rng.gauss(0, 0.03)
+        if rng.random() < 0.35:
+            e = nxt - 0.005 if nxt - e < 0.9 else e + rng.uniform(0.2, 0.8)
+        out.append({"text": w["text"], "start": max(0.0, s), "end": max(s + 0.05, e)})
+    return out
+
+
+# ------------------------------------------------------------------ the cut against the audio
+
+
+def T(s: str | None) -> Fraction:
+    s = (s or "0s").rstrip("s")
+    return Fraction(s) if s else Fraction(0)
+
+
+def kept_ranges(fcpxml: Path) -> list[tuple[float, float]]:
+    root = ET.parse(fcpxml).getroot()
+    assets = {a.get("id"): a for a in root.iter("asset")}
+    rough = next(p for p in root.iter("project") if "Rough Cut" in p.get("name", ""))
+    out = []
+    for el in rough.find("sequence/spine"):
+        if el.tag != "asset-clip" or assets[el.get("ref")].get("name") != "talk":
+            continue
+        a = float(T(el.get("start")) - T(assets[el.get("ref")].get("start")))
+        out.append((a, a + float(T(el.get("duration")))))
+    out.sort()
+    merged: list[tuple[float, float]] = []
+    for a, b in out:
+        if merged and a - merged[-1][1] < 0.002:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def load_audio(path: Path) -> np.ndarray:
+    raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype="<f4")
+
+
+def rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(x.astype(np.float64) ** 2))) if len(x) else 0.0
+
+
+def db(v: float) -> float:
+    return 20 * np.log10(max(v, 1e-9))
+
+
+def judge(out: Path, talk: Path, truth: dict, label: str) -> dict:
+    kept = kept_ranges(next(out.glob("*.fcpxml")))
+    audio = load_audio(talk)
+    words = truth["words"]
+    whole = gone = clipped = 0
+    for w in words:
+        inside = sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept)
+        removed = (w["end"] - w["start"]) - inside
+        if inside < 0.5 * (w["end"] - w["start"]):
+            gone += 1
+        elif removed > 0.015:
+            clipped += 1
+        else:
+            whole += 1
+    win = int(0.010 * SR)
+    quiet = []
+    for p in truth["pauses"]:
+        for i in range(int((p["after"] + 0.15) * SR), int((p["after"] + p["length"] - 0.15) * SR) - win, win * 5):
+            quiet.append(rms(audio[i : i + win]))
+    floor = float(np.median(quiet)) if quiet else 1e-3
+    inside_speech = outside_speech = edges = 0
+    for k, (a, b) in enumerate(kept):
+        for edge, direction in ((a, +1), (b, -1)):
+            if (direction > 0 and k == 0 and a < 0.05) or (direction < 0 and b > truth["seconds"] - 0.05):
+                continue
+            edges += 1
+            i = int(edge * SR)
+            inner = audio[i : i + win] if direction > 0 else audio[i - win : i]
+            outer = audio[i - win : i] if direction > 0 else audio[i : i + win]
+            inside_speech += rms(inner) > 3.0 * floor
+            outside_speech += rms(outer) > 3.0 * floor
+    n = len(words)
+    result = {"whole": whole / n, "clipped": clipped / n, "gone": gone / n, "in": inside_speech / max(edges, 1), "out": outside_speech / max(edges, 1), "edges": edges}
+    print(
+        f"{label}: {n} words said: {100 * result['whole']:.1f}% whole, {100 * result['clipped']:.1f}% clipped by >15 ms, {100 * result['gone']:.1f}% not in the cut; "
+        f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS)"
+    )
+    return result
+
+
+# ------------------------------------------------------------------ main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--minutes", type=float, default=3)
+    ap.add_argument("--noise-db", type=float, default=-42)
+    ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--voice", default=None)
+    ap.add_argument("--rate", type=int, default=185)
+    ap.add_argument("--dry", action="store_true", help="no model: the transcript is the truth with timing errors added")
+    ap.add_argument("--keep", type=Path, default=None)
+    a = ap.parse_args()
+    root = a.keep or Path(tempfile.mkdtemp(prefix="whisper-timing-"))
+    shoot = root / "shoot"
+    print(f"making {a.minutes:g} minutes of speech with {'say' if shutil.which('say') else 'espeak-ng'} in {root}", flush=True)
+    truth = make_talk(shoot, a.minutes, a.seed, a.voice, a.rate, a.noise_db)
+    print(f"{len(truth['words'])} words, {len(truth['pauses'])} pauses, noise bed {a.noise_db:g} dBFS", flush=True)
+
+    model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    if a.dry:
+        heard = fake_heard(truth["words"])
+        (shoot / "talk.json").write_text(json.dumps({"words": [{"start": h["start"], "end": h["end"], "text": h["text"], "prob": 0.9} for h in heard]}))
+        engine = ["--transcriber", "none"]
+        print("dry run: the transcript is the truth with timing errors added")
+    else:
+        from roughcut.transcribe import Transcriber
+
+        print(f"transcribing with {model} ...", flush=True)
+        tr = Transcriber("mlx", model=model, verbatim=True).transcribe(shoot / "talk.mov")
+        heard = [{"text": w.text, "start": w.start, "end": w.end} for w in tr.words]
+        engine = ["--transcriber", "mlx", "--whisper-model", model]
+    print("\n== Whisper's word times against the words that were said")
+    compare(truth["words"], heard)
+
+    print("\n== the cut, made from that transcript")
+    results = {}
+    for style in ("tight", "medium"):
+        out = root / f"out_{style}"
+        proc = subprocess.run(
+            [sys.executable, "-m", "roughcut", "build", str(shoot), "--provider", "none", *engine, "--style", style, "-o", str(out), "--cache-dir", str(root / "cache"), "--no-menu"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode:
+            print(proc.stdout[-1500:], proc.stderr[-1500:])
+            return 1
+        results[style] = judge(out, shoot / "talk.mov", truth, style)
+    ok = all(r["whole"] >= 0.80 and r["in"] <= 0.25 and r["out"] <= 0.25 for r in results.values())
+    print("\nwhisper timing: " + ("done" if ok else "the cut is clearly worse than it should be (see above)"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
