@@ -283,7 +283,9 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
     every = truth["words"]  # `matched` counts in these
     words = [w for w in every if not w.get("filler")]
     fillers = [w for w in every if w.get("filler")]
-    fillers_cut = sum(1 for w in fillers if sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept) < 0.5 * (w["end"] - w["start"]))
+    left_in = [sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept) for w in fillers]  # how much of each um/uh the cut still plays
+    fillers_cut = sum(1 for w, x in zip(fillers, left_in) if x < 0.5 * (w["end"] - w["start"]))
+    remnant = max((x for w, x in zip(fillers, left_in) if x < 0.5 * (w["end"] - w["start"])), default=0.0)
     whole = gone = clipped = 0
     for w in words:
         inside = sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept)
@@ -311,6 +313,9 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
             inner = audio[i : i + win] if direction > 0 else audio[i - win : i]
             outer = audio[i - win : i] if direction > 0 else audio[i : i + win]
             in_, out_ = rms(inner) > 3.0 * floor, rms(outer) > 3.0 * floor
+            if out_:  # the sound just outside a cut edge is a spoken um or uh that was meant to go: not a word's edge thrown away
+                o0, o1 = (edge - 0.010, edge) if direction > 0 else (edge, edge + 0.010)
+                out_ = not any(w["start"] - 0.010 < o1 and w["end"] + 0.010 > o0 for w in fillers)
             inside_speech += in_
             outside_speech += out_
             if (in_ or out_) and heard is not None:
@@ -333,7 +338,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
     result = {
         "whole": whole / n, "clipped": clipped / n, "gone": gone / n, "in": inside_speech / max(edges, 1), "out": outside_speech / max(edges, 1),
         "edges": edges, "kept": sum(b - a for a, b in kept), "longest": max(pauses, default=0.0), "over1": sum(1 for g in pauses if g > 1.0),
-        "fillers": len(fillers), "fillers_cut": fillers_cut,
+        "fillers": len(fillers), "fillers_cut": fillers_cut, "remnant": remnant,
     }
     if brief:
         return result
@@ -341,7 +346,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
         f"{label}: {n} words said: {100 * result['whole']:.1f}% whole, {100 * result['clipped']:.1f}% clipped by >15 ms, {100 * result['gone']:.1f}% not in the cut; "
         f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS); "
         f"the longest pause left between words is {result['longest']:.2f} s, {result['over1']} are over a second"
-        + (f"; {fillers_cut} of {len(fillers)} spoken um/uh cut out" if fillers else "")
+        + (f"; {fillers_cut} of {len(fillers)} spoken um/uh cut out, the most of one left in {1000 * remnant:.0f} ms" if fillers else "")
     )
     near = []
     if context and flagged:
