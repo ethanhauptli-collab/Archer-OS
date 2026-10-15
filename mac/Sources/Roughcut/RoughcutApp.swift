@@ -16,6 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A drive may have been unplugged or mounted while the app was behind: look again at the recent cuts' files.
         guard let model else { return }
         Task { await model.refreshRecents() }
+        // A setup problem is usually fixed in Terminal (Claude Code signed in, ffmpeg installed): look again when the app comes
+        // back to the front, so the banner clears without a click on Check again.
+        if !model.setupIssues.isEmpty && !model.checkingSetup && !model.isRunning {
+            Task { await model.refreshDoctor() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
