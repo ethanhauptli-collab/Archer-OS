@@ -443,15 +443,32 @@ def checked(out: Path, label: str, detail: bool = False) -> None:
         print(f"    {cutcheck.timecode(f.edge.timeline, report.frame_duration)} {f.edge.kind} {1000 * f.cut_off:.0f} ms of sound cut off: {f.words}")
     if not detail or not report.long_runs:
         return
-    clips = json.loads((out / "analysis.json").read_text())["clips"]
-    clip = clips[0]
+    from roughcut import ffmpeg_ops
+
+    clip = json.loads((out / "analysis.json").read_text())["clips"][0]
     words = [w for s in clip.get("segments", []) for w in s.get("words", [])]
     silences = [tuple(x) for x in clip.get("silences", [])]
-    print(f"    the clip's silence map: {len(silences)} silences, found at {clip.get('silence_db')} dB over a background of {clip.get('background_db')} dB")
+    breaths = [tuple(x) for x in clip.get("breaths", [])]
+    _project, _frame, _edges, ranges = cutcheck.spine_edges(Path(report.fcpxml))
+    media = Path(report.long_runs[0][2])
+    peaks = ffmpeg_ops.window_peaks(media, 0.05)
+    levels = cutcheck.listen(str(media))
+    sil_db = clip.get("silence_db")
+    print(f"    the clip's silence map: {len(silences)} silences, found at {sil_db} dB over a background of {clip.get('background_db')} dB; {len(breaths)} breaths marked")
     for length, at, _path, src in report.long_runs[:6]:
-        near = ", ".join(f"{w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}" for w in words if src - 1.2 <= w["start"] <= src + length + 1.2)
-        quiet = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in silences if b >= src - 1.0 and a <= src + length + 1.0)
-        print(f"    a pause of {length:.2f} s at {cutcheck.timecode(at, report.frame_duration)} (file {src:.2f}-{src + length:.2f} s): Whisper's words near it: {near or 'none'} | silences on the map: {quiet or 'none'}")
+        hi = src + length
+        near = ", ".join(f"{w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}" for w in words if w["end"] >= src - 1.0 and w["start"] <= hi + 1.0)
+        quiet = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in silences if b >= src - 1.0 and a <= hi + 1.0)
+        islands = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in breaths if b >= src - 1.0 and a <= hi + 1.0)
+        kept = ", ".join(f"{a:.2f}-{b:.2f}" for _p, a, b, _o in ranges if b >= src - 1.0 and a <= hi + 1.0)
+        windows = [peaks[k] for k in range(int(src / 0.05), min(len(peaks), int(hi / 0.05) + 1))]
+        rms = [levels[k] for k in range(int(src / 0.01), min(len(levels), int(hi / 0.01) + 1))]
+        above = sum(1 for p in windows if sil_db is not None and p > sil_db)
+        print(f"    a pause of {length:.2f} s at {cutcheck.timecode(at, report.frame_duration)} (file {src:.2f}-{hi:.2f} s)")
+        print(f"        Whisper's words near it: {near or 'none'}")
+        print(f"        silences on the map: {quiet or 'none'} | breaths: {islands or 'none'} | kept: {kept}")
+        if windows and rms:
+            print(f"        50 ms peaks in it: {above} of {len(windows)} over the map's level, max {max(windows):.0f} dB, median {sorted(windows)[len(windows) // 2]:.0f} dB; 10 ms levels: max {max(rms):.0f}, median {sorted(rms)[len(rms) // 2]:.0f}, min {min(rms):.0f} dB")
 
 
 def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> None:
