@@ -56,6 +56,8 @@ EDGE_SLACK_END = 0.35  # for a word's end: real Whisper ends are early by 0.46 s
 # whose silence map shows its pauses (they would show here too), a transcript gap that is longer than the style's pause by no more
 # than FAKE_GAP, with no silence in it, is not a pause.
 FAKE_GAP = 0.30
+SNAP_ENDS = False  # experiment: the cut ends a full pad after the sound stops, even where the pad already reached it
+SNAP_STARTS = False  # experiment: the cut starts a full pad before the sound begins
 
 
 @dataclass
@@ -487,8 +489,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         # Padding never reaches into a neighbouring word (including cut fillers).
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
-        wa = sil.onset_before(wa, floor=lo - 0.02, least=style.pad_in, within=style.pad_in + EDGE_SLACK)
-        wb = sil.release_after(wb, ceil=hi + 0.02, least=style.pad_out, within=style.pad_out + EDGE_SLACK_END)
+        wa = sil.onset_before(wa, floor=lo - 0.02, least=0.0 if SNAP_STARTS else style.pad_in, within=style.pad_in + EDGE_SLACK)
+        wb = sil.release_after(wb, ceil=hi + 0.02, least=0.0 if SNAP_ENDS else style.pad_out, within=style.pad_out + EDGE_SLACK_END)
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:
