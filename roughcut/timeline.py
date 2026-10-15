@@ -50,6 +50,12 @@ STYLES = {
 EDGE_SLACK = 0.10  # for a word's start
 EDGE_SLACK_END = 0.10  # for a word's end
 
+# A word's end is often early (measured on real Whisper output: a median 80 to 170 ms, now and then half a second), which shows as a
+# pause that isn't there: the next word follows at once, and the run of words was split through the sound between them. On a clip
+# whose silence map shows its pauses (they would show here too), a transcript gap that is longer than the style's pause by no more
+# than FAKE_GAP, with no silence in it, is not a pause.
+FAKE_GAP = 0.30
+
 
 @dataclass
 class Marker:
@@ -265,6 +271,16 @@ class _Spans:
         s = self.spans[i][0]
         return s if least + 1e-6 < s - t <= within + 1e-6 and s <= ceil else t
 
+    def overlap(self, a: float, b: float) -> float:
+        """Seconds of a..b that lie in a span."""
+        total = 0.0
+        i = bisect.bisect_left(self.starts, a - self.longest - 1e-6)
+        while i < len(self.spans) and self.starts[i] < b:
+            s, e = self.spans[i]
+            total += max(0.0, min(e, b) - max(s, a))
+            i += 1
+        return total
+
     def pause_between(self, prev_start: float, next_end: float, eps: float = 0.05) -> float:
         """Longest measured silence between two words.
 
@@ -322,6 +338,7 @@ class _ClipIndex:
     pauses: _Spans  # the clusters' spans
     spoken: _Spans  # every transcribed word
     seg_pos: dict[str, tuple[int, int]]  # segment ID -> (its index in the clip, clip-wide index of its first word)
+    shows_pauses: bool = False  # the silence map finds this clip's pauses (a fifth of a percent is not enough to say so, three is)
 
 
 def _index(clip: Clip) -> _ClipIndex:
@@ -357,7 +374,11 @@ def _index(clip: Clip) -> _ClipIndex:
     for i, seg in enumerate(clip.segments):
         seg_pos.setdefault(seg.id, (i, base))
         base += len(seg.words)
-    ix = _ClipIndex(silences, clusters, _Spans((s, e) for s, e, _ in clusters), spoken, seg_pos)
+    quiet = sum(e - s for s, e in silences)
+    ix = _ClipIndex(
+        silences, clusters, _Spans((s, e) for s, e, _ in clusters), spoken, seg_pos,
+        shows_pauses=len(silences) >= 2 and quiet >= 0.03 * clip.duration,
+    )
     clip.__dict__["_timeline_index"] = (key, ix)
     return ix
 
@@ -410,7 +431,16 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
             continue
         if current:
             prev = all_words[current[-1]]
-            gap = max(w.start - prev.end, sil.pause_between(prev.start, w.end))
+            said = w.start - prev.end
+            if (
+                max_gap < said <= max_gap + FAKE_GAP
+                and not removed_since_last
+                and ix.shows_pauses
+                and sil.pause_between(prev.start, w.end) <= max_gap
+                and sil.overlap(prev.end, w.start) < 0.5 * max_gap
+            ):
+                said = max_gap  # the transcript's gap is a word that ended early: sound runs through it on the map
+            gap = max(said, sil.pause_between(prev.start, w.end))
             if gap > max_gap or (removed_since_last and gap > filler_floor):
                 runs.append(current)
                 current = []

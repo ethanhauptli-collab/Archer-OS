@@ -18,7 +18,7 @@ from conftest import SPEECH, make_clip
 from roughcut.cli import main
 from roughcut.segments import build_segments
 from roughcut.timecode import parse_fcpx_time as T
-from roughcut.timeline import EDGE_SLACK, STYLES, _Spans, speech_pieces
+from roughcut.timeline import EDGE_SLACK, FAKE_GAP, STYLES, _Spans, speech_pieces
 from roughcut.transcribe import Word
 
 
@@ -58,6 +58,21 @@ def test_an_early_end_goes_on_to_where_the_sound_stops(t, ceil, least, within, e
     assert _Spans(SILENCES).release_after(t, ceil, least, within) == pytest.approx(expected)
 
 
+@pytest.mark.parametrize(
+    "a,b,expected",
+    [
+        (0.5, 0.9, 0.4),  # inside a silence
+        (0.5, 1.5, 0.5),  # leaves it
+        (1.2, 1.8, 0.0),  # between the two
+        (0.5, 2.5, 1.0),  # the end of one and the start of the next: 0.5 + 0.5
+        (-1.0, 4.0, 2.0),  # both whole
+        (3.0, 3.5, 0.0),  # at the end of the last one
+    ],
+)
+def test_how_much_of_a_stretch_is_silent(a, b, expected):
+    assert _Spans(SILENCES).overlap(a, b) == pytest.approx(expected)
+
+
 # ------------------------------------------------------------------ a run's pieces
 
 
@@ -89,6 +104,44 @@ def test_a_word_the_neighbour_claims_is_never_taken_back():
     style = STYLES["tight"]
     pieces = speech_pieces(clip.segments[0], clip, style, 0)
     assert all(p.a >= 5.1 for p in pieces), [(p.a, p.b) for p in pieces]
+
+
+# ------------------------------------------------------------------ a pause only the transcript sees
+
+SEEN = [(0.0, 4.9), (7.0, 12.0)]  # a clip whose pauses the silence map finds, with sound from 4.9 to 7.0
+
+
+def _pair(gap, silences=SEEN, filler=False):
+    """Two words (the first really ends 0.4 s after it starts) with `gap` seconds between them in the transcript."""
+    clip = make_clip("V01", seconds=12, role="aroll", silences=silences)
+    spec = [(5.0, 5.4, "honestly")]
+    at = 5.4 + gap
+    if filler:
+        spec.append((5.45, at - 0.05, "um"))
+    spec.append((at, at + 0.4, "good."))
+    clip.segments = build_segments("V01", _words(*spec))
+    return speech_pieces(clip.segments[0], clip, STYLES["tight"], 0)
+
+
+def test_a_word_that_ended_early_does_not_split_the_phrase_through_its_sound():
+    """Whisper ends 'honestly' at 5.4 and starts 'good' at 5.9, but the silence map has sound from 4.9 to 7.0: no pause there."""
+    assert len(_pair(0.5)) == 1
+
+
+def test_a_pause_the_silence_map_sees_still_splits_it():
+    assert len(_pair(0.5, silences=[(0.0, 4.9), (5.45, 5.95), (7.0, 12.0)])) == 2
+
+
+def test_without_a_silence_map_the_transcripts_gap_is_the_pause():
+    assert len(_pair(0.5, silences=[])) == 2
+
+
+def test_a_gap_longer_than_a_word_ends_early_is_a_pause():
+    assert len(_pair(STYLES["tight"].max_gap + FAKE_GAP + 0.1 - 0.0)) == 2
+
+
+def test_a_cut_out_filler_still_splits_the_phrase():
+    assert len(_pair(0.5, filler=True)) == 2
 
 
 # ------------------------------------------------------------------ the whole build

@@ -1,8 +1,10 @@
 name: Whisper timing
 
 # How far off are mlx-whisper's word times on speech whose words are known, and what does the cut make of them?
-# Informational: it prints numbers (.github/scripts/whisper_timing.py) and fails only when the cut is plainly bad.
-# Runs when the cutting code or the script changes, or by hand.
+# Informational: it prints numbers (.github/scripts/whisper_timing.py) and never fails on them.
+# Runs when the cutting code or the script changes, or by hand. The speech and Whisper's transcript of it are kept between runs
+# (the model takes most of the time and says the same thing again), so a run after the first is a few minutes; change the key's
+# number when the generator or the model changes.
 on:
   workflow_dispatch:
   push:
@@ -32,5 +34,10 @@ jobs:
           python-version: "3.12"
       - run: brew install ffmpeg
       - run: python -m pip install -e '.[mac]'
+      - name: The speech and Whisper's transcript, kept from the last run
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/whisper-shoots
+          key: whisper-shoots-v1
       - name: Speech by macOS `say`, transcribed by mlx-whisper, cut
-        run: python .github/scripts/whisper_timing.py --minutes 3 --runs 3
+        run: python .github/scripts/whisper_timing.py --minutes 3 --runs 3 --sweep --shoots "$RUNNER_TEMP/whisper-shoots"
