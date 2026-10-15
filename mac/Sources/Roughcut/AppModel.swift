@@ -796,9 +796,9 @@ final class AppModel {
         }
         if options.provider == .claudeCode {
             if doctor.claudeCode == nil {
-                issues.append("Claude Code isn't installed. In Terminal: npm install -g @anthropic-ai/claude-code")
+                issues.append("Claude Code isn't installed. In Terminal: curl -fsSL https://claude.ai/install.sh | bash   (then open a new Terminal window)")
             } else if !doctor.claudeCodeUsesSubscription {
-                issues.append("Sign Claude Code in with your subscription: in Terminal run claude, then type /login.")
+                issues.append("Sign Claude Code in with your Pro/Max plan: in Terminal run claude and sign in with your Claude account in the browser (type /login if it doesn't ask).")
             }
             if let note = doctor.picturesNote(for: options) {
                 issues.append(note)  // not a stop: the build runs, without clip pictures

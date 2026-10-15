@@ -28,10 +28,13 @@ from .anthropic_provider import resolve_model
 from .base import ImagePart, Part, ProviderAuthError, ProviderError, ProviderLimitError, TextPart, Usage, UsageLog, extract_json
 
 SIGN_IN_HELP = (
-    "Sign Claude Code in with your subscription: run `claude` in Terminal and type /login "
-    "(or run `claude setup-token` for a long-lived token)."
+    "Sign Claude Code in with your subscription: run `claude` in Terminal and sign in with your Claude account in the browser "
+    "(type /login if it doesn't ask; pick the Claude account option, not an API key), or run `claude setup-token` for a long-lived token."
 )
-INSTALL_HELP = "Claude Code isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then sign in with your subscription."
+INSTALL_HELP = (
+    "Claude Code isn't installed. In Terminal run: curl -fsSL https://claude.ai/install.sh | bash "
+    "(or brew install --cask claude-code), open a new Terminal window, then sign in with your subscription."
+)
 _HIDDEN_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 _EXTENSIONS = {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 

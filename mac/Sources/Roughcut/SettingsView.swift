@@ -86,7 +86,7 @@ struct GeneralSettings: View {
     private func claudeCodeDetail(_ doctor: DoctorReport) -> String {
         if let note = doctor.claudeCodePicturesNote { return note }
         let version = doctor.claudeCodeVersion.map { " \($0)" } ?? ""
-        return doctor.claudeCodeUsesSubscription ? "Signed in with your subscription\(version)" : "Not signed in with a subscription: in Terminal run claude, then type /login"
+        return doctor.claudeCodeUsesSubscription ? "Signed in with your subscription\(version)" : "Not signed in with a subscription: in Terminal run claude and sign in with your Claude account (not an API key)"
     }
 
     private func keyDetail(_ doctor: DoctorReport) -> String {

@@ -638,7 +638,7 @@ def _claude_code_detail(r: dict) -> str:
         return "optional: install it to use your Claude subscription (--provider claude-code)"
     auth = r.get("claude_code_auth")
     if auth is None:
-        detail = "installed, not signed in: run `claude` and type /login to use your subscription"
+        detail = "installed, not signed in: run `claude` in Terminal and sign in with your Claude account (the subscription option, not an API key)"
     elif auth == "api_key":
         detail = "signed in with an API key, not a subscription"
     else:

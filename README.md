@@ -26,7 +26,7 @@ That installs `roughcut` for every Terminal window (no `source .venv/bin/activat
 
 Then choose how the AI steps are paid for:
 
-- **Your Claude Pro/Max plan** (no API key): install Claude Code (`npm install -g @anthropic-ai/claude-code`), run `claude` once and type `/login`. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
+- **Your Claude Pro/Max plan** (no API key): install Claude Code (`curl -fsSL https://claude.ai/install.sh | bash`, or `brew install --cask claude-code`; `npm install -g @anthropic-ai/claude-code` also works with Node 22+), open a new Terminal window, run `claude` once and sign in with your Claude account in the browser (type `/login` if it doesn't ask; choose the Claude account option, not an API key, which Roughcut refuses because it would bill API credit). `claude update` keeps it current. Pick "Claude (your Pro/Max plan)" in the app, or add `--provider claude-code` in Terminal.
 - **An API key** from [console.anthropic.com](https://console.anthropic.com) → API Keys: `roughcut key set` (or the app's Settings → API Keys) saves it in the macOS Keychain.
 
 `roughcut doctor` (or the app's banner) checks ffmpeg, transcription, the graphics renderer, Claude Code and your key (and, if you use it, what Roughcut can read from [Venture Studio](#venture-studio)). `roughcut --version` prints the version and the commit this install runs (`commit abc1234`, `-dirty` after it with uncommitted changes in `roughcut/` or `pyproject.toml`; `unknown` unless it's an editable install from a git clone), and `doctor --json` has the same as `commit`.
