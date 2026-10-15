@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from roughcut import ffmpeg_ops, pauses
-from roughcut.analyze import Analysis, Cache, analyze
-from roughcut.segments import speech_stands_above_room, split_invented_words
+from roughcut.analyze import LEVEL_HIGHPASS, Analysis, Cache, analyze, pick_level_map
+from roughcut.segments import speech_over_room, speech_stands_above_room, split_invented_words
 from roughcut.timeline import _join_close
 from roughcut.transcribe import Transcriber, Transcript, Word
 
@@ -132,15 +132,16 @@ def _sidecar(root: Path, words):
     (root / "talk.json").write_text(json.dumps({"words": [{"start": a, "end": b, "text": t, "prob": 0.95} for a, b, t in words]}))
 
 
-def _rig(monkeypatch, levels, amplitude_pauses, db=-20.0, floor=-60.0):
-    """A raised silence level, the amplitude map's pauses (the same at every level), and the clip's own readings."""
+def _rig(monkeypatch, levels, amplitude_pauses, db=-20.0, floor=-60.0, high=None):
+    """A raised silence level, the amplitude map's pauses (the same at every level), and the clip's own readings: `levels` read over the
+    whole band, `high` (default: the same) read with the rumble filtered out."""
     calls = {"window_rms": 0}
     monkeypatch.setattr(ffmpeg_ops, "noise_threshold", lambda peaks: (db, floor))
     monkeypatch.setattr(ffmpeg_ops, "detect_silences", lambda path, duration, noise_db=-35.0, **k: [tuple(s) for s in amplitude_pauses.get(noise_db, [])])
 
-    def fake_rms(path, window=0.01, rate=16000, **k):
+    def fake_rms(path, window=0.01, rate=16000, highpass=None, **k):
         calls["window_rms"] += 1
-        return list(levels)
+        return list(levels if highpass is None or high is None else high)
 
     monkeypatch.setattr(ffmpeg_ops, "window_rms", fake_rms)
     monkeypatch.setattr(pauses, "pause_flatness", lambda path, silences: 0.9)  # noise, not music
@@ -185,8 +186,9 @@ def test_a_failed_reading_is_not_remembered(clip_file, tmp_path, monkeypatch):
     cache = Cache(tmp_path / "cache")
     clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=cache).clips[0]
     assert not list((tmp_path / "cache" / clip.media.fingerprint).glob("levels10*"))
+    first = calls["window_rms"]
     analyze([clip_file / "talk.mov"], transcriber=None, cache=cache)
-    assert calls["window_rms"] == 2  # asked again, not served an empty answer for good
+    assert first >= 1 and calls["window_rms"] == 2 * first  # asked again, not served an empty answer for good
 
 
 def test_a_cache_file_that_is_not_text_is_a_miss_not_a_crash(tmp_path):
@@ -220,3 +222,139 @@ def test_a_transcript_made_before_the_hole_fix_is_made_again(clip_file, tmp_path
     assert len(asked) == 1 and [w.text for s in clip.segments for w in s.words] == ["whole"]
     other = Transcriber("faster-whisper", "small")
     assert other.cache_key == "faster-whisper-small-auto-v"  # the other backend's transcripts were not made differently
+
+
+# ------------------------------------------------------------------ two ways of reading the room
+
+def test_a_noisy_clip_is_read_two_ways_and_the_one_where_the_speech_stands_further_over_the_room_is_used(clip_file, tmp_path, monkeypatch):
+    """A rumble hides the speech in the whole band and not in the speech band; broadband wind is the other way about (a high-pass
+    takes the voice's low end with it and leaves the wind)."""
+    words = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
+    _sidecar(clip_file, words)
+    speech = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
+    # Rumble: the whole band has the speech 6 dB over the room (rumble -54 dB, speech -48), the speech band 30 dB over.
+    whole = _readings(fill=-54.0, spans=[(a, b, -48.0) for a, b in speech])
+    speech_band = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in speech])
+    _rig(monkeypatch, whole, {}, high=speech_band)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "rumble")).clips[0]
+    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]  # the speech band tells the room from the speech
+    # Wind: the whole band separates the speech (30 dB), the high-passed one has lost the voice (3 dB over the wind).
+    whole = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in speech])
+    filtered = _readings(fill=-60.0, spans=[(a, b, -57.0) for a, b in speech])
+    _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "wind")).clips[0]
+    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]
+    assert clip.silences and any(s[0] < 1.0 for s in clip.silences)  # and its pauses are the whole band's
+
+
+def test_the_margin_the_speech_stands_over_the_room_is_what_the_two_readings_are_compared_by():
+    words = [Word(1.0, 1.5, "so"), Word(3.0, 3.5, "this")]
+    levels = _readings(spans=[(1.0, 1.5, -30.0), (3.0, 3.5, -30.0)])
+    assert speech_over_room(words, levels, FLOOR) == pytest.approx(30.0, abs=0.01)
+    assert speech_over_room([], levels, FLOOR) is None
+    assert speech_over_room(words, [], FLOOR) is None
+
+
+def _cough_rig(monkeypatch, tmp_path, whole_speech, filtered_speech, name):
+    """Speech at `filtered_speech` dB in the filtered reading and `whole_speech` in the whole band (the room at -60 dB in both). A
+    cough at 10.0-10.6 s is in the filtered reading only, so which reading made the map shows in where the pauses are."""
+    spans = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
+    whole = _readings(spans=[(a, b, whole_speech) for a, b in spans])
+    filtered = _readings(spans=[(a, b, filtered_speech) for a, b in spans] + [(10.0, 10.6, filtered_speech)])
+    return _rig(monkeypatch, whole, {}, high=filtered)
+
+
+def _pause_through_the_cough(clip):
+    return [s for s in clip.silences if s[0] < 10.3 < s[1]]
+
+
+GOOD_WORDS = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
+
+
+def test_the_whole_band_is_used_where_both_ways_find_a_map_and_it_stands_the_speech_clearly_further_over_the_room(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, GOOD_WORDS)
+    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="far")  # 17 dB against 14
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "far")).clips[0]
+    assert calls["window_rms"] == 2  # the filtered reading was not comfortable, so the whole band was read as well
+    assert len(_pause_through_the_cough(clip)) == 1  # the whole band's map: no cough, one long pause
+
+
+def test_the_filtered_reading_stays_unless_the_whole_band_is_clearly_better(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, GOOD_WORDS)
+    _cough_rig(monkeypatch, tmp_path, whole_speech=-44.0, filtered_speech=-46.0, name="near")  # 16 dB against 14: not 3 dB further
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "near")).clips[0]
+    assert _pause_through_the_cough(clip) == []  # the filtered map: the cough splits the pause
+
+
+def test_the_whole_band_is_not_even_read_where_the_filtered_reading_stands_the_speech_comfortably_over_the_room(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, GOOD_WORDS)
+    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-20.0, filtered_speech=-30.0, name="easy")  # 30 dB: nothing to gain
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "easy")).clips[0]
+    assert calls["window_rms"] == 1 and _pause_through_the_cough(clip) == []
+
+
+def test_each_reading_is_cached_under_its_own_name(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, GOOD_WORDS)
+    _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="names")
+    cache = Cache(tmp_path / "names")
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=cache).clips[0]
+    stored = sorted(p.name for p in (tmp_path / "names" / clip.media.fingerprint).glob("*levels*"))
+    assert stored == ["flatness-levels-whole-v1.json", "levels10-v1.json", "levels10-v2.json"]
+    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="names")
+    analyze([clip_file / "talk.mov"], transcriber=None, cache=cache)
+    assert calls["window_rms"] == 0  # both readings come from the cache the second time
+
+
+def test_a_level_room_is_the_floor_and_how_far_the_speech_stands_over_it():
+    assert ffmpeg_ops.level_room(_readings(spans=[(1.0, 2.0, -30.0)] * 1)) == (pytest.approx(-60.0, abs=0.6), pytest.approx(30.0, abs=0.6))
+    assert ffmpeg_ops.level_room([-50.0] * 100) is None  # under two seconds
+    quiet = _readings(spans=[(1.0, 2.0, -30.0)])
+    assert ffmpeg_ops.level_threshold(quiet) is not None
+    assert ffmpeg_ops.level_threshold(_readings(spans=[(1.0, 2.0, -52.0)])) is None  # 8 dB over the room: the two can't be told apart
+
+
+def test_the_way_of_reading_a_noisy_clip_is_picked_by_how_far_each_stands_the_speech_over_the_room():
+    def clip(speech):  # three seconds of speech in 12 s, the room at -60 dB
+        return _readings(spans=[(1.0, 2.0, speech), (4.0, 5.0, speech), (7.0, 8.0, speech)])
+
+    def pick(filtered, whole):
+        asked = []
+
+        def read(highpass):
+            asked.append(highpass)
+            return clip(filtered if highpass else whole)
+
+        picked = pick_level_map(read, 12.0)
+        return ("no map" if picked is None else "whole band" if picked[0] is None else "filtered"), asked
+
+    assert pick(-30.0, -10.0) == ("filtered", [LEVEL_HIGHPASS])  # 30 dB over the room: comfortable, the whole band is not even read
+    assert pick(-52.0, -30.0) == ("whole band", [LEVEL_HIGHPASS, None])  # the filter lost the voice (8 dB over): the whole band has it
+    assert pick(-46.0, -43.0) == ("whole band", [LEVEL_HIGHPASS, None])  # 14 against 17 dB: clearly further over
+    assert pick(-46.0, -44.0) == ("filtered", [LEVEL_HIGHPASS, None])  # 14 against 16 dB: not clearly
+    assert pick(-52.0, -53.0) == ("no map", [LEVEL_HIGHPASS, None])  # neither tells the speech from the room
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_a_deep_voice_in_wind_keeps_the_loudness_map_the_filter_would_have_lost(tmp_path):
+    """White noise (wind) reaches every frequency, and a 250 Hz high-pass takes a deep voice's fundamental with it: the voice stands
+    3 dB over the room in the filtered readings and 20 dB over it in the whole band. The map has to come from the whole band, or the
+    number Whisper wrote into the room tone stays in the cut."""
+    speech = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
+    gates = "+".join(f"between(t,{a},{b})" for a, b in speech)
+    voice = f"0.2*sin(2*PI*140*t)*(0.7+0.3*sin(2*PI*3*t))*({gates})"
+    path = tmp_path / "talk.mov"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", f"color=c=gray:size=320x180:rate=30:duration={SECONDS}",
+         "-f", "lavfi", "-i", f"aevalsrc=exprs='{voice}':s=48000:d={SECONDS}",
+         "-f", "lavfi", "-i", f"anoisesrc=c=white:a=0.04:d={SECONDS}:r=48000:s=3",
+         "-filter_complex", "[1:a][2:a]amix=inputs=2:normalize=0[a]", "-map", "0:v", "-map", "[a]",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path)],
+        check=True,
+    )
+    assert ffmpeg_ops.level_silences(ffmpeg_ops.window_rms(path, 0.01, highpass=250.0), float(SECONDS)) is None  # the filter lost the voice
+    assert ffmpeg_ops.level_silences(ffmpeg_ops.window_rms(path, 0.01), float(SECONDS)) is not None  # the whole band has it
+    _sidecar(tmp_path, [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")])
+    clip = analyze([path], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
+    assert clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB  # a noisy room
+    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]  # the made-up number is the room's, and gone

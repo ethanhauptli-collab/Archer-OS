@@ -280,8 +280,35 @@ def pause_warning(clip: Clip) -> str | None:
 
 LOUDNESS_CACHE = "loudness-v1.json"
 LEVELS_CACHE = "levels10-v2.json"  # a noisy clip's loudness every 10 ms, in whole dB, with the room's rumble filtered out (LEVEL_HIGHPASS)
+LEVELS_WHOLE_CACHE = "levels10-v1.json"  # the same readings over the whole band (a release before the filter wrote exactly these)
 FLATNESS_CACHE = "flatness-levels-v2.json"  # the spectral flatness of the pauses that loudness shows: tonal is music, not a room
+FLATNESS_WHOLE_CACHE = "flatness-levels-whole-v1.json"  # and of the pauses the whole-band readings show
 LEVEL_HIGHPASS = 250.0  # Hz: a room's rumble (a car, an air handler) and mains hum are below the speech band and don't count as sound in the loudness map
+LEVEL_COMFORT = 24.0  # dB the speech stands over the room above which reading the room the other way can't make the map better
+LEVEL_BAND_MARGIN = 3.0  # dB the whole band must stand the speech further over the room before it is used where both ways find a map
+
+
+def pick_level_map(read, duration: float) -> tuple[float | None, dict] | None:
+    """(the filter the readings were made with, the loudness map they give) for a noisy clip, or None where neither way of reading it
+    tells the speech from the room. `read(highpass)` gives the clip's 10 ms readings with the rumble below `highpass` Hz filtered
+    out (None: the whole band); `duration` is the audio's length.
+
+    The room's rumble (a car, an air handler, mains hum) sits below the speech band and hides a quiet word from the whole band, so
+    the filtered reading comes first. Broadband wind is the other way about: the filter takes the voice's low end with it and
+    leaves the wind, so the speech stands no further over the room than before, or not at all. Where the filtered reading doesn't
+    stand the speech comfortably over the room (LEVEL_COMFORT), the whole band is read too, and it is used where it stands the
+    speech clearly further over (LEVEL_BAND_MARGIN)."""
+    best: tuple[float, float | None, dict] | None = None  # (how far the speech stands over the room, the filter, its map)
+    for highpass in (LEVEL_HIGHPASS, None):
+        levels = read(highpass)
+        found = ffmpeg_ops.level_silences(levels, duration)
+        if found is not None:
+            over = ffmpeg_ops.level_room(levels)[1]
+            if best is None or over >= best[0] + LEVEL_BAND_MARGIN:
+                best = (over, highpass, found)
+        if best is not None and best[0] >= LEVEL_COMFORT:
+            break  # the speech stands far enough over the room: the other way of reading it can't help
+    return None if best is None else (best[1], best[2])
 
 
 @dataclass
@@ -292,6 +319,7 @@ class _Room:
     db: float
     floor: float
     offset: float = 0.0  # seconds into the file the first 10 ms reading is: the clip's audio start
+    highpass: float | None = None  # the readings it was made from: with the rumble filtered out at this frequency, or None for the whole band
 
 
 def probe_cached(path: Path, cache: Cache) -> MediaInfo:
@@ -509,40 +537,43 @@ def analyze(
             cache.put(m.fingerprint, key, cached)
         return [tuple(s) for s in cached]
 
-    def _levels(m: MediaInfo) -> list[float]:
-        """The clip's loudness every 10 ms, in whole dB (the same readings whether they were just made or come from the cache)."""
-        cached = cache.get(m.fingerprint, LEVELS_CACHE)
+    def _levels(m: MediaInfo, highpass: float | None = LEVEL_HIGHPASS) -> list[float]:
+        """The clip's loudness every 10 ms, in whole dB, with the rumble below `highpass` Hz filtered out (None: the whole band). The
+        same readings whether they were just made or come from the cache."""
+        name = LEVELS_CACHE if highpass else LEVELS_WHOLE_CACHE
+        cached = cache.get(m.fingerprint, name)
         if cached is None:
-            readings = ffmpeg_ops.window_rms(Path(m.path), ffmpeg_ops.LEVEL_WINDOW, highpass=LEVEL_HIGHPASS)
-            cached = {"window": ffmpeg_ops.LEVEL_WINDOW, "highpass": LEVEL_HIGHPASS, "db": [round(v) for v in readings]}
+            readings = ffmpeg_ops.window_rms(Path(m.path), ffmpeg_ops.LEVEL_WINDOW, highpass=highpass)
+            cached = {"window": ffmpeg_ops.LEVEL_WINDOW, "highpass": highpass, "db": [round(v) for v in readings]}
             if readings:  # a read that failed is asked for again next time, not answered with nothing for good
-                cache.put(m.fingerprint, LEVELS_CACHE, cached)
+                cache.put(m.fingerprint, name, cached)
         return [float(v) for v in cached.get("db", [])]
 
     def _by_level(clip: Clip) -> None:
         """A raised silence level means a noisy room. Its own loudness tells the room from the speech where silencedetect's single
         samples can't (a click splits a pause, a gust cuts it to pieces). What it finds is kept as the clip's room: it is put to use
-        once there is a transcript to check it against (_use_room)."""
+        once there is a transcript to check it against (_use_room). Which way the loudness is read: pick_level_map."""
         from .pauses import MUSIC_FLATNESS, pause_flatness
 
         if clip.music_bed:  # a song given with --music: no pauses of its own to cut
             return
         m = clip.media
-        levels = _levels(m)
         # The readings count from the first sample; the file's clock (silencedetect's, a person's transcript) from the file's start.
         offset = float(m.audio_start)
-        found = ffmpeg_ops.level_silences(levels, float(m.duration) - offset)
-        if found is None:
+        picked = pick_level_map(lambda highpass: _levels(m, highpass), float(m.duration) - offset)
+        if picked is None:
             return
+        highpass, found = picked
         # Music under the speech isn't a room: its quiet stretches can sit above a quiet real word, so they prove nothing. Nor can a
         # clip with too little pause to tell music from room (flatness is None) be called one.
-        flat = cache.get(m.fingerprint, FLATNESS_CACHE)
+        flat_name = FLATNESS_CACHE if highpass else FLATNESS_WHOLE_CACHE
+        flat = cache.get(m.fingerprint, flat_name)
         if flat is None:
             flat = {"flatness": pause_flatness(Path(m.path), found["silences"])}
-            cache.put(m.fingerprint, FLATNESS_CACHE, flat)
+            cache.put(m.fingerprint, flat_name, flat)
         if flat.get("flatness") is None or flat["flatness"] < MUSIC_FLATNESS:
             return
-        rooms[clip.id] = _Room([(round(s + offset, 3), round(e + offset, 3)) for s, e in found["silences"]], found["db"], found["floor"], offset)
+        rooms[clip.id] = _Room([(round(s + offset, 3), round(e + offset, 3)) for s, e in found["silences"]], found["db"], found["floor"], offset, highpass)
 
     def _use_room(clip: Clip, room: _Room) -> None:
         """Where silencedetect finds almost no pauses and the loudness does, the loudness map stands in for the clip's silences.
@@ -645,8 +676,10 @@ def analyze(
             words = drop_words_in_silence(transcript.words, default_maps.get(clip.id, clip.silences))
             room = rooms.get(clip.id)
             if room is not None:
-                levels = _levels(m)
+                levels = _levels(m, room.highpass)
                 if speech_stands_above_room(words, levels, room.floor, ffmpeg_ops.LEVEL_WINDOW, ffmpeg_ops.LEVEL_MIN_SEPARATION, room.offset):
+                    how = "whole band" if room.highpass is None else f"rumble below {room.highpass:g} Hz filtered out"
+                    log(f"{m.name}: its own loudness tells its speech from the room ({how}; {len(room.silences)} pauses)")
                     words, invented = split_invented_words(
                         words, room.silences, levels, room.floor, room.db, ffmpeg_ops.LEVEL_WINDOW,
                         min_separation=ffmpeg_ops.LEVEL_MIN_SEPARATION, offset=room.offset,

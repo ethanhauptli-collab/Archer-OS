@@ -432,13 +432,21 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
     """Why the loudness map kept the words in a pause the cut left: for each word of 0.2 s or more near it, whether it lies inside one of
     the map's pauses, how many of its readings are over the pause level, and how far over the room the transcript's words stand
     (the loud quarter of the readings inside them, the test that decides whether the map is used at all)."""
-    from roughcut import ffmpeg_ops
+    from roughcut import analyze, ffmpeg_ops
 
-    levels = ffmpeg_ops.window_rms(media, 0.01, highpass=250.0)
-    found = ffmpeg_ops.level_silences(levels, len(levels) * 0.01)
-    if found is None:
+    readings_by_band: dict = {}
+
+    def read(hp):
+        if hp not in readings_by_band:
+            readings_by_band[hp] = ffmpeg_ops.window_rms(media, 0.01, highpass=hp)
+        return readings_by_band[hp]
+
+    picked = analyze.pick_level_map(read, len(read(None)) * 0.01)
+    if picked is None:
         print("        the loudness map: none (speech within 12 dB of the room, or too little to go by)")
         return
+    highpass, found = picked
+    levels = read(highpass)
 
     def readings(w: dict) -> list[float]:
         i = int(w["start"] / 0.01)
@@ -446,7 +454,7 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
 
     inside = sorted(v for w in words for v in readings(w))
     stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
-    print(f"        the loudness map: room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}")
+    print(f"        the loudness map ({'whole band' if highpass is None else f'high-passed at {highpass:g} Hz'}): room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}")
     for w in words:
         if w["end"] < lo or w["start"] > hi or w["end"] - w["start"] < 0.2:
             continue
@@ -457,12 +465,14 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
 
 
 def room_overview(media: Path, words: list[dict]) -> None:
-    """A noisy clip's loudness map two ways, the whole band and the high-passed readings the cut uses: whether there is a map at all,
-    how many pauses, and how far over the room the words stand at their loud quarter (the cut uses the map only past 12 dB)."""
-    from roughcut import ffmpeg_ops
+    """A noisy clip's loudness map both ways, the whole band and the high-passed readings: whether there is a map at all, how far the
+    loud twentieth stands over the room, how many pauses, and how far over the room the words stand at their loud quarter (the cut
+    uses the map only past 12 dB), then which way the cut reads the clip."""
+    from roughcut import analyze, ffmpeg_ops
 
-    for name, hp in (("whole band", None), ("high-passed at 250 Hz (as the cut reads it)", 250.0)):
-        levels = ffmpeg_ops.window_rms(media, 0.01, highpass=hp)
+    readings_by_band: dict = {}
+    for name, hp in (("whole band", None), ("high-passed at 250 Hz", 250.0)):
+        levels = readings_by_band[hp] = ffmpeg_ops.window_rms(media, 0.01, highpass=hp)
         found = ffmpeg_ops.level_silences(levels, len(levels) * 0.01)
         if found is None:
             print(f"    loudness map, {name}: none; the loud twentieth is within {ffmpeg_ops.LEVEL_MIN_SEPARATION:g} dB of the room")
@@ -471,8 +481,10 @@ def room_overview(media: Path, words: list[dict]) -> None:
         stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
         print(
             f"    loudness map, {name}: room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; "
-            f"the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}"
+            f"the loud twentieth stands {ffmpeg_ops.level_room(levels)[1]:.1f} dB over it, the words {stand:.1f} dB at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}"
         )
+    picked = analyze.pick_level_map(lambda hp: readings_by_band[hp], len(readings_by_band[None]) * 0.01)
+    print("    the cut reads it: " + ("with no loudness map" if picked is None else "whole band" if picked[0] is None else f"high-passed at {picked[0]:g} Hz"))
 
 
 def checked(out: Path, label: str, detail: bool = False, edits: bool = False):

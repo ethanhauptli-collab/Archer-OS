@@ -74,17 +74,24 @@ def _word_readings(levels: list[float], w: Word, window: float, offset: float = 
     return levels[i : max(i + 1, int((w.end - offset) / window))]
 
 
+def speech_over_room(words: list[Word], levels: list[float], floor: float, window: float = 0.01, offset: float = 0.0) -> float | None:
+    """How far the transcript's own speech stands over the room, in dB: the loud quarter of the readings inside the words (the voiced
+    part of a word is far over the room, its consonants and the gaps between its sounds are not), against the room's floor. None
+    where there are no readings under the words."""
+    inside = sorted(v for w in words for v in _word_readings(levels, w, window, offset))
+    return inside[(len(inside) * 3) // 4] - floor if inside else None
+
+
 def speech_stands_above_room(
     words: list[Word], levels: list[float], floor: float, window: float = 0.01, min_separation: float = 12.0, offset: float = 0.0
 ) -> bool:
-    """Is the transcript's own speech clearly louder than the room? The loud quarter of the readings inside the words (the voiced part
-    of a word is far over the room, its consonants and the gaps between its sounds are not), against the room's floor.
+    """Is the transcript's own speech clearly louder than the room (speech_over_room)?
 
     The loudest twentieth of a clip says nothing about its talker when a horn, a door or a laugh is that loud; the words are where
     the talker is. Within `min_separation` of the room, loudness can't tell the speech from the room and proves nothing.
     """
-    inside = sorted(v for w in words for v in _word_readings(levels, w, window, offset))
-    return bool(inside) and inside[(len(inside) * 3) // 4] - floor >= min_separation
+    over = speech_over_room(words, levels, floor, window, offset)
+    return over is not None and over >= min_separation
 
 
 def split_invented_words(

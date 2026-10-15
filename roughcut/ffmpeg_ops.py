@@ -258,22 +258,28 @@ LEVEL_CLICK_OVER = 14.0  # dB over the room: a short rise under this inside a pa
 LEVEL_CLICK_MAX = 0.05  # seconds a click lasts at the most
 
 
-def level_threshold(levels: list[float]) -> tuple[float, float] | None:
-    """(the level a 10 ms reading stays under in the room's pauses, the room's floor) from a clip's own loudness readings, or None
-    where the loud speech is within LEVEL_MIN_SEPARATION of the room (or there is too little to go by): sound and background can't
-    be told apart there.
-
-    The floor is the quietest tenth of the readings, the speech level the loudest twentieth, and the pauses are the floor plus a
-    margin that grows with the gap between the two, up to 6 dB: room noise moves a few dB from one reading to the next, a word
-    doesn't stay that close to the room."""
+def level_room(levels: list[float]) -> tuple[float, float] | None:
+    """(the room's floor, how far the loud speech stands over it in dB) from a clip's own loudness readings, or None where there is
+    too little to go by. The floor is the quietest tenth of the readings, the speech level the loudest twentieth."""
     n = len(levels)
     if n < 200:  # under two seconds
         return None
     ordered = sorted(levels)
     floor = max(ordered[n // 10], LEVEL_FLOOR_LIMIT)
-    separation = ordered[min(n - 1, (n * 95) // 100)] - floor
-    if separation < LEVEL_MIN_SEPARATION:
+    return floor, ordered[min(n - 1, (n * 95) // 100)] - floor
+
+
+def level_threshold(levels: list[float]) -> tuple[float, float] | None:
+    """(the level a 10 ms reading stays under in the room's pauses, the room's floor) from a clip's own loudness readings, or None
+    where the loud speech is within LEVEL_MIN_SEPARATION of the room (or there is too little to go by): sound and background can't
+    be told apart there.
+
+    The pauses are the floor plus a margin that grows with the gap between the speech and the room, up to 6 dB: room noise moves a
+    few dB from one reading to the next, a word doesn't stay that close to the room."""
+    room = level_room(levels)
+    if room is None or room[1] < LEVEL_MIN_SEPARATION:
         return None
+    floor, separation = room
     return round(floor + min(6.0, max(3.0, 0.35 * separation)), 1), floor
 
 
