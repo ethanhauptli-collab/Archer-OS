@@ -428,10 +428,11 @@ def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
     DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
 
 
-def checked(out: Path, label: str, detail: bool = False):
+def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
     """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists. With `detail`,
-    what is around each pause over a second that the cut left (the words Whisper heard and the silences the map found)."""
-    from roughcut import cutcheck
+    what is around each pause over a second that the cut left; with `edits`, what is around each edit that goes through sound
+    (the words Whisper heard, the silences the map found, the clip's loudness)."""
+    from roughcut import cutcheck, ffmpeg_ops
 
     report = cutcheck.check(out)
     if report.unjudged and not report.edits:
@@ -441,38 +442,54 @@ def checked(out: Path, label: str, detail: bool = False):
     print(f"roughcut check on {label}: {report.edits} dialogue edits, {len(report.flagged)} go through sound, {report.small} only just{pauses}")
     for f in report.flagged[:4]:
         print(f"    {cutcheck.timecode(f.edge.timeline, report.frame_duration)} {f.edge.kind} {1000 * f.cut_off:.0f} ms of sound cut off: {f.words}")
-    if not detail or not report.long_runs:
+    pauses_wanted = detail and report.long_runs
+    edits_wanted = edits and report.flagged
+    if not pauses_wanted and not edits_wanted:
         return report
-    from roughcut import ffmpeg_ops
-
+    media = Path(report.long_runs[0][2] if pauses_wanted else report.flagged[0].edge.asset)
     all_clips = json.loads((out / "analysis.json").read_text())["clips"]
-    media = Path(report.long_runs[0][2])
     for c in all_clips:
         n_words = sum(len(s.get("words", [])) for s in c.get("segments", []))
-        print(f"    clip {c['id']} {Path(c['media']['path']).name}: role {c.get('role')}, {len(c.get('segments', []))} segments, {n_words} words, transcript from {c.get('transcript_source')}, {len(c.get('silences', []))} silences, hidden {c.get('hidden')}, duplicate_of {c.get('duplicate_of')}")
+        print(f"    clip {c['id']} {Path(c['media']['path']).name}: role {c.get('role')}, {len(c.get('segments', []))} segments, {n_words} words, transcript from {c.get('transcript_source')}, {len(c.get('silences', []))} silences, bed {c.get('bed')}")
     clip = next((c for c in all_clips if Path(c["media"]["path"]).name == media.name), all_clips[0])
     words = [w for s in clip.get("segments", []) for w in s.get("words", [])]
     silences = [tuple(x) for x in clip.get("silences", [])]
     breaths = [tuple(x) for x in clip.get("breaths", [])]
     _project, _frame, _edges, ranges = cutcheck.spine_edges(Path(report.fcpxml))
-    peaks = ffmpeg_ops.window_peaks(media, 0.05)
     levels = cutcheck.listen(str(media))
     sil_db = clip.get("silence_db")
     print(f"    the clip's silence map: {len(silences)} silences, found at {sil_db} dB over a background of {clip.get('background_db')} dB; {len(breaths)} breaths marked")
-    for length, at, _path, src in report.long_runs[:6]:
-        hi = src + length
-        near = ", ".join(f"{w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}" for w in words if w["end"] >= src - 1.0 and w["start"] <= hi + 1.0)
-        quiet = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in silences if b >= src - 1.0 and a <= hi + 1.0)
-        islands = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in breaths if b >= src - 1.0 and a <= hi + 1.0)
-        kept = ", ".join(f"{a:.2f}-{b:.2f}" for _p, a, b, _o in ranges if b >= src - 1.0 and a <= hi + 1.0)
-        windows = [peaks[k] for k in range(int(src / 0.05), min(len(peaks), int(hi / 0.05) + 1))]
-        rms = [levels[k] for k in range(int(src / 0.01), min(len(levels), int(hi / 0.01) + 1))]
-        above = sum(1 for p in windows if sil_db is not None and p > sil_db)
-        print(f"    a pause of {length:.2f} s at {cutcheck.timecode(at, report.frame_duration)} (file {src:.2f}-{hi:.2f} s)")
-        print(f"        Whisper's words near it: {near or 'none'}")
-        print(f"        silences on the map: {quiet or 'none'} | breaths: {islands or 'none'} | kept: {kept}")
-        if windows and rms:
-            print(f"        50 ms peaks in it: {above} of {len(windows)} over the map's level, max {max(windows):.0f} dB, median {sorted(windows)[len(windows) // 2]:.0f} dB; 10 ms levels: max {max(rms):.0f}, median {sorted(rms)[len(rms) // 2]:.0f}, min {min(rms):.0f} dB")
+
+    def around(lo: float, hi: float) -> tuple[str, str, str, str]:
+        near = ", ".join(f"{w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}" for w in words if w["end"] >= lo and w["start"] <= hi)
+        quiet = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in silences if b >= lo and a <= hi)
+        islands = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in breaths if b >= lo and a <= hi)
+        kept = ", ".join(f"{a:.2f}-{b:.2f}" for _p, a, b, _o in ranges if b >= lo and a <= hi)
+        return near or "none", quiet or "none", islands or "none", kept
+
+    if pauses_wanted:
+        peaks = ffmpeg_ops.window_peaks(media, 0.05)
+        for length, at, _path, src in report.long_runs[:6]:
+            hi = src + length
+            near, quiet, islands, kept = around(src - 1.0, hi + 1.0)
+            windows = [peaks[k] for k in range(int(src / 0.05), min(len(peaks), int(hi / 0.05) + 1))]
+            rms = [levels[k] for k in range(int(src / 0.01), min(len(levels), int(hi / 0.01) + 1))]
+            above = sum(1 for p in windows if sil_db is not None and p > sil_db)
+            print(f"    a pause of {length:.2f} s at {cutcheck.timecode(at, report.frame_duration)} (file {src:.2f}-{hi:.2f} s)")
+            print(f"        Whisper's words near it: {near}")
+            print(f"        silences on the map: {quiet} | breaths: {islands} | kept: {kept}")
+            if windows and rms:
+                print(f"        50 ms peaks in it: {above} of {len(windows)} over the map's level, max {max(windows):.0f} dB, median {sorted(windows)[len(windows) // 2]:.0f} dB; 10 ms levels: max {max(rms):.0f}, median {sorted(rms)[len(rms) // 2]:.0f}, min {min(rms):.0f} dB")
+    if edits_wanted:
+        for f in report.flagged[:6]:
+            src = f.edge.source
+            near, quiet, islands, kept = around(src - 1.0, src + 1.0)
+            first, edit_at = int(round((src - 0.6) / 0.01)), int(round(src / 0.01))
+            profile = " ".join(("| " if k == edit_at else "") + f"{levels[k]:.0f}" for k in range(max(0, first), min(len(levels), first + 120), 4))
+            print(f"    an edit at {cutcheck.timecode(f.edge.timeline, report.frame_duration)} ({f.edge.kind}, file {src:.2f} s): {1000 * f.cut_off:.0f} ms of sound cut off, {1000 * f.kept:.0f} ms kept")
+            print(f"        Whisper's words near it: {near}")
+            print(f"        silences on the map: {quiet} | breaths: {islands} | kept: {kept}")
+            print(f"        10 ms levels every 40 ms from {max(0, src - 0.6):.2f} s, the edit at |: {profile}")
     return report
 
 
@@ -640,13 +657,40 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace, folder: str = "
         out = root / f"outR_{folder}_{style}"
         build(shoot, out, style, root / "cache", ["--transcriber", "none"])
         results[style] = judge_audio(out, shoot / "talk.mov", style)
-        report = checked(out, f"the {style} cut of the reading", detail=folder == "reading")
+        report = checked(out, f"the {style} cut of the reading", detail=folder == "reading", edits=style == "tight")
         if report is not None:
             results[style]["edits"] = report.edits
             results[style]["through"] = len(report.flagged)
             results[style]["pause"] = report.longest_pause[0] if report.longest_pause else 0.0
             results[style]["long_pauses"] = report.long_pauses
     return {"shoot": shoot, "results": results, "folder": folder}
+
+
+@contextlib.contextmanager
+def before_the_loudness_map():
+    """The cut as it was before pauses and invented words came from a noisy clip's own loudness, and before silences a click split
+    were put together: the same transcripts, to see what that changed."""
+    from roughcut import ffmpeg_ops, timeline
+
+    saved = (ffmpeg_ops.level_silences, timeline.CLICK_GAP)
+    try:
+        ffmpeg_ops.level_silences = lambda *args, **kwargs: None
+        timeline.CLICK_GAP = 0.0
+        yield
+    finally:
+        ffmpeg_ops.level_silences, timeline.CLICK_GAP = saved
+
+
+def readings_before(root: Path, readings: list[dict]) -> None:
+    print("\n#### the readings cut as before the loudness map (no pauses or invented words from loudness, silences a click split not joined)")
+    for r in readings:
+        for style in ("tight", "medium"):
+            out = root / f"outB_{r['folder']}_{style}"
+            with before_the_loudness_map():
+                build(r["shoot"], out, style, root / "cache_before", ["--transcriber", "none"], in_process=True)
+            j = judge_audio(out, r["shoot"] / "talk.mov")
+            print(f"{r['folder']} {style}, before: of {j['edges']} cut edges {100 * j['in']:.1f}% start or end inside speech and {100 * j['out']:.1f}% threw a word's edge away; kept {j['kept']:.0f} s")
+            checked(out, f"{r['folder']}, the {style} cut before")
 
 
 # What the sweep tries: how far past a transcript's last word a sound still going is taken for its tail, the transcript gap that is not
@@ -764,6 +808,8 @@ def main() -> int:
             if r:
                 readings.append(r)
     reading = readings[0] if readings else None
+    if readings:
+        readings_before(root, readings)
     if len(readings) > 1:
         print("\n#### all the readings")
         for style in ("tight", "medium"):
