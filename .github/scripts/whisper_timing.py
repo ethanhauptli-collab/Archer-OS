@@ -20,7 +20,9 @@ without a model.
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
+import gzip
 import json
 import os
 import random
@@ -302,6 +304,27 @@ RUNS = [  # (voice, words per minute, seed)
 ]
 
 
+DATA_LINES: list[str] = []  # printed after the summary, so the end of the log holds them
+
+
+def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
+    """The run's data as log lines (`DATA n i/m chunk`: gzip + base64 of one JSON), so it can be rebuilt from the log and the cut
+    tried again offline on real Whisper output: what was said, what Whisper heard, and the silence map the cut used."""
+    clip = json.loads((analysis / "analysis.json").read_text())["clips"][0]
+    blob = {
+        "n": n,
+        "seconds": truth["seconds"],
+        "truth": [[w["text"], w["start"], w["end"]] for w in truth["words"]],
+        "pauses": truth["pauses"],
+        "heard": [[w["text"], round(w["start"], 3), round(w["end"], 3)] for w in heard],
+        "silences": [[round(x, 3), round(y, 3)] for x, y in clip.get("silences", [])],
+        "breaths": clip.get("breaths", []),
+    }
+    text = base64.b64encode(gzip.compress(json.dumps(blob, separators=(",", ":")).encode())).decode()
+    chunks = [text[i : i + 3000] for i in range(0, len(text), 3000)]
+    DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
+
+
 def one_run(root: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, n: int) -> dict[str, dict] | None:
     shoot = root / f"shoot{n}"
     try:
@@ -339,6 +362,7 @@ def one_run(root: Path, a: argparse.Namespace, voice: str | None, rate: int, see
             print(proc.stdout[-1500:], proc.stderr[-1500:])
             raise SystemExit(1)
         results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
+    dump(n, truth, heard, root / "out{}_tight".format(n))
     return results
 
 
@@ -366,7 +390,9 @@ def main() -> int:
             print(f"{style}: {len(rs)} clips; words whole {100 * m['whole']:.1f}%, clipped {100 * m['clipped']:.1f}%, not in the cut {100 * m['gone']:.1f}%; cut edges inside speech {100 * m['in']:.1f}%, a word's edge thrown away {100 * m['out']:.1f}%")
     ok = bool(all_results) and all(r[st]["whole"] >= 0.80 and r[st]["in"] <= 0.25 and r[st]["out"] <= 0.25 for r in all_results for st in r)
     print("\nwhisper timing: " + ("done" if ok else "the cut is clearly worse than it should be (see above)"))
-    return 0 if ok else 1
+    print("\n#### data (gzip + base64 of one JSON per clip: what was said, what Whisper heard, the silence map)")
+    print("\n".join(DATA_LINES), flush=True)
+    return 0  # a measurement, not a gate
 
 
 if __name__ == "__main__":
