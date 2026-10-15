@@ -2,19 +2,26 @@
 
 Every word is said on its own by a speech synthesizer (macOS `say`; `espeak-ng` for a dry run elsewhere), so each word's true start
 and end are known to the sample. The words become sentences, the sentences a few minutes of talk over a noise bed (room tone, a
-60 Hz hum, wind gusts), as AAC in a MOV, like a phone's. Then:
+60 Hz hum, wind gusts), as AAC in a MOV, like a phone's: three clips of three minutes in different voices and one of twelve. Then:
 
   1. Whisper (the model the app uses by default, or $WHISPER_MODEL) transcribes it and its word times are compared with the truth:
-     how many words, and how far off their starts and ends are;
+     how many words, how far off their starts and ends are, and what it put into the long pauses;
   2. `roughcut build --provider none` cuts it from that transcript (handed over as a sidecar, so every cut shares it), at tight and
-     medium pacing, and the cut is measured against the audio itself: words clipped, cut edges inside speech, pauses left.
+     medium pacing, and the cut is measured against the audio itself: words clipped, cut edges inside speech, pauses left; every
+     cut edge that is still in speech is named with the word it cuts, what Whisper said about it, and the silences around it;
+  3. `--sweep` cuts the same transcripts again under other settings (how far past a last word a sound still going is followed, how
+     long a transcript gap the silence map can overrule, the paddings) and prints one line each;
+  4. `--reading` also cuts a few minutes of a person reading (public domain, fetched), which has no known words, so only the audio
+     says whether a cut edge is in speech.
 
-It prints the numbers and exits 0 unless the cut is plainly bad. Synthetic speech is cleaner than a person talking outdoors, so these
-are the best case for Whisper, not the typical one.
+It prints numbers and exits 0: it is a measurement. Synthetic speech is cleaner than a person talking outdoors, so these are the best
+case for Whisper, not the typical one. The speech and Whisper's transcript of it are kept in `--shoots DIR` (the CI cache), so a
+second run needs no model.
 
-    python .github/scripts/whisper_timing.py [--runs 4] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep]
-`--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison and the cut can be tried
-without a model.
+    python .github/scripts/whisper_timing.py [--runs 4] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep] [--reading] [--data]
+`--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison, the cut and the sweep can be
+tried without a model. `--data` prints each clip's words said and heard and its silence map as `DATA` lines (gzip and base64) to cut
+them again offline.
 """
 
 from __future__ import annotations
