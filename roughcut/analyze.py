@@ -14,7 +14,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .textio import Stalled, bounded
-from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, speech_stands_above_room, split_invented_words
+from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, speech_over_room, split_invented_words
 from .transcribe import Transcriber, TranscriptionError, Transcript, find_sidecar, load_sidecar
 
 ROLE_LABELS = {
@@ -286,6 +286,8 @@ FLATNESS_WHOLE_CACHE = "flatness-levels-whole-v1.json"  # and of the pauses the 
 LEVEL_HIGHPASS = 250.0  # Hz: a room's rumble (a car, an air handler) and mains hum are below the speech band and don't count as sound in the loudness map
 LEVEL_COMFORT = 24.0  # dB the speech stands over the room above which reading the room the other way can't make the map better
 LEVEL_BAND_MARGIN = 3.0  # dB the whole band must stand the speech further over the room before it is used where both ways find a map
+ROOM_WORDS_SEPARATION = 12.0  # dB the transcript's words (their loud quarter) must stand over the room before its loudness may leave a word out as made up
+ROOM_PAUSES_SEPARATION = 12.0  # ... and before its pauses may stand in for the clip's silences
 
 
 def pick_level_map(read, duration: float) -> tuple[float | None, dict] | None:
@@ -572,6 +574,8 @@ def analyze(
             flat = {"flatness": pause_flatness(Path(m.path), found["silences"])}
             cache.put(m.fingerprint, flat_name, flat)
         if flat.get("flatness") is None or flat["flatness"] < MUSIC_FLATNESS:
+            why = "too little of it to tell music from a room" if flat.get("flatness") is None else f"tonal ({flat['flatness']:.2f}): music, not a room"
+            log(f"{m.name}: its own loudness shows pauses, but they are {why}; not read as a room")
             return
         rooms[clip.id] = _Room([(round(s + offset, 3), round(e + offset, 3)) for s, e in found["silences"]], found["db"], found["floor"], offset, highpass)
 
@@ -677,12 +681,13 @@ def analyze(
             room = rooms.get(clip.id)
             if room is not None:
                 levels = _levels(m, room.highpass)
-                if speech_stands_above_room(words, levels, room.floor, ffmpeg_ops.LEVEL_WINDOW, ffmpeg_ops.LEVEL_MIN_SEPARATION, room.offset):
-                    how = "whole band" if room.highpass is None else f"rumble below {room.highpass:g} Hz filtered out"
+                over = speech_over_room(words, levels, room.floor, ffmpeg_ops.LEVEL_WINDOW, room.offset)
+                how = "whole band" if room.highpass is None else f"rumble below {room.highpass:g} Hz filtered out"
+                if over is not None and over >= ROOM_WORDS_SEPARATION:
                     log(f"{m.name}: its own loudness tells its speech from the room ({how}; {len(room.silences)} pauses)")
                     words, invented = split_invented_words(
                         words, room.silences, levels, room.floor, room.db, ffmpeg_ops.LEVEL_WINDOW,
-                        min_separation=ffmpeg_ops.LEVEL_MIN_SEPARATION, offset=room.offset,
+                        min_separation=ROOM_WORDS_SEPARATION, offset=room.offset,
                     )
                     _use_room(clip, room)
                     if invented:
@@ -690,8 +695,15 @@ def analyze(
                         said = f"{m.name}: left out {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})"
                         log(said)
                         left_out.append(said)
+                elif over is not None and over >= ROOM_PAUSES_SEPARATION:
+                    _use_room(clip, room)
+                    log(
+                        f"{m.name}: its speech stands {over:.0f} dB over the room: enough for the pauses of its own loudness ({how}; {len(room.silences)} pauses), "
+                        f"not for leaving words out; kept every word"
+                    )
                 else:
-                    log(f"{m.name}: the words are within {ffmpeg_ops.LEVEL_MIN_SEPARATION:g} dB of the room's noise, so its loudness can't tell speech from room; kept every word")
+                    seen = "no readings under them" if over is None else f"{over:.1f} dB over the room"
+                    log(f"{m.name}: the words are within {ROOM_PAUSES_SEPARATION:g} dB of the room's noise ({seen}), so its loudness can't tell speech from room; kept every word")
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:

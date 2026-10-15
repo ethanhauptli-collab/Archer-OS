@@ -553,8 +553,9 @@ def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
     return report
 
 
-def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> None:
-    """`roughcut build --provider none` on the shoot; in this process (output held back) when many are made one after another."""
+def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> str:
+    """`roughcut build --provider none` on the shoot; in this process (output held back) when many are made one after another.
+    Returns what the engine said."""
     args = ["build", str(shoot), "--provider", "none", *engine, "--style", style, "-o", str(out), "--cache-dir", str(cache), "--no-menu"]
     if in_process:
         from roughcut import cli
@@ -565,11 +566,22 @@ def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *,
         if code:
             print(held.getvalue()[-1500:])
             raise SystemExit(1)
-        return
+        return held.getvalue()
     proc = subprocess.run([sys.executable, "-m", "roughcut", *args], capture_output=True, text=True)
     if proc.returncode:
         print(proc.stdout[-1500:], proc.stderr[-1500:])
         raise SystemExit(1)
+    return proc.stdout + proc.stderr
+
+
+ROOM_WORDS = ("own loudness", "within", "its speech", "Whisper wrote over", "noisy background", "almost no pauses", "audio starts")
+
+
+def said_about_the_room(said: str) -> None:
+    """What the engine said about a noisy clip's loudness map while it cut: whether it was used and why not."""
+    for line in said.splitlines():
+        if any(w in line for w in ROOM_WORDS):
+            print(f"    the engine: {line.strip()[:400]}")
 
 
 def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, fillers: float, noise: float | None, n: int) -> dict | None:
@@ -615,8 +627,10 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
     results = {}
     for style in ("tight", "medium"):
         out = root / f"out{n}_{style}"
-        build(shoot, out, style, root / "cache", engine)
+        said = build(shoot, out, style, root / "cache", engine)
         results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
+        if style == "tight":
+            said_about_the_room(said)
     checked(root / f"out{n}_tight", "the tight cut")
     dump(n, truth, heard, root / f"out{n}_tight")
     clip = json.loads((root / f"out{n}_tight" / "analysis.json").read_text())["clips"][0]
