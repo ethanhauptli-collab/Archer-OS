@@ -428,6 +428,34 @@ def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
     DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
 
 
+def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
+    """Why the loudness map kept the words in a pause the cut left: for each word of 0.2 s or more near it, whether it lies inside one of
+    the map's pauses, how many of its readings are over the pause level, and how far over the room the transcript's words stand
+    (the loud quarter of the readings inside them, the test that decides whether the map is used at all)."""
+    from roughcut import ffmpeg_ops
+
+    levels = ffmpeg_ops.window_rms(media, 0.01, highpass=250.0)
+    found = ffmpeg_ops.level_silences(levels, len(levels) * 0.01)
+    if found is None:
+        print("        the loudness map: none (speech within 12 dB of the room, or too little to go by)")
+        return
+
+    def readings(w: dict) -> list[float]:
+        i = int(w["start"] / 0.01)
+        return levels[i : max(i + 1, int(w["end"] / 0.01))]
+
+    inside = sorted(v for w in words for v in readings(w))
+    stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
+    print(f"        the loudness map: room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}")
+    for w in words:
+        if w["end"] < lo or w["start"] > hi or w["end"] - w["start"] < 0.2:
+            continue
+        r = readings(w)
+        in_pause = any(s - 0.05 <= w["start"] and w["end"] <= e + 0.05 for s, e in found["silences"])
+        over = sum(1 for v in r if v > found["db"])
+        print(f"        {w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}: inside a loudness pause {'yes' if in_pause else 'no'}, {over} of {len(r)} readings over the pause level, loudest {max(r):.0f} dB")
+
+
 def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
     """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists. With `detail`,
     what is around each pause over a second that the cut left; with `edits`, what is around each edit that goes through sound
@@ -480,6 +508,7 @@ def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
             print(f"        silences on the map: {quiet} | breaths: {islands} | kept: {kept}")
             if windows and rms:
                 print(f"        50 ms peaks in it: {above} of {len(windows)} over the map's level, max {max(windows):.0f} dB, median {sorted(windows)[len(windows) // 2]:.0f} dB; 10 ms levels: max {max(rms):.0f}, median {sorted(rms)[len(rms) // 2]:.0f}, min {min(rms):.0f} dB")
+            room_report(media, words, src - 1.0, hi + 1.0)
     if edits_wanted:
         for f in report.flagged[:6]:
             src = f.edge.source
