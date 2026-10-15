@@ -280,8 +280,8 @@ def pause_warning(clip: Clip) -> str | None:
 
 
 LOUDNESS_CACHE = "loudness-v1.json"
-LEVELS_CACHE = "levels10-v2.json"  # a noisy clip's loudness every 10 ms, in whole dB, with the room's rumble filtered out (LEVEL_HIGHPASS)
-LEVELS_WHOLE_CACHE = "levels10-v1.json"  # the same readings over the whole band (a release before the filter wrote exactly these)
+LEVELS_CACHE = "levels10-v2.json"  # a noisy clip's loudness every 10 ms, in tenths of a dB, with the room's rumble filtered out (LEVEL_HIGHPASS)
+LEVELS_WHOLE_CACHE = "levels10-v1.json"  # the same readings over the whole band (a release before the filter wrote these, in whole dB)
 FLATNESS_CACHE = "flatness-levels-v2.json"  # the spectral flatness of the pauses that loudness shows: tonal is music, not a room
 FLATNESS_WHOLE_CACHE = "flatness-levels-whole-v1.json"  # and of the pauses the whole-band readings show
 LEVEL_HIGHPASS = 250.0  # Hz: a room's rumble (a car, an air handler) and mains hum are below the speech band and don't count as sound in the loudness map

@@ -20,7 +20,7 @@ whisper = ["faster-whisper>=1.1"]
 # OpenAI, Ollama, LM Studio, OpenRouter and other OpenAI-compatible endpoints.
 openai = ["openai>=1.50"]
 graphics = ["playwright>=1.48"]
-dev = ["pytest>=8", "lxml>=5"]
+dev = ["pytest>=8", "pytest-timeout>=2", "lxml>=5"]
 
 [project.scripts]
 roughcut = "roughcut.cli:main"
@@ -30,6 +30,8 @@ include = ["roughcut*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test that never returns fails after this long with every thread's stack in the output, instead of holding the run until the CI job is cancelled.
+timeout = 900
 
 [tool.setuptools.package-data]
 roughcut = ["assets/fonts/*"]
