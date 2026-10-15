@@ -12,7 +12,7 @@ and end are known to the sample. The words become sentences, the sentences a few
 It prints the numbers and exits 0 unless the cut is plainly bad. Synthetic speech is cleaner than a person talking outdoors, so these
 are the best case for Whisper, not the typical one.
 
-    python .github/scripts/whisper_timing.py [--minutes 3] [--dry] [--keep DIR]
+    python .github/scripts/whisper_timing.py [--runs 4] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep]
 `--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison and the cut can be tried
 without a model.
 """
@@ -175,6 +175,14 @@ def compare(truth_words: list[dict], heard: list[dict]) -> dict[int, int]:
     return dict(pairs)
 
 
+def invented(truth: dict, heard: list[dict], at_least: float = 1.0) -> None:
+    """Words Whisper put into the long pauses (it makes up 'Thank you.' and the like over silence)."""
+    spans = [(p["after"] + 0.1, p["after"] + p["length"] - 0.1) for p in truth["pauses"] if p["length"] >= at_least]
+    found = [h for h in heard if any(a <= (h["start"] + h["end"]) / 2 <= b for a, b in spans)]
+    shown = ", ".join(repr(h["text"]) + " at %.1f s" % h["start"] for h in found[:6])
+    print(f"Whisper put {len(found)} words into the {len(spans)} pauses of {at_least:g} s or more" + (f": {shown}" if found else ""))
+
+
 def fake_heard(truth_words: list[dict], seed: int = 5) -> list[dict]:
     """--dry: the truth with the kinds of error Whisper makes."""
     rng = random.Random(seed)
@@ -249,7 +257,7 @@ def cause(edge: float, direction: int, truth_words: list[dict], heard: list[dict
     )
 
 
-def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None, brief: bool = False) -> dict:
+def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None, brief: bool = False, show: int = 12) -> dict:
     kept = kept_ranges(next(out.glob("*.fcpxml")))
     audio = load_audio(talk)
     words = truth["words"]
@@ -285,30 +293,73 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
             if (in_ or out_) and heard is not None:
                 flagged.append((edge, "starts" if direction > 0 else "ends", "inside" if in_ else "outside", cause(edge, direction, words, heard, matched or {})))
     n = len(words)
+
+    def out_time(t: float) -> float:  # where an instant of the source falls in the cut
+        total = 0.0
+        for a, b in kept:
+            if t >= b:
+                total += b - a
+            elif t > a:
+                return total + t - a
+            else:
+                break
+        return total
+
+    played = [w for w in words if sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept) >= 0.5 * (w["end"] - w["start"])]
+    pauses = [out_time(w1["start"]) - out_time(w0["end"]) for w0, w1 in zip(played, played[1:])]
     result = {
         "whole": whole / n, "clipped": clipped / n, "gone": gone / n, "in": inside_speech / max(edges, 1), "out": outside_speech / max(edges, 1),
-        "edges": edges, "kept": sum(b - a for a, b in kept),
+        "edges": edges, "kept": sum(b - a for a, b in kept), "longest": max(pauses, default=0.0), "over1": sum(1 for g in pauses if g > 1.0),
     }
     if brief:
         return result
     print(
         f"{label}: {n} words said: {100 * result['whole']:.1f}% whole, {100 * result['clipped']:.1f}% clipped by >15 ms, {100 * result['gone']:.1f}% not in the cut; "
-        f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS)"
+        f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS); "
+        f"the longest pause left between words is {result['longest']:.2f} s, {result['over1']} are over a second"
     )
-    for edge, kind, where, why in flagged[:12]:
+    for edge, kind, where, why in flagged[:show]:
         print(f"    a cut {kind} at {edge:.2f} s with speech {where}: {why}")
-    if len(flagged) > 12:
-        print(f"    ... and {len(flagged) - 12} more")
+    if len(flagged) > show:
+        print(f"    ... and {len(flagged) - show} more")
+    return result
+
+
+def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
+    """The cut of a recording whose words aren't known (a person reading): how many cut edges have sound on the side that is cut
+    away (a word's edge thrown away) or on the side that stays (a cut that starts or ends inside speech), by the audio alone: a
+    10 ms window counts as speech when it is 15 dB above this recording's quietest tenth."""
+    kept = kept_ranges(next(out.glob("*.fcpxml")))
+    audio = load_audio(talk)
+    win = int(0.010 * SR)
+    n = len(audio) // win
+    r = np.sqrt(np.mean(audio[: n * win].astype(np.float64).reshape(n, win) ** 2, axis=1))
+    floor = float(np.percentile(r, 10))
+    loud = r > max(floor * 10 ** (15 / 20), 1e-4)
+    inside = outside = edges = 0
+    for k, (a, b) in enumerate(kept):
+        for edge, direction in ((a, +1), (b, -1)):
+            if (direction > 0 and k == 0 and a < 0.05) or (direction < 0 and b > len(audio) / SR - 0.05):
+                continue
+            i = min(max(int(round(edge * 100)), 1), n - 1)
+            inner, outer = (loud[i], loud[i - 1]) if direction > 0 else (loud[i - 1], loud[i])
+            edges += 1
+            inside += bool(inner)
+            outside += bool(outer)
+    result = {"in": inside / max(edges, 1), "out": outside / max(edges, 1), "edges": edges, "kept": sum(b - a for a, b in kept)}
+    if label:
+        print(f"{label}: of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away; kept {result['kept']:.0f} s (quietest tenth {db(floor):.0f} dBFS)")
     return result
 
 
 # ------------------------------------------------------------------ main
 
 
-RUNS = [  # (voice, words per minute, seed)
-    (None, 185, 11),
-    ("Daniel", 170, 12),
-    ("Alex", 200, 13),
+RUNS = [  # (voice, words per minute, seed, minutes)
+    (None, 185, 11, 3),
+    ("Daniel", 170, 12, 3),
+    ("Alex", 200, 13, 3),
+    (None, 175, 14, 12),  # a long recording: Whisper works through it a window at a time
 ]
 
 
@@ -352,7 +403,7 @@ def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *,
         raise SystemExit(1)
 
 
-def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, n: int) -> dict | None:
+def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, n: int) -> dict | None:
     shoot = shoots / f"shoot{n}"
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
     kept_truth, kept_heard = shoot / "truth.json", shoot / "heard.json"
@@ -363,7 +414,7 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         engine = ["--transcriber", "none"]
     else:
         try:
-            truth = make_talk(shoot, a.minutes, seed, voice, rate, a.noise_db)
+            truth = make_talk(shoot, a.minutes or minutes, seed, voice, rate, a.noise_db)
         except subprocess.CalledProcessError:
             if voice is None:
                 raise
@@ -386,6 +437,7 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         engine = ["--transcriber", "none"]
     print("\n== Whisper's word times against the words that were said")
     matched = compare(truth["words"], heard)
+    invented(truth, heard)
     print("\n== the cut, made from that transcript")
     results = {}
     for style in ("tight", "medium"):
@@ -393,78 +445,151 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         build(shoot, out, style, root / "cache", engine)
         results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
     dump(n, truth, heard, root / f"out{n}_tight")
-    return {"n": n, "shoot": shoot, "truth": truth, "results": results}
+    return {"n": n, "shoot": shoot, "truth": truth, "heard": heard, "matched": matched, "results": results}
+
+
+READING = "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3"  # a public-domain reading (LibriVox)
+
+
+def human_clip(shoots: Path, a: argparse.Namespace) -> Path | None:
+    """A few minutes of a person reading, as the same kind of MOV; None when it can't be had (no network)."""
+    shoot = shoots / "reading"
+    mov = shoot / "talk.mov"
+    if mov.exists():
+        return shoot
+    shoot.mkdir(parents=True, exist_ok=True)
+    mp3 = shoot / "reading.mp3"
+    if a.reading_file:
+        mp3 = a.reading_file
+    elif not mp3.exists():
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(urllib.request.Request(READING, headers={"User-Agent": "roughcut-timing"}), timeout=60) as r:
+                mp3.write_bytes(r.read())
+        except Exception as e:  # no network, a moved file: the rest still runs
+            print(f"\n#### the reading could not be fetched ({e}); skipped")
+            return None
+    seconds = 60 if a.dry else 240
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", "90", "-t", str(seconds), "-i", str(mp3), "-f", "lavfi", "-i", f"color=c=0x203040:size=480x270:rate=30000/1001:duration={seconds}",
+         "-map", "1:v", "-map", "0:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest", str(mov)],
+        check=True,
+    )
+    return shoot
+
+
+def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
+    shoot = human_clip(shoots, a)
+    if shoot is None:
+        return None
+    model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
+    print("\n#### a person reading (public domain): Whisper's words are the only transcript, the cut is judged by the audio alone", flush=True)
+    if a.dry:  # no model: the cut goes by the silence map alone
+        print("dry run: no transcript")
+    elif not (shoot / "talk.json").exists():
+        from roughcut.transcribe import Transcriber
+
+        print(f"transcribing with {model} ...", flush=True)
+        tr = Transcriber("mlx", model=model, verbatim=True).transcribe(shoot / "talk.mov")
+        (shoot / "talk.json").write_text(json.dumps({"words": [{"start": w.start, "end": w.end, "text": w.text, "prob": w.prob} for w in tr.words]}))
+    if (shoot / "talk.json").exists():
+        print(f"{len(json.loads((shoot / 'talk.json').read_text())['words'])} words heard")
+    results = {}
+    for style in ("tight", "medium"):
+        out = root / f"outR_{style}"
+        build(shoot, out, style, root / "cache", ["--transcriber", "none"])
+        results[style] = judge_audio(out, shoot / "talk.mov", style)
+    return {"shoot": shoot, "results": results}
 
 
 # What the sweep tries on the tight cut (and the medium one at the end): the window after a word's end in which a sound still going is
 # taken for its tail, and the transcript gap that is not taken for a pause when the silence map hears sound through it.
-SWEEP = [  # (pacing, end slack, fake gap, pad_out or None)
-    ("tight", 0.10, 0.00, None),  # the cut before the fix
-    ("tight", 0.10, 0.30, None),
-    ("tight", 0.25, 0.00, None),
-    ("tight", 0.35, 0.00, None),
-    ("tight", 0.50, 0.00, None),
-    ("tight", 0.25, 0.30, None),
-    ("tight", 0.35, 0.30, None),
-    ("tight", 0.50, 0.30, None),
-    ("tight", 0.35, 0.15, None),
-    ("tight", 0.35, 0.50, None),
-    ("tight", 0.35, 0.30, 0.16),
-    ("tight", 0.35, 0.30, 0.20),
-    ("medium", 0.10, 0.00, None),
-    ("medium", 0.35, 0.30, None),
+SWEEP = [  # (pacing, end slack, fake gap, pad_out or None, start slack or None, pad_in or None)
+    ("tight", 0.10, 0.00, None, None, None),  # the cut before the gap rule
+    ("tight", 0.10, 0.30, None, None, None),  # as shipped
+    ("tight", 0.25, 0.30, None, None, None),
+    ("tight", 0.10, 0.30, None, 0.20, None),
+    ("tight", 0.10, 0.30, None, None, 0.10),
+    ("tight", 0.10, 0.30, 0.16, None, None),
+    ("tight", 0.10, 0.30, 0.20, None, None),
+    ("tight", 0.25, 0.30, 0.16, 0.20, 0.08),
+    ("medium", 0.10, 0.00, None, None, None),
+    ("medium", 0.10, 0.30, None, None, None),
 ]
 
 
 @contextlib.contextmanager
-def tuned(style: str, end_slack: float, fake_gap: float, pad_out: float | None):
+def tuned(style: str, end_slack: float, fake_gap: float, pad_out: float | None, start_slack: float | None = None, pad_in: float | None = None):
     from roughcut import timeline
 
-    saved = (getattr(timeline, "EDGE_SLACK_END", None), getattr(timeline, "FAKE_GAP", None), timeline.STYLES[style])
+    saved = (timeline.EDGE_SLACK_END, getattr(timeline, "FAKE_GAP", None), timeline.STYLES[style], timeline.EDGE_SLACK)
     try:
         timeline.EDGE_SLACK_END = end_slack
         if saved[1] is not None:
             timeline.FAKE_GAP = fake_gap
-        if pad_out is not None:
-            timeline.STYLES[style] = dataclasses.replace(saved[2], pad_out=pad_out)
+        if start_slack is not None:
+            timeline.EDGE_SLACK = start_slack
+        changes = {k: v for k, v in (("pad_out", pad_out), ("pad_in", pad_in)) if v is not None}
+        if changes:
+            timeline.STYLES[style] = dataclasses.replace(saved[2], **changes)
         yield
     finally:
         timeline.STYLES[style] = saved[2]
-        if saved[0] is not None:
-            timeline.EDGE_SLACK_END = saved[0]
+        timeline.EDGE_SLACK_END = saved[0]
+        timeline.EDGE_SLACK = saved[3]
         if saved[1] is not None:
             timeline.FAKE_GAP = saved[1]
 
 
-def sweep(root: Path, clips: list[dict]) -> None:
+def sweep(root: Path, clips: list[dict], reading: dict | None) -> None:
     print("\n#### the same transcripts cut with other settings (every clip, the cut measured against the audio)")
-    for k, (style, end_slack, fake_gap, pad_out) in enumerate(SWEEP):
+    for k, (style, end_slack, fake_gap, pad_out, start_slack, pad_in) in enumerate(SWEEP):
         rows = []
         for c in clips:
             out = root / f"sw{k}_{c['n']}"
-            with tuned(style, end_slack, fake_gap, pad_out):
+            with tuned(style, end_slack, fake_gap, pad_out, start_slack, pad_in):
                 build(c["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             rows.append(judge(out, c["shoot"] / "talk.mov", c["truth"], "", brief=True))
+        person = ""
+        if reading is not None:
+            out = root / f"sw{k}_reading"
+            with tuned(style, end_slack, fake_gap, pad_out, start_slack, pad_in):
+                build(reading["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
+            j = judge_audio(out, reading["shoot"] / "talk.mov")
+            person = f"   | a person reading: edges inside speech {100 * j['in']:4.1f}%, thrown away {100 * j['out']:4.1f}%, kept {j['kept']:5.0f} s"
         m = {key: float(np.mean([r[key] for r in rows])) for key in ("whole", "clipped", "gone", "in", "out", "kept")}
-        pad = f", pad_out {pad_out:g}" if pad_out is not None else ""
+        pad = "".join(f", {name} {v:g}" for name, v in (("pad_out", pad_out), ("start slack", start_slack), ("pad_in", pad_in)) if v is not None)
         per_clip = ", ".join("%.1f" % (100 * r["whole"]) for r in rows)
         print(
             f"{style:<6} end window +{end_slack:.2f} s, transcript gap +{fake_gap:.2f} s{pad}: words whole {100 * m['whole']:5.1f}%, clipped {100 * m['clipped']:5.1f}%, "
             f"not in the cut {100 * m['gone']:4.1f}%; edges inside speech {100 * m['in']:5.1f}%, a word's edge thrown away {100 * m['out']:5.1f}%; kept {m['kept']:6.1f} s"
-            f"   (whole per clip: {per_clip})",
+            f"   (whole per clip: {per_clip}){person}",
             flush=True,
         )
 
 
+def details(root: Path, clips: list[dict]) -> None:
+    """The tight cut as it is shipped, with every flagged edge named: the word it cuts and what Whisper said about it."""
+    print("\n#### the tight cut as shipped: every cut edge in speech, and why")
+    for c in clips:
+        out = root / f"detail{c['n']}"
+        build(c["shoot"], out, "tight", root / "cache", ["--transcriber", "none"], in_process=True)
+        judge(out, c["shoot"] / "talk.mov", c["truth"], f"clip {c['n']}", c["heard"], c["matched"], show=40)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--minutes", type=float, default=3)
+    ap.add_argument("--minutes", type=float, default=None, help="every clip this long (default: each its own, 3 minutes and one of 12)")
     ap.add_argument("--noise-db", type=float, default=-42)
     ap.add_argument("--runs", type=int, default=1, help="how many clips (different voices and speeds)")
     ap.add_argument("--dry", action="store_true", help="no model: the transcript is the truth with timing errors added")
     ap.add_argument("--keep", type=Path, default=None)
     ap.add_argument("--shoots", type=Path, default=None, help="where the speech and Whisper's transcript of it are kept for the next run (default: with the cuts)")
+    ap.add_argument("--data", action="store_true", help="print each clip's words said and heard and its silence map as lines of the log, to cut them again offline")
     ap.add_argument("--sweep", action="store_true", help="also cut the same transcripts with other settings and compare")
+    ap.add_argument("--reading", action="store_true", help="also cut a few minutes of a person reading (public domain, fetched), judged by the audio alone")
+    ap.add_argument("--reading-file", type=Path, default=None, help="with --reading: this audio file instead of fetching one")
     a = ap.parse_args()
     root = a.keep or Path(tempfile.mkdtemp(prefix="whisper-timing-"))
     shoots = a.shoots or root
@@ -472,8 +597,8 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     print(f"speech by {'say' if shutil.which('say') else 'espeak-ng'} in {shoots}, cuts in {root}", flush=True)
     done = []
-    for n, (voice, rate, seed) in enumerate(RUNS[: a.runs], 1):
-        r = one_run(root, shoots, a, voice, rate, seed, n)
+    for n, (voice, rate, seed, minutes) in enumerate(RUNS[: a.runs], 1):
+        r = one_run(root, shoots, a, voice, rate, seed, minutes, n)
         if r:
             done.append(r)
     all_results = [r["results"] for r in done]
@@ -485,10 +610,13 @@ def main() -> int:
             print(f"{style}: {len(rs)} clips; words whole {100 * m['whole']:.1f}%, clipped {100 * m['clipped']:.1f}%, not in the cut {100 * m['gone']:.1f}%; cut edges inside speech {100 * m['in']:.1f}%, a word's edge thrown away {100 * m['out']:.1f}%")
     ok = bool(all_results) and all(r[st]["whole"] >= 0.80 and r[st]["in"] <= 0.25 and r[st]["out"] <= 0.25 for r in all_results for st in r)
     print("\nwhisper timing: " + ("done" if ok else "the cut is clearly worse than it should be (see above)"))
+    reading = one_reading(root, shoots, a) if a.reading else None
     if a.sweep and done:
-        sweep(root, done)
-    print("\n#### data (gzip + base64 of one JSON per clip: what was said, what Whisper heard, the silence map)")
-    print("\n".join(DATA_LINES), flush=True)
+        sweep(root, done, reading)
+        details(root, done)
+    if a.data:
+        print("\n#### data (gzip + base64 of one JSON per clip: what was said, what Whisper heard, the silence map)")
+        print("\n".join(DATA_LINES), flush=True)
     return 0  # a measurement, not a gate
 
 
