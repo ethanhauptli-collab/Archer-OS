@@ -18,7 +18,7 @@ jobs:
   variants:
     name: Whisper, asked in several ways (Apple Silicon)
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -32,4 +32,4 @@ jobs:
           path: ${{ runner.temp }}/whisper-shoots
           key: whisper-shoots-v5
       - name: Transcribe each clip in each way
-        run: python .github/scripts/whisper_variants.py --shoots "$RUNNER_TEMP/whisper-shoots"
+        run: python .github/scripts/whisper_variants.py --diff --shoots "$RUNNER_TEMP/whisper-shoots"

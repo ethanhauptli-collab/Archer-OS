@@ -703,8 +703,12 @@ SWEEP = [  # (pacing, end reach, fake gap, pad_out or None, start slack or None,
     ("tight", 0.80, 0.00, None, None, None, 0.00),  # neither
     ("tight", 0.80, 0.45, 0.16, None, None, None),
     ("tight", 0.80, 0.45, 0.16, None, None, 0.15),
+    ("tight", 0.80, 0.45, None, 0.20, None, None),  # a word the transcript puts late: how far back a silence's end is taken for its start
+    ("tight", 0.80, 0.45, None, 0.30, None, None),
     ("medium", 0.80, 0.45, None, None, None, None),  # as shipped
     ("medium", 0.80, 0.45, None, None, None, 0.00),
+    ("medium", 0.80, 0.45, None, 0.20, None, None),
+    ("medium", 0.80, 0.45, None, 0.30, None, None),
 ]
 
 
@@ -729,7 +733,9 @@ def tuned(style: str, reach: float, fake_gap: float, pad_out: float | None, star
             timeline.EARLY_END = saved[4]
 
 
-def sweep(root: Path, clips: list[dict], reading: dict | None) -> None:
+def sweep(root: Path, clips: list[dict], reading: dict | None, readings: list[dict] | None = None) -> None:
+    from roughcut import cutcheck
+
     print("\n#### the same transcripts cut with other settings (every clip, the cut measured against the audio)")
     for k, (style, reach, fake_gap, pad_out, start_slack, pad_in, early_end) in enumerate(SWEEP):
         rows = []
@@ -745,13 +751,29 @@ def sweep(root: Path, clips: list[dict], reading: dict | None) -> None:
                 build(reading["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             j = judge_audio(out, reading["shoot"] / "talk.mov")
             person = f"   | a person reading: edges inside speech {100 * j['in']:4.1f}%, thrown away {100 * j['out']:4.1f}%, kept {j['kept']:5.0f} s"
+        people = ""
+        if readings:
+            edges = inside = edits = through = 0
+            longest = 0.0
+            for r in readings:
+                out = root / f"sw{k}_{r['folder']}"
+                with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in, early_end):
+                    build(r["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
+                j = judge_audio(out, r["shoot"] / "talk.mov")
+                edges += j["edges"]
+                inside += round(j["in"] * j["edges"])
+                rep = cutcheck.check(out)
+                edits += rep.edits
+                through += len(rep.flagged)
+                longest = max(longest, rep.longest_pause[0] if rep.longest_pause else 0.0)
+            people = f"   | {len(readings)} readings: edges inside speech {100 * inside / max(edges, 1):4.1f}% of {edges}, through sound {through} of {edits} edits, longest pause {longest:.2f} s"
         m = {key: float(np.mean([r[key] for r in rows])) for key in ("whole", "clipped", "gone", "in", "out", "kept")}
         pad = "".join(f", {name} {v:g}" for name, v in (("pad_out", pad_out), ("start slack", start_slack), ("pad_in", pad_in), ("early end", early_end)) if v is not None)
         per_clip = ", ".join("%.1f" % (100 * r["whole"]) for r in rows)
         print(
             f"{style:<6} end reach {reach:.2f} s, transcript gap +{fake_gap:.2f} s{pad}: words whole {100 * m['whole']:5.1f}%, clipped {100 * m['clipped']:5.1f}%, "
             f"not in the cut {100 * m['gone']:4.1f}%; edges inside speech {100 * m['in']:5.1f}%, a word's edge thrown away {100 * m['out']:5.1f}%; kept {m['kept']:6.1f} s"
-            f"   (whole per clip: {per_clip}){person}",
+            f"   (whole per clip: {per_clip}){person}{people}",
             flush=True,
         )
 
@@ -823,7 +845,7 @@ def main() -> int:
                 )
             print(line)
     if a.sweep and done:
-        sweep(root, done, reading)
+        sweep(root, done, reading, readings)
         details(root, done)
     if a.data:
         print("\n#### data (gzip + base64 of one JSON per clip: what was said, what Whisper heard, the silence map)")

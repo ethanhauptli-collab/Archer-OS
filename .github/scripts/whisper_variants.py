@@ -79,14 +79,34 @@ def uncovered(words, sound: np.ndarray, reach: float = 0.25) -> tuple[float, lis
     return float(free.sum()) * 0.01, runs
 
 
+def differences(base, other, limit: int = 12) -> list[str]:
+    """What `other` has that `base` hasn't and the other way round, as chunks with the time they are at."""
+    import difflib
+    import re
+
+    def norm(w) -> str:
+        return re.sub(r"[^a-z0-9']", "", w.text.lower())
+
+    a, b = [norm(w) for w in base], [norm(w) for w in other]
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        when = base[i1].start if i2 > i1 else (other[j1].start if j1 < len(other) else other[-1].end)
+        out.append(f"{when:.1f} s: {' '.join(w.text.strip() for w in base[i1:i2]) or '-'}  ->  {' '.join(w.text.strip() for w in other[j1:j2]) or '-'}")
+    return out[:limit] + ([f"... and {len(out) - limit} more"] if len(out) > limit else [])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--shoots", type=Path, required=True)
-    ap.add_argument("--clips", default="reading,reading-austen,reading-doyle,reading-twain,shoot2,shoot6,shoot7")
+    ap.add_argument("--clips", default="reading,reading-austen,reading-doyle,reading-twain,shoot1,shoot2,shoot3,shoot4,shoot5,shoot6,shoot7")
+    ap.add_argument("--diff", action="store_true", help="for a clip with no truth, list what each way of asking changed in the words, against the first")
     a = ap.parse_args()
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
     totals: dict[str, list[float]] = {name: [0.0, 0.0, 0.0] for name, _, _ in VARIANTS}  # sound uncovered, all sound, words
     for clip in a.clips.split(","):
+        shipped = None
         mov = a.shoots / clip / "talk.mov"
         if not mov.exists():
             print(f"\n#### {clip}: not here; skipped")
@@ -106,8 +126,13 @@ def main() -> int:
             totals[name][0] += free
             totals[name][1] += float(sound.sum()) * 0.01
             totals[name][2] += len(words)
+            if shipped is None:
+                shipped = words
             holes = ", ".join(f"{s:.1f}-{e:.1f} ({t:.1f} s)" for s, e, t in runs[:8]) or "none"
             print(f"  {name}: {len(words)} words, {free:.1f} s of sound with no word near it ({100 * free / (float(sound.sum()) * 0.01):.1f}%), {len(runs)} runs of 0.3 s or more: {holes}   [{took:.0f} s]", flush=True)
+            if truth is None and words is not shipped and a.diff:
+                for line in differences(shipped, words):
+                    print(f"      {line}")
             if truth is not None:
                 heard = [{"text": w.text, "start": w.start, "end": w.end} for w in words]
                 with contextlib.redirect_stdout(io.StringIO()) as held:
