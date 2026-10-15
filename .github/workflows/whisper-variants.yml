@@ -30,6 +30,6 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/whisper-shoots
-          key: whisper-shoots-v5
+          key: whisper-shoots-v6
       - name: Transcribe each clip in each way
         run: python .github/scripts/whisper_variants.py --diff --shoots "$RUNNER_TEMP/whisper-shoots"

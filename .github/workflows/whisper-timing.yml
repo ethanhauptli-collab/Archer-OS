@@ -38,7 +38,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/whisper-shoots
-          key: whisper-shoots-v5
-          restore-keys: whisper-shoots-v4
+          key: whisper-shoots-v6
       - name: Speech by macOS `say`, transcribed by mlx-whisper, cut
         run: python .github/scripts/whisper_timing.py --runs 7 --sweep --reading --shoots "$RUNNER_TEMP/whisper-shoots"

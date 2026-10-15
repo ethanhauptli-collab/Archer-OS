@@ -137,8 +137,11 @@ class Transcriber:
             # Conditioning on its own (disfluent) output carries the verbatim
             # style forward; the silence guard below curbs runaway repeats.
             condition_on_previous_text=self.verbatim,
-            # Skip long silent stretches where Whisper tends to invent text.
-            hallucination_silence_threshold=2.0,
+            # No hallucination_silence_threshold: it is meant to skip silent stretches where Whisper invents text, but on real
+            # speech it also skipped the words after a long token (an em dash joining two words), leaving 2 s holes in the
+            # transcript that the cut then removed as dead air (a person reading, four of them in four minutes; the same
+            # clips without it: no holes, and no more made-up words in the pauses). What Whisper still writes over silence is
+            # dropped by the clip's own silence map and loudness (analyze.py).
         )
         if self.language:
             kwargs["language"] = self.language

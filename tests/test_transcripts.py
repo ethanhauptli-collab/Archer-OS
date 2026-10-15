@@ -122,6 +122,7 @@ def test_mlx_backend_glue(monkeypatch, tmp_path):
     assert seen["path_or_hf_repo"] == "mlx-community/whisper-large-v3-turbo"
     # Verbatim mode conditions on previous text so the um-keeping style lasts past 30s.
     assert seen["word_timestamps"] is True and seen["condition_on_previous_text"] is True
+    assert "hallucination_silence_threshold" not in seen  # it left 2 s holes in real speech
     assert seen["initial_prompt"] == VERBATIM_PROMPT and seen["language"] == "en"
     assert [w.text for w in t.words] == ["Hi,", "um,", "there."]
     assert t.words[1].is_filler
