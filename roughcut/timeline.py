@@ -346,7 +346,7 @@ class _ClipIndex:
     pauses: _Spans  # the clusters' spans
     spoken: _Spans  # every transcribed word
     seg_pos: dict[str, tuple[int, int]]  # segment ID -> (its index in the clip, clip-wide index of its first word)
-    shows_pauses: bool = False  # the silence map finds this clip's pauses (a fifth of a percent is not enough to say so, three is)
+    shows_pauses: bool = False  # the silence map finds this clip's pauses: two or more silences, three percent of the clip quiet (pause_warning's test)
 
 
 def _index(clip: Clip) -> _ClipIndex:
