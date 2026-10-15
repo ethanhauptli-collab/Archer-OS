@@ -137,10 +137,10 @@ def test_a_raised_level_never_deletes_or_cuts_real_words(noisy_talk, tmp_path, m
     from roughcut.plan import heuristic_plan
     from roughcut.timeline import build_timeline
 
-    monkeypatch.setattr(ffmpeg_ops, "noise_threshold", lambda peaks: (-3.0, -30.0))  # absurd: above the speech
+    monkeypatch.setattr(ffmpeg_ops, "noise_threshold", lambda peaks: (-20.0, -30.0))  # raised: the tremolo's troughs sit under it
     analysis = analyze([noisy_talk / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache"))
     clip = analysis.clips[0]
-    assert clip.silence_db == -3.0
+    assert clip.silence_db == -20.0
     assert sum(len(s.words) for s in clip.segments) == len(whisper_words(SENTENCES))  # nothing dropped
     tl = build_timeline(heuristic_plan(analysis), analysis, style=STYLES["medium"], name="t")
     kept = [(float(s.src_in), float(s.src_in + s.frames * tl.frame_duration)) for s in tl.spine]

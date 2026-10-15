@@ -14,7 +14,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .textio import Stalled, bounded
-from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions
+from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, split_words_in_silence
 from .transcribe import Transcriber, TranscriptionError, Transcript, find_sidecar, load_sidecar
 
 ROLE_LABELS = {
@@ -258,6 +258,11 @@ def assign_ids(infos: list[MediaInfo], remote: frozenset[str] = frozenset()) -> 
     return out
 
 
+def shows_pauses(silences, duration: float) -> bool:
+    """Does a silence map find a clip's pauses? Two or more, and three percent of the clip quiet (the timeline's test too)."""
+    return len(silences) >= 2 and sum(e - s for s, e in silences) >= 0.03 * duration
+
+
 def pause_warning(clip: Clip) -> str | None:
     """Talking footage with no pauses found means no dead air can be cut: say so, and why."""
     if clip.role not in ("aroll", "voiceover") or clip.duration < 10:
@@ -274,6 +279,7 @@ def pause_warning(clip: Clip) -> str | None:
 
 
 LOUDNESS_CACHE = "loudness-v1.json"
+LEVELS_CACHE = "levels10-v1.json"  # a noisy clip's loudness every 10 ms, in whole dB
 
 
 def probe_cached(path: Path, cache: Cache) -> MediaInfo:
@@ -481,6 +487,7 @@ def analyze(
                 warnings.append(f"{clip.media.name}: --music takes an audio file; this one has pictures, so it's used as an ordinary clip")
 
     default_maps: dict[str, list[tuple[float, float]]] = {}
+    rooms: dict[str, list[tuple[float, float]]] = {}  # clip id -> the pauses its own loudness shows (a noisy room's)
 
     def _silence_at(m: MediaInfo, db: float) -> list[tuple[float, float]]:
         key = f"silence{db:g}.json"
@@ -489,6 +496,27 @@ def analyze(
             cached = ffmpeg_ops.detect_silences(Path(m.path), float(m.duration), noise_db=db)
             cache.put(m.fingerprint, key, cached)
         return [tuple(s) for s in cached]
+
+    def _levels(m: MediaInfo) -> list[float]:
+        """The clip's loudness every 10 ms, in whole dB (the same readings whether they were just made or come from the cache)."""
+        cached = cache.get(m.fingerprint, LEVELS_CACHE)
+        if cached is None:
+            cached = {"window": ffmpeg_ops.LEVEL_WINDOW, "db": [round(v) for v in ffmpeg_ops.window_rms(Path(m.path), ffmpeg_ops.LEVEL_WINDOW)]}
+            cache.put(m.fingerprint, LEVELS_CACHE, cached)
+        return [float(v) for v in cached.get("db", [])]
+
+    def _by_level(clip: Clip) -> None:
+        """A raised silence level means a noisy room. Its own loudness tells the room from the speech where silencedetect's single
+        samples can't (a click splits a pause, a gust cuts it to pieces): the pauses it finds stand in for a map that finds almost
+        none, and the words Whisper wrote over nothing but the room are dropped once there is a transcript."""
+        m = clip.media
+        levels = _levels(m)
+        found = ffmpeg_ops.level_silences(levels, float(m.duration))
+        if found is None:
+            return
+        rooms[clip.id] = [tuple(s) for s in found["silences"]]
+        if not shows_pauses(clip.silences, float(m.duration)) and shows_pauses(found["silences"], float(m.duration)):
+            clip.silences, clip.silence_db = found["silences"], found["db"]
 
     def _silence(clip: Clip) -> None:
         m = clip.media
@@ -508,6 +536,7 @@ def analyze(
         clip.silences = _silence_at(m, clip.silence_db)
         if clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB:
             default_maps[clip.id] = _silence_at(m, ffmpeg_ops.DEFAULT_NOISE_DB)
+            _by_level(clip)
 
     def _measure(clip: Clip) -> None:
         _silence(clip)
@@ -578,6 +607,11 @@ def analyze(
             # Only true silence proves a word was invented. A raised level (music bed, loud
             # room) can sit above a quiet real word, so it never deletes words.
             words = drop_words_in_silence(transcript.words, default_maps.get(clip.id, clip.silences))
+            if clip.id in rooms:
+                words, invented = split_words_in_silence(words, rooms[clip.id])
+                if invented:
+                    shown = ", ".join(f"{w.text.strip()!r} at {w.start:.1f} s" for w in invented[:4])
+                    log(f"{m.name}: dropped {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})")
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:

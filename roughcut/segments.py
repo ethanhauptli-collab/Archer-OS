@@ -49,16 +49,21 @@ class Segment:
         )
 
 
-def drop_words_in_silence(words: list[Word], silences: list[tuple[float, float]], tolerance: float = 0.05) -> list[Word]:
-    """Whisper sometimes invents words over silence; remove any fully inside one."""
+def split_words_in_silence(words: list[Word], silences: list[tuple[float, float]], tolerance: float = 0.05) -> tuple[list[Word], list[Word]]:
+    """(the words kept, the words dropped): Whisper sometimes invents words over silence, so any word fully inside one goes."""
     if not silences:
-        return words
-    kept = []
+        return words, []
+    kept: list[Word] = []
+    dropped: list[Word] = []
     for w in words:
         inside = any(s - tolerance <= w.start and w.end <= e + tolerance for s, e in silences)
-        if not inside:
-            kept.append(w)
-    return kept
+        (dropped if inside else kept).append(w)
+    return kept, dropped
+
+
+def drop_words_in_silence(words: list[Word], silences: list[tuple[float, float]], tolerance: float = 0.05) -> list[Word]:
+    """Whisper sometimes invents words over silence; remove any fully inside one."""
+    return split_words_in_silence(words, silences, tolerance)[0]
 
 
 def build_segments(

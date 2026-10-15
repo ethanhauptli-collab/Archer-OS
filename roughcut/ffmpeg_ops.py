@@ -244,6 +244,72 @@ def detect_silences(
     return parse_silencedetect(proc.stderr, duration)
 
 
+LEVEL_WINDOW = 0.01  # seconds per loudness reading of a clip's own level map
+LEVEL_FLOOR_LIMIT = -75.0  # a recording quieter than this has nothing in its pauses worth telling apart
+LEVEL_MIN_SEPARATION = 12.0  # dB between the room and the loud speech below which the two can't be told apart
+LEVEL_CLICK_OVER = 14.0  # dB over the room: a short rise under this inside a pause is a click, not a sound
+LEVEL_CLICK_MAX = 0.05  # seconds a click lasts at the most
+
+
+def level_threshold(levels: list[float]) -> tuple[float, float] | None:
+    """(the level a 10 ms reading stays under in the room's pauses, the room's floor) from a clip's own loudness readings, or None
+    where the loud speech is within LEVEL_MIN_SEPARATION of the room (or there is too little to go by): sound and background can't
+    be told apart there.
+
+    The floor is the quietest tenth of the readings, the speech level the loudest twentieth, and the pauses are the floor plus a
+    margin that grows with the gap between the two, up to 6 dB: room noise moves a few dB from one reading to the next, a word
+    doesn't stay that close to the room."""
+    n = len(levels)
+    if n < 200:  # under two seconds
+        return None
+    ordered = sorted(levels)
+    floor = max(ordered[n // 10], LEVEL_FLOOR_LIMIT)
+    separation = ordered[min(n - 1, (n * 95) // 100)] - floor
+    if separation < LEVEL_MIN_SEPARATION:
+        return None
+    return round(floor + min(6.0, max(3.0, 0.35 * separation)), 1), floor
+
+
+def level_silences(levels: list[float], duration: float, min_silence: float = 0.35, window: float = LEVEL_WINDOW) -> dict | None:
+    """The pauses of a noisy recording from its own 10 ms loudness readings: {"db": the pause level, "floor": the room, "silences":
+    [(start, end)]}, or None where sound and room can't be told apart.
+
+    A click, a pop or a puff of air inside a pause (a short rise that stays well under speech) does not end it: silencedetect
+    compares single samples with its level, so one click splits a pause in two and a noisy room's peaks cut it to pieces."""
+    found = level_threshold(levels)
+    if found is None:
+        return None
+    quiet_below, floor = found
+    n = len(levels)
+    quiet = [v <= quiet_below for v in levels]
+    click, longest = floor + LEVEL_CLICK_OVER, max(1, round(LEVEL_CLICK_MAX / window))
+    i = 0
+    while i < n:
+        if quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not quiet[j]:
+            j += 1
+        if 0 < i and j < n and j - i <= longest and max(levels[i:j]) <= click:
+            quiet[i:j] = [True] * (j - i)
+        i = j
+    silences: list[tuple[float, float]] = []
+    i = 0
+    while i < n:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and quiet[j]:
+            j += 1
+        start, end = i * window, min(duration, j * window)
+        if end - start >= min_silence:
+            silences.append((round(start, 3), round(end, 3)))
+        i = j
+    return {"db": quiet_below, "floor": floor, "silences": silences}
+
+
 def sound_regions(
     silences: list[tuple[float, float]], duration: float, min_len: float = 0.3
 ) -> list[tuple[float, float]]:

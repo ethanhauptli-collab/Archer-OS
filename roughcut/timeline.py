@@ -354,13 +354,29 @@ class _ClipIndex:
     shows_pauses: bool = False  # the silence map finds this clip's pauses: two or more silences, three percent of the clip quiet (pause_warning's test)
 
 
+CLICK_GAP = 0.04  # sound shorter than this between two silences is a click, not a word: they are one pause
+
+
+def _join_close(silences) -> list[tuple[float, float]]:
+    """The silence map with a pause a click split put back together. silencedetect compares single samples with its level, so one
+    click in the middle of a pause ends one silence and starts the next at the same moment; each half is then judged on its own
+    (and the second never cut, as the piece already begins where the first ended)."""
+    out: list[tuple[float, float]] = []
+    for s, e in sorted(silences):
+        if out and s - out[-1][1] < CLICK_GAP:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
 def _index(clip: Clip) -> _ClipIndex:
     # Kept on the clip and rebuilt when its silences, breaths or segments change.
     key = (id(clip.segments), len(clip.segments), tuple(clip.silences), tuple(clip.breaths))
     memo = clip.__dict__.get("_timeline_index")
     if memo is not None and memo[0] == key:
         return memo[1]
-    silences = _Spans(clip.silences)
+    silences = _Spans(_join_close(clip.silences))
     spoken = _Spans((w.start, w.end) for seg in clip.segments for w in seg.words)
     breaths = sorted(clip.breaths)
 
