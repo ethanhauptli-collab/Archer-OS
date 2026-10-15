@@ -49,8 +49,9 @@ STYLES = {
 # guess: when a silence ends a little before the first word (EDGE_SLACK plus the padding) or begins after the last one (END_REACH
 # after it), and no neighbouring word's sound is in between, the edge moves to that boundary and the padding goes beyond it. Real
 # word ends are the ones that run early (a median of 80 to 170 ms, 0.46 s at the 99th percentile, measured on mlx-whisper over
-# speech made word by word); starts are mostly right.
-EDGE_SLACK = 0.10  # for a word's start: seconds more than the padding in which a sound that began earlier is taken for the word's
+# speech made word by word); starts are mostly right, but a person's can be 0.2 s late (a soft first consonant: four people reading,
+# one 'Affectation' started 0.21 s before Whisper said it did).
+EDGE_SLACK = 0.20  # for a word's start: seconds more than the padding in which a sound that began earlier is taken for the word's
 END_REACH = 0.80  # for a word's end: seconds after the transcript's end in which a sound still going is taken for its tail
 
 # The same early end shows as a pause that isn't there: the next word follows at once, and a run of words was split through the sound
