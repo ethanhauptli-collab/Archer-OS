@@ -1,0 +1,42 @@
+name: Claude Code boundary (macOS)
+
+# What a picture request may read and what an @path in a transcript may pull in, checked against the real `claude` program on an
+# Apple Silicon Mac (tests/test_claude_code_boundary.py): a scripted model on loopback, a fake token and home, canary files; no live
+# model, no account, nothing leaves the runner. Claude Code is installed with its own installer, the way the README says to, so this
+# is the build the owner's Mac gets. The Linux runs of these tests don't cover macOS's paths (/var -> /private/var) or its build.
+# By hand, or when the provider or the test changes. Informational for the owner's Claude Code updates: run it after one.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "roughcut/providers/claude_code.py"
+      - "tests/test_claude_code_boundary.py"
+      - ".github/workflows/mac-claude-code.yml"
+
+concurrency:
+  group: mac-claude-code-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boundary:
+    name: Claude Code controls hold (macOS)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Claude Code is there
+        run: |
+          claude --version
+          python -c "from roughcut.providers import claude_code as cc; b = cc.find_claude(); print('find_claude:', b); v = cc.installed_version(b); print('version:', v, '| pictures:', cc.version_problem(v) is None)"
+      - name: The boundary tests, against the real program
+        env:
+          ROUGHCUT_TESTS_REAL: "1"
+        run: python -m pytest -q tests/test_claude_code_boundary.py
