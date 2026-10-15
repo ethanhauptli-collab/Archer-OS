@@ -172,3 +172,177 @@ def test_a_folder_with_no_cut_is_said_plainly(tmp_path, capsys):
     assert main(["check", str(tmp_path)]) == 1
     assert "no .fcpxml" in capsys.readouterr().err
     assert main(["check", str(tmp_path / "nowhere")]) == 1
+
+
+# ------------------------------------------------------------------ what an independent review found
+
+def test_an_edit_beside_a_cut_out_filler_is_listed_apart_not_dropped():
+    """Whisper puts the end of the word before an um into the um, so a clipped word there can't be told from the um going."""
+    levels = _levels([(1.0, 1.6), (2.5, 3.5)])
+    detail = cutcheck.judge_detail([_edge("ends", 1.3)], levels, fillers=[(1.3, 1.6)])
+    assert detail.found == [] and len(detail.beside_fillers) == 1
+    edge, cut_off, kept = detail.beside_fillers[0]
+    assert edge.kind == "ends" and cut_off == pytest.approx(0.3, abs=0.02)
+    assert judge([_edge("ends", 1.3)], levels, fillers=[(1.3, 1.6)])[0] == []  # the old call still says what it did
+
+
+def test_a_breath_next_to_a_sentence_is_not_a_sound_to_cut_through_in_a_quiet_room():
+    """In a room at -90 dB a breath 40 dB under the words is 'sound' by the floor alone; it isn't a word."""
+    levels = _levels([(2.0, 3.0)], seconds=5.0)
+    for i in range(170, 198):
+        levels[i] = -52.0  # an inhale ending 20 ms before the sentence
+    detail = cutcheck.judge_detail([_edge("starts", 1.94)], levels)  # the engine's pad before the sentence lands in the breath
+    assert detail.found == [] and detail.small == 0 and detail.floor is not None
+    louder = list(levels)
+    for i in range(170, 198):
+        louder[i] = -25.0  # but a sound within 30 dB of the words is still one
+    assert len(cutcheck.judge_detail([_edge("starts", 1.94)], louder).found) == 1
+
+
+def test_the_loud_end_is_taken_from_the_kept_dialogue_not_the_whole_file():
+    """90 s of nat sound and one 3 s line: a twentieth of the file isn't speech, so the whole file can't tell sound from background."""
+    levels = [-50.0] * 9000
+    for i in range(4000, 4300):
+        levels[i] = -12.0
+    edge = _edge("ends", 41.5)
+    assert cutcheck.judge_detail([edge], levels).floor is None
+    detail = cutcheck.judge_detail([edge], levels, kept=[(40.0, 43.0)])
+    assert detail.floor is not None and len(detail.found) == 1
+
+
+def test_a_cut_in_a_short_gap_inside_a_word_is_listed_as_a_tight_gap():
+    """A stop consonant leaves 70 ms of quiet inside a word: the cut there reads 'clean' (sound doesn't touch it) but takes half the word."""
+    levels = _levels([(1.0, 1.30), (1.37, 1.7), (2.5, 3.5)])
+    detail = cutcheck.judge_detail([_edge("ends", 1.33)], levels)
+    assert detail.found == [] and len(detail.tight_gaps) == 1
+    edge, cut_off, kept, gap = detail.tight_gaps[0]
+    assert gap == pytest.approx(0.07, abs=0.011) and cut_off > 0.2
+    wide = _levels([(1.0, 1.30), (1.50, 1.8), (2.5, 3.5)])  # a 200 ms pause is a pause
+    assert cutcheck.judge_detail([_edge("ends", 1.40)], wide).tight_gaps == []
+
+
+def test_a_click_in_a_pause_does_not_end_it():
+    path = "/footage/talk.mov"
+    levels = _levels([(0.0, 0.2), (1.4, 1.6)], seconds=2.0)  # a 1.2 s pause
+    for i in range(80, 82):
+        levels[i] = QUIET + 10.0  # a 20 ms click in the middle, well under the speech
+    runs = cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: levels}, {path: QUIET})
+    assert [round(r[0], 1) for r in runs] == [1.2, 0.4]  # the pause, and the quiet after the last word
+    # A lip smack is louder than the room but well under the words: given the speech level, the pause goes on through it.
+    smack = list(levels)
+    for i in range(80, 82):
+        smack[i] = -40.0
+    args = ([(path, 0.0, 2.0, Fraction(0))], {path: smack}, {path: QUIET})
+    assert max(r[0] for r in cutcheck.quiet_runs(*args)) < 1.0
+    assert max(r[0] for r in cutcheck.quiet_runs(*args, louds={path: LOUD})) == pytest.approx(1.2, abs=0.02)
+    knock = list(smack)
+    knock[80] = LOUD - 6.0  # within 12 dB of the words: a sound, not a click
+    assert max(r[0] for r in cutcheck.quiet_runs([(path, 0.0, 2.0, Fraction(0))], {path: knock}, {path: QUIET}, louds={path: LOUD})) < 1.0
+
+
+class _Fake:
+    """A cut the check can read without a file: one dialogue file, its edits and ranges, the readings listen() would give."""
+
+    path = "/footage/talk.mov"
+
+    def __init__(self, monkeypatch, tmp_path, levels, words=None, edges=None, ranges=None):
+        self.fcpxml = tmp_path / "cut.fcpxml"
+        self.fcpxml.write_text("<fcpxml/>")
+        frame = Fraction(1001, 30000)
+        edges = edges if edges is not None else [Edge("ends", self.path, 5.0, Fraction(5), "talk")]
+        ranges = ranges if ranges is not None else [(self.path, 0.0, 10.0, Fraction(0))]
+        monkeypatch.setattr(cutcheck, "find_cut", lambda target: (self.fcpxml, tmp_path))
+        monkeypatch.setattr(cutcheck, "spine_edges", lambda f: ("Trip Rough Cut", frame, edges, ranges))
+        monkeypatch.setattr(cutcheck, "listen", lambda p: levels)
+        self.words = cutcheck.Transcripts()
+        for p, w in (words or {}).items():
+            self.words.add(p, w)
+        monkeypatch.setattr(cutcheck, "transcripts", lambda folder: self.words)
+
+
+def test_um_and_uh_left_in_the_cut_are_listed_even_where_the_audio_isnt_judged(monkeypatch, tmp_path):
+    from roughcut.transcribe import Word
+
+    noisy = [-30.0 + (i % 7) for i in range(2000)]  # 6 dB between the quiet and the loud: not judged
+    fake = _Fake(monkeypatch, tmp_path, noisy, words={_Fake.path: [Word(2.0, 2.3, "um,", 0.9), Word(3.0, 3.4, "so", 0.9)]})
+    report = cutcheck.check(tmp_path)
+    assert report.unjudged == ["talk.mov"]
+    assert [w for w, _ in report.fillers] == ["um,"]
+    assert "1 um/uh still in the cut" in cutcheck.render(report) and "No um/uh left" not in cutcheck.render(report)
+
+
+def test_without_a_transcript_the_check_does_not_say_no_um_is_left(monkeypatch, tmp_path):
+    levels = _levels([(0.0, 1.0), (2.5, 3.5)], seconds=10.0)
+    _Fake(monkeypatch, tmp_path, levels, words={})
+    text = cutcheck.render(cutcheck.check(tmp_path))
+    assert "No um/uh left" not in text and "no transcript" in text.lower()
+
+
+def test_words_are_found_for_footage_reached_by_another_path_when_the_name_is_unique():
+    from roughcut.transcribe import Word
+
+    words = cutcheck.Transcripts()
+    words.add("/Volumes/Card/C0001.MP4", [Word(1.0, 1.2, "hi", 0.9)])
+    assert words.for_file("/private/var/folders/x/C0001.MP4")  # a link or a mount that spells the path another way
+    words.add("/Volumes/Other/C0001.MP4", [Word(2.0, 2.2, "ho", 0.9)])
+    assert words.for_file("/private/var/folders/x/C0001.MP4") == []  # two files with that name: no guessing
+    assert words.for_file("/Volumes/Card/C0001.MP4")[0].text == "hi"
+
+
+def test_a_cut_copied_into_history_finds_the_run_s_analysis_json(tmp_path):
+    out = tmp_path / "out"
+    kept = out / "history" / "v1 2026-10-15 17.13"
+    kept.mkdir(parents=True)
+    (out / "analysis.json").write_text(json.dumps({"clips": [{"media": {"path": "/f/a.mov"}, "segments": [{"words": [{"start": 1.0, "end": 1.2, "text": "um", "prob": 0.9}]}]}]}))
+    found = cutcheck.transcripts(kept)
+    assert [w.text for w in found.for_file("/f/a.mov")] == ["um"]
+    assert cutcheck.transcripts(tmp_path / "elsewhere") == {}
+
+
+def test_a_drive_that_stopped_answering_is_not_waited_on_again_for_its_other_files(monkeypatch, tmp_path):
+    from roughcut.textio import Stalled
+
+    paths = ["/Volumes/Share/a.mov", "/Volumes/Share/b.mov", "/Users/me/c.mov"]
+    frame = Fraction(1001, 30000)
+    monkeypatch.setattr(cutcheck, "find_cut", lambda target: (tmp_path / "cut.fcpxml", tmp_path))
+    monkeypatch.setattr(cutcheck, "spine_edges", lambda f: ("Cut", frame, [], [(p, 0.0, 5.0, Fraction(i * 5)) for i, p in enumerate(paths)]))
+    monkeypatch.setattr(cutcheck, "transcripts", lambda folder: cutcheck.Transcripts())
+    asked: list[tuple[str, float]] = []
+    real_bounded = cutcheck.bounded
+
+    def fake_bounded(fn, *args, seconds, what=""):
+        if fn is not cutcheck.listen:  # finding the cut and the transcript are not what is being tried
+            return real_bounded(fn, *args, seconds=seconds, what=what)
+        path = args[0]
+        asked.append((path, seconds))
+        if path.startswith("/Volumes/Share"):
+            raise Stalled(f"{path} didn't answer")
+        return _levels([(1.0, 2.0)], seconds=5.0)
+
+    monkeypatch.setattr(cutcheck, "bounded", fake_bounded)
+    report = cutcheck.check(tmp_path)
+    assert [p for p, _ in asked] == ["/Volumes/Share/a.mov", "/Users/me/c.mov"]  # b.mov was not tried: same drive
+    assert asked[0][1] == cutcheck.LISTEN_SECONDS and asked[1][1] < cutcheck.LISTEN_SECONDS  # and the next file gets less time
+    assert any("b.mov" in p and "skipped" in p for p in report.problems) and report.clips == 1
+
+
+def test_an_unreadable_cut_is_said_plainly_not_with_a_traceback(monkeypatch, tmp_path, capsys):
+    def refuse(target, **kw):
+        raise PermissionError(13, "Permission denied", str(tmp_path / "cut.fcpxml"))
+
+    monkeypatch.setattr(cutcheck, "check", refuse)
+    assert main(["check", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "Permission denied" in err and "Traceback" not in err
+
+
+def test_the_report_names_the_edits_beside_a_filler_and_in_tight_gaps():
+    frame = Fraction(1001, 30000)
+    edge = Edge("ends", "/f/talk.mov", 2.0, Fraction(20), "talk")
+    report = cutcheck.Report("/x/cut.fcpxml", "Trip Rough Cut", frame, edits=10, clips=1, seconds=60.0)
+    report.beside_fillers = [cutcheck.Flag(edge, 0.3, 0.4, "…ridge ‖ um before…")]
+    report.tight_gaps = [cutcheck.Flag(edge, 0.3, 0.4, "…basket ‖ ball…", gap=0.07)]
+    text = cutcheck.render(report)
+    assert "beside an um/uh" in text and cutcheck.timecode(Fraction(20), frame) in text and "70 ms" in text
+    data = cutcheck.as_json(report)
+    assert data["beside_fillers"][0]["words"] == "…ridge ‖ um before…" and data["tight_gaps"][0]["gap_ms"] == 70
