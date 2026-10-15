@@ -45,19 +45,18 @@ STYLES = {
 
 # Padding keeps a cut a little outside a word, which covers a transcript edge that is off by up to that much. Beyond it the cut lands
 # inside the word: Whisper's word times are right to within a few tens of milliseconds on clean speech and can be a hundred or more
-# off in noise. When the silence map shows the sound beginning (or ending) between the padded cut and the nearest silence, and no
-# neighbouring word's sound is in between, the edge moves to where the silence is, so a cut is never inside sound that way for an
-# edge off by up to the padding plus EDGE_SLACK. Nothing changes while the padded cut is already outside the sound.
-EDGE_SLACK = 0.10  # for a word's start
-EDGE_SLACK_END = 0.35  # for a word's end: real Whisper ends are early by 0.46 s at the 99th percentile, its starts mostly within 0.1 s
+# off in noise. So a cut's room is measured from where the silence map says the sound begins or stops, not from the transcript's
+# guess: when a silence ends a little before the first word (EDGE_SLACK plus the padding) or begins after the last one (END_REACH
+# after it), and no neighbouring word's sound is in between, the edge moves to that boundary and the padding goes beyond it. Real
+# word ends are the ones that run early (a median of 80 to 170 ms, 0.46 s at the 99th percentile, measured on mlx-whisper over
+# speech made word by word); starts are mostly right.
+EDGE_SLACK = 0.10  # for a word's start: seconds more than the padding in which a sound that began earlier is taken for the word's
+END_REACH = 0.80  # for a word's end: seconds after the transcript's end in which a sound still going is taken for its tail
 
-# A word's end is often early (measured on real Whisper output: a median 80 to 170 ms, now and then half a second), which shows as a
-# pause that isn't there: the next word follows at once, and the run of words was split through the sound between them. On a clip
-# whose silence map shows its pauses (they would show here too), a transcript gap that is longer than the style's pause by no more
-# than FAKE_GAP, with no silence in it, is not a pause.
-FAKE_GAP = 0.30
-SNAP_ENDS = False  # experiment: the cut ends a full pad after the sound stops, even where the pad already reached it
-SNAP_STARTS = False  # experiment: the cut starts a full pad before the sound begins
+# The same early end shows as a pause that isn't there: the next word follows at once, and a run of words was split through the sound
+# between them. On a clip whose silence map shows its pauses (they would show here too), a transcript gap that is longer than the
+# style's pause by no more than FAKE_GAP, with no silence in it, is not a pause.
+FAKE_GAP = 0.45
 
 
 @dataclass
@@ -489,8 +488,8 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         # Padding never reaches into a neighbouring word (including cut fillers).
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
-        wa = sil.onset_before(wa, floor=lo - 0.02, least=0.0 if SNAP_STARTS else style.pad_in, within=style.pad_in + EDGE_SLACK)
-        wb = sil.release_after(wb, ceil=hi + 0.02, least=0.0 if SNAP_ENDS else style.pad_out, within=style.pad_out + EDGE_SLACK_END)
+        wa = sil.onset_before(wa, floor=lo - 0.02, least=0.0, within=style.pad_in + EDGE_SLACK)
+        wb = sil.release_after(wb, ceil=hi + 0.02, least=0.0, within=END_REACH)
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:

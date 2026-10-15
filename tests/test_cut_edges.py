@@ -1,8 +1,9 @@
 """A cut never lands inside sound the silence map shows continuing, when the transcript's edge is off by a little more than the padding.
 
 Whisper's word times are good to a few tens of milliseconds on clean speech and can be a hundred or more off in noise. Padding
-(60/120 ms at tight, 100/200 at medium) covers an edge that is off by up to that much; `timeline.EDGE_SLACK` more is covered by
-moving the edge to where the silence map says the sound starts or stops.
+(60/120 ms at tight, 100/200 at medium) is measured from where the silence map says the sound starts or stops, so an edge the
+transcript puts too late (up to the padding plus `timeline.EDGE_SLACK`) or too early (up to `timeline.END_REACH`) still lands outside
+the sound.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from conftest import SPEECH, ffmpeg, make_clip, spread_words
 from roughcut.cli import main
 from roughcut.segments import build_segments
 from roughcut.timecode import parse_fcpx_time as T
-from roughcut.timeline import EDGE_SLACK, FAKE_GAP, STYLES, _Spans, speech_pieces
+from roughcut.timeline import EDGE_SLACK, END_REACH, FAKE_GAP, STYLES, _Spans, speech_pieces
 from roughcut.transcribe import Word
 
 
@@ -90,13 +91,30 @@ def test_a_phrase_the_transcript_puts_late_is_cut_before_its_real_start(style):
     assert piece.a <= 5.0 and piece.b >= 6.0, (piece.a, piece.b)
 
 
-@pytest.mark.parametrize("style,early", [("tight", 0.2), ("tight", 0.3), ("tight", 0.45), ("medium", 0.3), ("medium", 0.52)])
+@pytest.mark.parametrize("style,early", [("tight", 0.2), ("tight", 0.3), ("tight", 0.45), ("tight", 0.7), ("medium", 0.3), ("medium", 0.52), ("medium", 0.7)])
 def test_a_last_word_the_transcript_ends_early_keeps_its_tail(style, early):
     """The sound really stops at 6.0 (the silence begins there); the transcript ends the last word `early` seconds before."""
     clip = make_clip("V01", seconds=12, role="aroll", silences=[(0.0, 5.0), (6.0, 12.0)])
     clip.segments = build_segments("V01", _words((5.0, 5.15, "so"), (5.2, 6.0 - early, "far.")))
     (piece,) = speech_pieces(clip.segments[0], clip, STYLES[style], 0)
     assert piece.b >= 6.0, (piece.a, piece.b)
+
+
+def test_the_room_after_a_phrase_is_measured_from_where_the_sound_stops():
+    """The transcript ends the last word 60 ms early, inside the padding: the cut still ends a full pad after the sound."""
+    style = STYLES["tight"]
+    clip = make_clip("V01", seconds=12, role="aroll", silences=[(0.0, 5.0), (6.0, 12.0)])
+    clip.segments = build_segments("V01", _words((5.0, 5.4, "on"), (5.5, 5.94, "time.")))
+    (piece,) = speech_pieces(clip.segments[0], clip, style, 0)
+    assert piece.b == pytest.approx(6.0 + style.pad_out)
+
+
+def test_the_room_before_a_phrase_is_measured_from_where_the_sound_begins():
+    style = STYLES["tight"]
+    clip = make_clip("V01", seconds=12, role="aroll", silences=[(0.0, 5.0), (6.0, 12.0)])
+    clip.segments = build_segments("V01", _words((5.04, 5.4, "on"), (5.5, 6.0, "time.")))
+    (piece,) = speech_pieces(clip.segments[0], clip, style, 0)
+    assert piece.a == pytest.approx(5.0 - style.pad_in)
 
 
 def test_a_transcript_that_is_right_changes_nothing():
@@ -220,7 +238,7 @@ def test_every_burst_of_speech_survives_a_transcript_that_runs_late(footage, tmp
         if inside < 0.5 * (end - start):
             continue  # a sentence the cut dropped on purpose (a restart, a filler line)
         assert inside >= (end - start) - 2 * EDGE, f"{text!r}: {inside:.3f} s of {end - start:.3f} s kept at {style}, transcript {late * 1000:.0f} ms late"
-    assert EDGE_SLACK > 0
+    assert EDGE_SLACK > 0 and END_REACH > 0
 
 
 # ------------------------------------------------------------------ words the transcript ends early

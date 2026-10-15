@@ -345,7 +345,7 @@ def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
     n = len(audio) // win
     r = np.sqrt(np.mean(audio[: n * win].astype(np.float64).reshape(n, win) ** 2, axis=1))
     floor = float(np.percentile(r, 10))
-    loud = r > max(3.0 * floor, 1e-4)
+    loud = r > max(2.0 * floor, 1e-4)
     inside = outside = edges = 0
     for k, (a, b) in enumerate(kept):
         for edge, direction in ((a, +1), (b, -1)):
@@ -513,74 +513,61 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
     return {"shoot": shoot, "results": results}
 
 
-# What the sweep tries on the tight cut (and the medium one at the end): the window after a word's end in which a sound still going is
-# taken for its tail, and the transcript gap that is not taken for a pause when the silence map hears sound through it.
-SWEEP = [  # (pacing, end slack, fake gap, pad_out or None, start slack or None, pad_in or None, snap ends, snap starts)
-    ("tight", 0.10, 0.00, None, None, None, False, False),  # before the gap rule and the wider end window
-    ("tight", 0.35, 0.30, None, None, None, False, False),  # as shipped
-    ("tight", 0.35, 0.45, None, None, None, False, False),
-    ("tight", 0.68, 0.45, None, None, None, False, False),  # the sound after the last word followed for up to 0.8 s
-    ("tight", 0.35, 0.45, None, None, None, True, False),
-    ("tight", 0.35, 0.45, None, None, None, False, True),
-    ("tight", 0.68, 0.45, None, None, None, True, True),
-    ("tight", 0.68, 0.45, 0.16, None, None, False, False),
-    ("tight", 0.68, 0.60, None, None, None, True, True),
-    ("medium", 0.35, 0.30, None, None, None, False, False),  # as shipped
-    ("medium", 0.48, 0.45, None, None, None, True, True),
+# What the sweep tries: how far past a transcript's last word a sound still going is taken for its tail, the transcript gap that is not
+# taken for a pause when the silence map hears sound through it, and the paddings.
+SWEEP = [  # (pacing, end reach, fake gap, pad_out or None, start slack or None, pad_in or None)
+    ("tight", 0.80, 0.45, None, None, None),  # as shipped
+    ("tight", 0.60, 0.45, None, None, None),
+    ("tight", 1.00, 0.45, None, None, None),
+    ("tight", 0.80, 0.00, None, None, None),  # without the gap rule
+    ("tight", 0.80, 0.30, None, None, None),
+    ("tight", 0.80, 0.60, None, None, None),
+    ("tight", 0.80, 0.45, 0.16, None, None),
+    ("tight", 0.80, 0.45, None, None, 0.08),
+    ("tight", 0.80, 0.45, None, 0.20, None),
+    ("medium", 0.80, 0.45, None, None, None),  # as shipped
+    ("medium", 0.80, 0.00, None, None, None),
 ]
 
 
 @contextlib.contextmanager
-def tuned(style: str, end_slack: float, fake_gap: float, pad_out: float | None, start_slack: float | None = None, pad_in: float | None = None,
-          snap_ends: bool = False, snap_starts: bool = False):
+def tuned(style: str, reach: float, fake_gap: float, pad_out: float | None, start_slack: float | None = None, pad_in: float | None = None):
     from roughcut import timeline
 
-    saved = (timeline.EDGE_SLACK_END, getattr(timeline, "FAKE_GAP", None), timeline.STYLES[style], timeline.EDGE_SLACK)
-    snaps = (getattr(timeline, "SNAP_ENDS", None), getattr(timeline, "SNAP_STARTS", None))
+    saved = (timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style])
     try:
-        if snaps[0] is not None:
-            timeline.SNAP_ENDS, timeline.SNAP_STARTS = snap_ends, snap_starts
-        timeline.EDGE_SLACK_END = end_slack
-        if saved[1] is not None:
-            timeline.FAKE_GAP = fake_gap
+        timeline.END_REACH, timeline.FAKE_GAP = reach, fake_gap
         if start_slack is not None:
             timeline.EDGE_SLACK = start_slack
         changes = {k: v for k, v in (("pad_out", pad_out), ("pad_in", pad_in)) if v is not None}
         if changes:
-            timeline.STYLES[style] = dataclasses.replace(saved[2], **changes)
+            timeline.STYLES[style] = dataclasses.replace(saved[3], **changes)
         yield
     finally:
-        if snaps[0] is not None:
-            timeline.SNAP_ENDS, timeline.SNAP_STARTS = snaps
-        timeline.STYLES[style] = saved[2]
-        timeline.EDGE_SLACK_END = saved[0]
-        timeline.EDGE_SLACK = saved[3]
-        if saved[1] is not None:
-            timeline.FAKE_GAP = saved[1]
+        timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style] = saved
 
 
 def sweep(root: Path, clips: list[dict], reading: dict | None) -> None:
     print("\n#### the same transcripts cut with other settings (every clip, the cut measured against the audio)")
-    for k, (style, end_slack, fake_gap, pad_out, start_slack, pad_in, snap_ends, snap_starts) in enumerate(SWEEP):
+    for k, (style, reach, fake_gap, pad_out, start_slack, pad_in) in enumerate(SWEEP):
         rows = []
         for c in clips:
             out = root / f"sw{k}_{c['n']}"
-            with tuned(style, end_slack, fake_gap, pad_out, start_slack, pad_in, snap_ends, snap_starts):
+            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in):
                 build(c["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             rows.append(judge(out, c["shoot"] / "talk.mov", c["truth"], "", brief=True))
         person = ""
         if reading is not None:
             out = root / f"sw{k}_reading"
-            with tuned(style, end_slack, fake_gap, pad_out, start_slack, pad_in, snap_ends, snap_starts):
+            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in):
                 build(reading["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             j = judge_audio(out, reading["shoot"] / "talk.mov")
             person = f"   | a person reading: edges inside speech {100 * j['in']:4.1f}%, thrown away {100 * j['out']:4.1f}%, kept {j['kept']:5.0f} s"
         m = {key: float(np.mean([r[key] for r in rows])) for key in ("whole", "clipped", "gone", "in", "out", "kept")}
         pad = "".join(f", {name} {v:g}" for name, v in (("pad_out", pad_out), ("start slack", start_slack), ("pad_in", pad_in)) if v is not None)
-        pad += (", ends snapped" if snap_ends else "") + (", starts snapped" if snap_starts else "")
         per_clip = ", ".join("%.1f" % (100 * r["whole"]) for r in rows)
         print(
-            f"{style:<6} end window +{end_slack:.2f} s, transcript gap +{fake_gap:.2f} s{pad}: words whole {100 * m['whole']:5.1f}%, clipped {100 * m['clipped']:5.1f}%, "
+            f"{style:<6} end reach {reach:.2f} s, transcript gap +{fake_gap:.2f} s{pad}: words whole {100 * m['whole']:5.1f}%, clipped {100 * m['clipped']:5.1f}%, "
             f"not in the cut {100 * m['gone']:4.1f}%; edges inside speech {100 * m['in']:5.1f}%, a word's edge thrown away {100 * m['out']:5.1f}%; kept {m['kept']:6.1f} s"
             f"   (whole per clip: {per_clip}){person}",
             flush=True,

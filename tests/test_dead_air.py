@@ -91,7 +91,7 @@ def test_a_pause_hidden_by_stretched_words_is_still_cut():
     clip.silences = [(16.55, 17.95)]  # what the silence map hears
     first, second = speech_pieces(clip.segments[0], clip, style, 0)
     assert first.wb == pytest.approx(16.55)  # pulled back from the stretched end to where the sound stops
-    assert second.wa == pytest.approx(18.0)
+    assert second.wa == pytest.approx(17.95)  # the sound begins where the silence ends, 50 ms before the word is said to
     assert second.a - first.b > 1.0  # the pause is gone
 
 
