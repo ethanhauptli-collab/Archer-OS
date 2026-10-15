@@ -445,12 +445,16 @@ def checked(out: Path, label: str, detail: bool = False) -> None:
         return
     from roughcut import ffmpeg_ops
 
-    clip = json.loads((out / "analysis.json").read_text())["clips"][0]
+    all_clips = json.loads((out / "analysis.json").read_text())["clips"]
+    media = Path(report.long_runs[0][2])
+    for c in all_clips:
+        n_words = sum(len(s.get("words", [])) for s in c.get("segments", []))
+        print(f"    clip {c['id']} {Path(c['media']['path']).name}: role {c.get('role')}, {len(c.get('segments', []))} segments, {n_words} words, transcript from {c.get('transcript_source')}, {len(c.get('silences', []))} silences, hidden {c.get('hidden')}, duplicate_of {c.get('duplicate_of')}")
+    clip = next((c for c in all_clips if Path(c["media"]["path"]).name == media.name), all_clips[0])
     words = [w for s in clip.get("segments", []) for w in s.get("words", [])]
     silences = [tuple(x) for x in clip.get("silences", [])]
     breaths = [tuple(x) for x in clip.get("breaths", [])]
     _project, _frame, _edges, ranges = cutcheck.spine_edges(Path(report.fcpxml))
-    media = Path(report.long_runs[0][2])
     peaks = ffmpeg_ops.window_peaks(media, 0.05)
     levels = cutcheck.listen(str(media))
     sil_db = clip.get("silence_db")
