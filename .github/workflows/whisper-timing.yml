@@ -17,6 +17,7 @@ on:
       - "roughcut/analyze.py"
       - "roughcut/pauses.py"
       - "roughcut/ffmpeg_ops.py"
+      - "roughcut/cutcheck.py"
 
 concurrency:
   group: whisper-timing-${{ github.ref }}
