@@ -12,6 +12,7 @@ import bisect
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
@@ -48,7 +49,7 @@ STYLES = {
 # neighbouring word's sound is in between, the edge moves to where the silence is, so a cut is never inside sound that way for an
 # edge off by up to the padding plus EDGE_SLACK. Nothing changes while the padded cut is already outside the sound.
 EDGE_SLACK = 0.10  # for a word's start
-EDGE_SLACK_END = 0.10  # for a word's end
+EDGE_SLACK_END = 0.35  # for a word's end: real Whisper ends are early by 0.46 s at the 99th percentile, its starts mostly within 0.1 s
 
 # A word's end is often early (measured on real Whisper output: a median 80 to 170 ms, now and then half a second), which shows as a
 # pause that isn't there: the next word follows at once, and the run of words was split through the sound between them. On a clip
@@ -311,6 +312,12 @@ def _spans(silences) -> _Spans:
     return silences if isinstance(silences, _Spans) else _Spans(silences)
 
 
+def _sound_runs_through(ix: "_ClipIndex", sil: _Spans, max_gap: float, a: float, b: float) -> bool:
+    """The transcript puts a pause of `b - a` seconds between two words, longer than the style's by no more than FAKE_GAP, on a
+    clip whose silence map finds its pauses, and the map has no silence in it: a word that ended early, not a pause."""
+    return FAKE_GAP > 0 and ix.shows_pauses and max_gap < b - a <= max_gap + FAKE_GAP and sil.overlap(a, b) < 0.5 * max_gap
+
+
 # One-off forms taking a plain list of silences. The timeline itself uses a clip's _index().
 def _silence_clamp_end(t: float, word_start: float, silences, eps: float = 0.05) -> float:
     return _spans(silences).clamp_end(t, word_start, eps)
@@ -401,6 +408,17 @@ def _gap_limit(clip: Clip, style: Style) -> float:
     return max(1.0, 2 * style.max_gap) if clip.bed == "music" else style.max_gap
 
 
+def _sound_runs_on(analysis: Analysis, style: Style) -> Callable[[_Piece, _Piece], bool]:
+    """For _merge: does the sound run through the gap the transcript puts between two kept pieces of a clip?"""
+
+    def runs_on(q: _Piece, p: _Piece) -> bool:
+        clip = analysis.clip(p.clip_id)
+        ix = _index(clip)
+        return _sound_runs_through(ix, ix.pauses if clip.media.has_video else ix.silences, _gap_limit(clip, style), q.wb, p.wa)
+
+    return runs_on
+
+
 def _gap_limits(analysis: Analysis, style: Style) -> dict[str, float]:
     return {c.id: _gap_limit(c, style) for c in analysis.clips if c.bed == "music"}
 
@@ -432,13 +450,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         if current:
             prev = all_words[current[-1]]
             said = w.start - prev.end
-            if (
-                max_gap < said <= max_gap + FAKE_GAP
-                and not removed_since_last
-                and ix.shows_pauses
-                and sil.pause_between(prev.start, w.end) <= max_gap
-                and sil.overlap(prev.end, w.start) < 0.5 * max_gap
-            ):
+            if not removed_since_last and sil.pause_between(prev.start, w.end) <= max_gap and _sound_runs_through(ix, sil, max_gap, prev.end, w.start):
                 said = max_gap  # the transcript's gap is a word that ended early: sound runs through it on the map
             gap = max(said, sil.pause_between(prev.start, w.end))
             if gap > max_gap or (removed_since_last and gap > filler_floor):
@@ -553,18 +565,28 @@ def _cut_silences(pieces: list[_Piece], analysis: Analysis, style: Style) -> lis
     return out
 
 
-def _merge(pieces: list[_Piece], max_gap: float, warnings: list[str] | None = None, limits: dict[str, float] | None = None) -> list[_Piece]:
+def _merge(
+    pieces: list[_Piece],
+    max_gap: float,
+    warnings: list[str] | None = None,
+    limits: dict[str, float] | None = None,
+    runs_on: Callable[[_Piece, _Piece], bool] | None = None,
+) -> list[_Piece]:
     """Join back-to-back sentences from the same take when the pause between them is natural.
 
     Only pieces with nothing cut between them are joined, so removed fillers
-    and long pauses stay removed. `limits` sets a longer pause per clip (music beds).
+    and long pauses stay removed. `limits` sets a longer pause per clip (music beds);
+    `runs_on` says the sound goes on through a longer gap than that (a word that ended early).
     """
     merged: list[_Piece] = []
     for p in pieces:
         if merged:
             q = merged[-1]
             adjacent = q.w1 is not None and p.w0 is not None and p.w0 == q.w1 + 1
-            if adjacent and q.clip_id == p.clip_id and q.section == p.section and 0 <= p.wa - q.wb <= (limits or {}).get(p.clip_id, max_gap):
+            joined = 0 <= p.wa - q.wb <= (limits or {}).get(p.clip_id, max_gap) or (
+                runs_on is not None and p.wa > q.wb and q.clip_id == p.clip_id and runs_on(q, p)
+            )
+            if adjacent and q.clip_id == p.clip_id and q.section == p.section and joined:
                 q.b = max(q.b, p.b)
                 q.wb = max(q.wb, p.wb)
                 q.w1 = p.w1
@@ -615,7 +637,7 @@ def build_timeline(
                 raw_pieces.extend(speech_pieces(seg, clip, style, s_idx))
             else:
                 raw_pieces.append(_Piece(clip.id, item.start, item.end, item.start, item.end, s_idx, []))
-    pieces = _cut_silences(_merge(raw_pieces, style.max_gap, warnings, _gap_limits(analysis, style)), analysis, style)
+    pieces = _cut_silences(_merge(raw_pieces, style.max_gap, warnings, _gap_limits(analysis, style), _sound_runs_on(analysis, style)), analysis, style)
 
     width, height, seq_fd = choose_format(pieces, analysis, format_override)
     tl = Timeline(name=name, frame_duration=seq_fd, width=width, height=height)
@@ -1790,7 +1812,7 @@ def kept_length(seg: Segment, clip: Clip, analysis: Analysis, style: Style) -> t
     The same pause and filler trimming the timeline does, so the planner's
     sums match what gets built.
     """
-    pieces = _cut_silences(_merge(speech_pieces(seg, clip, style, 0), style.max_gap, None, _gap_limits(analysis, style)), analysis, style)
+    pieces = _cut_silences(_merge(speech_pieces(seg, clip, style, 0), style.max_gap, None, _gap_limits(analysis, style), _sound_runs_on(analysis, style)), analysis, style)
     return sum(p.b - p.a for p in pieces), max(0, len(pieces) - 1)
 
 

@@ -257,7 +257,7 @@ def cause(edge: float, direction: int, truth_words: list[dict], heard: list[dict
     )
 
 
-def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None, brief: bool = False, show: int = 12) -> dict:
+def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None, brief: bool = False, show: int = 12, context: bool = False) -> dict:
     kept = kept_ranges(next(out.glob("*.fcpxml")))
     audio = load_audio(talk)
     words = truth["words"]
@@ -318,8 +318,18 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
         f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS); "
         f"the longest pause left between words is {result['longest']:.2f} s, {result['over1']} are over a second"
     )
-    for edge, kind, where, why in flagged[:show]:
+    near = []
+    if context and flagged:
+        silences = json.loads((out / "analysis.json").read_text())["clips"][0].get("silences", [])
+        near = [(edge, heard, silences) for edge, *_ in flagged]
+    for k, (edge, kind, where, why) in enumerate(flagged[:show]):
         print(f"    a cut {kind} at {edge:.2f} s with speech {where}: {why}")
+        if near:
+            e, h, sil = near[k]
+            words_near = ", ".join(f"{w['text']!r} {w['start']:.2f}-{w['end']:.2f}" for w in h if e - 0.9 <= w["start"] <= e + 0.9)
+            quiet_near = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in sil if b >= e - 1.0 and a <= e + 1.0)
+            kept_near = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in kept if b >= e - 1.0 and a <= e + 1.0)
+            print(f"        Whisper's words near it: {words_near or 'none'} | silences on the map: {quiet_near or 'none'} | kept: {kept_near}")
     if len(flagged) > show:
         print(f"    ... and {len(flagged) - show} more")
     return result
@@ -328,14 +338,14 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
 def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
     """The cut of a recording whose words aren't known (a person reading): how many cut edges have sound on the side that is cut
     away (a word's edge thrown away) or on the side that stays (a cut that starts or ends inside speech), by the audio alone: a
-    10 ms window counts as speech when it is 15 dB above this recording's quietest tenth."""
+    10 ms window counts as speech when it is 9.5 dB above this recording's quietest tenth (as for the synthetic clips)."""
     kept = kept_ranges(next(out.glob("*.fcpxml")))
     audio = load_audio(talk)
     win = int(0.010 * SR)
     n = len(audio) // win
     r = np.sqrt(np.mean(audio[: n * win].astype(np.float64).reshape(n, win) ** 2, axis=1))
     floor = float(np.percentile(r, 10))
-    loud = r > max(floor * 10 ** (15 / 20), 1e-4)
+    loud = r > max(3.0 * floor, 1e-4)
     inside = outside = edges = 0
     for k, (a, b) in enumerate(kept):
         for edge, direction in ((a, +1), (b, -1)):
@@ -348,7 +358,7 @@ def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
             outside += bool(outer)
     result = {"in": inside / max(edges, 1), "out": outside / max(edges, 1), "edges": edges, "kept": sum(b - a for a, b in kept)}
     if label:
-        print(f"{label}: of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away; kept {result['kept']:.0f} s (quietest tenth {db(floor):.0f} dBFS)")
+        print(f"{label}: of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away; kept {result['kept']:.0f} s (10 ms windows: quietest tenth {db(floor):.0f} dBFS, median {db(float(np.median(r))):.0f}, loudest tenth {db(float(np.percentile(r, 90))):.0f}; {100 * float(np.mean(loud)):.0f}% count as speech)")
     return result
 
 
@@ -506,16 +516,15 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
 # What the sweep tries on the tight cut (and the medium one at the end): the window after a word's end in which a sound still going is
 # taken for its tail, and the transcript gap that is not taken for a pause when the silence map hears sound through it.
 SWEEP = [  # (pacing, end slack, fake gap, pad_out or None, start slack or None, pad_in or None)
-    ("tight", 0.10, 0.00, None, None, None),  # the cut before the gap rule
-    ("tight", 0.10, 0.30, None, None, None),  # as shipped
-    ("tight", 0.25, 0.30, None, None, None),
-    ("tight", 0.10, 0.30, None, 0.20, None),
-    ("tight", 0.10, 0.30, None, None, 0.10),
-    ("tight", 0.10, 0.30, 0.16, None, None),
-    ("tight", 0.10, 0.30, 0.20, None, None),
-    ("tight", 0.25, 0.30, 0.16, 0.20, 0.08),
+    ("tight", 0.10, 0.00, None, None, None),  # before the gap rule and the wider end window
+    ("tight", 0.10, 0.30, None, None, None),  # the gap rule alone
+    ("tight", 0.35, 0.30, None, None, None),  # as shipped
+    ("tight", 0.35, 0.45, None, None, None),
+    ("tight", 0.35, 0.30, 0.16, None, None),
+    ("tight", 0.35, 0.30, None, None, 0.10),
+    ("tight", 0.35, 0.30, 0.16, None, 0.08),
     ("medium", 0.10, 0.00, None, None, None),
-    ("medium", 0.10, 0.30, None, None, None),
+    ("medium", 0.35, 0.30, None, None, None),  # as shipped
 ]
 
 
@@ -575,7 +584,7 @@ def details(root: Path, clips: list[dict]) -> None:
     for c in clips:
         out = root / f"detail{c['n']}"
         build(c["shoot"], out, "tight", root / "cache", ["--transcriber", "none"], in_process=True)
-        judge(out, c["shoot"] / "talk.mov", c["truth"], f"clip {c['n']}", c["heard"], c["matched"], show=40)
+        judge(out, c["shoot"] / "talk.mov", c["truth"], f"clip {c['n']}", c["heard"], c["matched"], show=40, context=True)
 
 
 def main() -> int:
