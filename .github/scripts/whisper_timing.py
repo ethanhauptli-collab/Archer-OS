@@ -2,7 +2,7 @@
 
 Every word is said on its own by a speech synthesizer (macOS `say`; `espeak-ng` for a dry run elsewhere), so each word's true start
 and end are known to the sample. The words become sentences, the sentences a few minutes of talk over a noise bed (room tone, a
-60 Hz hum, wind gusts), as AAC in a MOV, like a phone's: three clips of three minutes in different voices, one of twelve and one with spoken um and uh. Then:
+60 Hz hum, wind gusts), as AAC in a MOV, like a phone's: three clips of three minutes in different voices, one of twelve, one with spoken um and uh and two in loud noise. Then:
 
   1. Whisper (the model the app uses by default, or $WHISPER_MODEL) transcribes it and its word times are compared with the truth:
      how many words, how far off their starts and ends are, and what it put into the long pauses;
@@ -18,7 +18,7 @@ It prints numbers and exits 0: it is a measurement. Synthetic speech is cleaner 
 case for Whisper, not the typical one. The speech and Whisper's transcript of it are kept in `--shoots DIR` (the CI cache), so a
 second run needs no model.
 
-    python .github/scripts/whisper_timing.py [--runs 5] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep] [--reading] [--data]
+    python .github/scripts/whisper_timing.py [--runs 7] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep] [--reading] [--data]
 `--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison, the cut and the sweep can be
 tried without a model. `--data` prints each clip's words said and heard and its silence map as `DATA` lines (gzip and base64) to cut
 them again offline.
@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 import xml.etree.ElementTree as ET
 from fractions import Fraction
@@ -395,12 +396,14 @@ def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
 # ------------------------------------------------------------------ main
 
 
-RUNS = [  # (voice, words per minute, seed, minutes, share of the words that are a spoken um or uh)
-    (None, 185, 11, 3, 0.0),
-    ("Daniel", 170, 12, 3, 0.0),
-    ("Alex", 200, 13, 3, 0.0),
-    (None, 175, 14, 12, 0.0),  # a long recording: Whisper works through it a window at a time
-    (None, 170, 15, 3, 0.08),  # with fillers
+RUNS = [  # (voice, words per minute, seed, minutes, share of the words that are a spoken um or uh, noise bed in dBFS or None for --noise-db)
+    (None, 185, 11, 3, 0.0, None),
+    ("Daniel", 170, 12, 3, 0.0, None),
+    ("Alex", 200, 13, 3, 0.0, None),
+    (None, 175, 14, 12, 0.0, None),  # a long recording: Whisper works through it a window at a time
+    (None, 170, 15, 3, 0.08, None),  # with fillers
+    (None, 175, 16, 3, 0.0, -30.0),  # a windy shoot: the noise bed 12 dB louder, gusts at -23 dBFS
+    (None, 175, 17, 3, 0.0, -24.0),  # worse: speech barely over the noise
 ]
 
 
@@ -444,7 +447,7 @@ def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *,
         raise SystemExit(1)
 
 
-def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, fillers: float, n: int) -> dict | None:
+def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, fillers: float, noise: float | None, n: int) -> dict | None:
     shoot = shoots / f"shoot{n}"
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
     kept_truth, kept_heard = shoot / "truth.json", shoot / "heard.json"
@@ -455,13 +458,13 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         engine = ["--transcriber", "none"]
     else:
         try:
-            truth = make_talk(shoot, a.minutes or minutes, seed, voice, rate, a.noise_db, fillers)
+            truth = make_talk(shoot, a.minutes or minutes, seed, voice, rate, a.noise_db if noise is None else noise, fillers)
         except subprocess.CalledProcessError:
             if voice is None:
                 raise
             print(f"voice {voice} isn't here; skipped")
             return None
-        print(f"\n#### clip {n}: voice {voice or 'default'}, {rate} words a minute, {len(truth['words'])} words, {len(truth['pauses'])} pauses, noise bed {a.noise_db:g} dBFS", flush=True)
+        print(f"\n#### clip {n}: voice {voice or 'default'}, {rate} words a minute, {len(truth['words'])} words, {len(truth['pauses'])} pauses, noise bed {truth['noise_db']:g} dBFS", flush=True)
         if a.dry:
             heard = fake_heard(truth["words"])
             (shoot / "talk.json").write_text(json.dumps({"words": [{"start": h["start"], "end": h["end"], "text": h["text"], "prob": 0.9} for h in heard]}))
@@ -470,7 +473,10 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
             from roughcut.transcribe import Transcriber
 
             print(f"transcribing with {model} ...", flush=True)
+            began = time.monotonic()
             tr = Transcriber("mlx", model=model, verbatim=True).transcribe(shoot / "talk.mov")
+            took = time.monotonic() - began
+            print(f"transcribed {truth['seconds']:.0f} s of audio in {took:.0f} s ({truth['seconds'] / took:.1f} times real time, on a CI runner, the first clip with the model loading)", flush=True)
             heard = [{"text": w.text, "start": w.start, "end": w.end} for w in tr.words]
             # The cuts are made from this very transcript (as a sidecar), so every build below, and the data printed at the end, share it.
             (shoot / "talk.json").write_text(json.dumps({"words": [{"start": w.start, "end": w.end, "text": w.text, "prob": w.prob} for w in tr.words]}))
@@ -634,8 +640,8 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     print(f"speech by {'say' if shutil.which('say') else 'espeak-ng'} in {shoots}, cuts in {root}", flush=True)
     done = []
-    for n, (voice, rate, seed, minutes, fillers) in enumerate(RUNS[: a.runs], 1):
-        r = one_run(root, shoots, a, voice, rate, seed, minutes, fillers, n)
+    for n, (voice, rate, seed, minutes, fillers, noise) in enumerate(RUNS[: a.runs], 1):
+        r = one_run(root, shoots, a, voice, rate, seed, minutes, fillers, noise, n)
         if r:
             done.append(r)
     all_results = [r["results"] for r in done]
