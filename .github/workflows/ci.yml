@@ -65,10 +65,6 @@ jobs:
         run: .github/scripts/mac-engine-smoke.sh
       - name: Sound effects, Venture Studio (read only) and reference pictures
         run: .github/scripts/mac-features-smoke.sh
-      - name: Whisper's word times on speech, and the cut made from them (informational)
-        continue-on-error: true
-        timeout-minutes: 25
-        run: python .github/scripts/whisper_timing.py --minutes 3
       - uses: actions/upload-artifact@v5
         if: always()
         with:

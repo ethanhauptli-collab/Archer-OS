@@ -1,0 +1,36 @@
+name: Whisper timing
+
+# How far off are mlx-whisper's word times on speech whose words are known, and what does the cut make of them?
+# Informational: it prints numbers (.github/scripts/whisper_timing.py) and fails only when the cut is plainly bad.
+# Runs when the cutting code or the script changes, or by hand.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/scripts/whisper_timing.py"
+      - ".github/workflows/whisper-timing.yml"
+      - "roughcut/timeline.py"
+      - "roughcut/segments.py"
+      - "roughcut/transcribe.py"
+      - "roughcut/analyze.py"
+      - "roughcut/pauses.py"
+      - "roughcut/ffmpeg_ops.py"
+
+concurrency:
+  group: whisper-timing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  timing:
+    name: Whisper word times and the cut (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: brew install ffmpeg
+      - run: python -m pip install -e '.[mac]'
+      - name: Speech by macOS `say`, transcribed by mlx-whisper, cut
+        run: python .github/scripts/whisper_timing.py --minutes 3 --runs 3

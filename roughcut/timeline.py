@@ -47,7 +47,8 @@ STYLES = {
 # off in noise. When the silence map shows the sound beginning (or ending) between the padded cut and the nearest silence, and no
 # neighbouring word's sound is in between, the edge moves to where the silence is, so a cut is never inside sound that way for an
 # edge off by up to the padding plus EDGE_SLACK. Nothing changes while the padded cut is already outside the sound.
-EDGE_SLACK = 0.10
+EDGE_SLACK = 0.10  # for a word's start
+EDGE_SLACK_END = 0.10  # for a word's end
 
 
 @dataclass
@@ -445,7 +446,7 @@ def speech_pieces(seg: Segment, clip: Clip, style: Style, section: int) -> list[
         lo = (end_of(all_words[first_i - 1]) if first_i > 0 else prev_end) + 0.02
         hi = (start_of(all_words[last_i + 1]) if last_i + 1 < len(all_words) else next_start) - 0.02
         wa = sil.onset_before(wa, floor=lo - 0.02, least=style.pad_in, within=style.pad_in + EDGE_SLACK)
-        wb = sil.release_after(wb, ceil=hi + 0.02, least=style.pad_out, within=style.pad_out + EDGE_SLACK)
+        wb = sil.release_after(wb, ceil=hi + 0.02, least=style.pad_out, within=style.pad_out + EDGE_SLACK_END)
         a = max(0.0, wa - style.pad_in, min(lo, wa))
         b = min(dur, wb + style.pad_out, max(hi, wb))
         if b - a > 0.05:

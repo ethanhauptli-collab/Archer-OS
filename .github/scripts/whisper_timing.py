@@ -137,7 +137,8 @@ def norm(text: str) -> str:
     return re.sub(r"[^a-z']", "", text.lower())
 
 
-def compare(truth_words: list[dict], heard: list[dict]) -> None:
+def compare(truth_words: list[dict], heard: list[dict]) -> dict[int, int]:
+    """Prints how Whisper's word times differ from the truth; returns {index of a word said: index of the word heard for it}."""
     a = [norm(w["text"]) for w in truth_words]
     b = [norm(w["text"]) for w in heard]
     matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
@@ -166,6 +167,7 @@ def compare(truth_words: list[dict], heard: list[dict]) -> None:
     line("word starts", start_err)
     line("word ends (next word follows)", end_err)
     line("word ends (a pause follows)", end_err_pause)
+    return dict(pairs)
 
 
 def fake_heard(truth_words: list[dict], seed: int = 5) -> list[dict]:
@@ -223,7 +225,26 @@ def db(v: float) -> float:
     return 20 * np.log10(max(v, 1e-9))
 
 
-def judge(out: Path, talk: Path, truth: dict, label: str) -> dict:
+def cause(edge: float, direction: int, truth_words: list[dict], heard: list[dict], matched: dict[int, int]) -> str:
+    """Why a cut edge sits in speech: the word it cuts, and what Whisper said about it."""
+    best, gap = None, 9.0
+    for i, w in enumerate(truth_words):
+        d = 0.0 if w["start"] <= edge <= w["end"] else min(abs(edge - w["start"]), abs(edge - w["end"]))
+        if d < gap:
+            best, gap = i, d
+    if best is None or gap > 0.3:
+        return "no word said near it"
+    w = truth_words[best]
+    if best not in matched:
+        return f"Whisper missed {w['text']!r} ({w['start']:.2f}-{w['end']:.2f} s)"
+    h = heard[matched[best]]
+    return (
+        f"{w['text']!r} said {w['start']:.2f}-{w['end']:.2f}, Whisper had {h['start']:.2f}-{h['end']:.2f} "
+        f"(start {1000 * (h['start'] - w['start']):+.0f} ms, end {1000 * (h['end'] - w['end']):+.0f} ms)"
+    )
+
+
+def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None) -> dict:
     kept = kept_ranges(next(out.glob("*.fcpxml")))
     audio = load_audio(talk)
     words = truth["words"]
@@ -244,6 +265,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str) -> dict:
             quiet.append(rms(audio[i : i + win]))
     floor = float(np.median(quiet)) if quiet else 1e-3
     inside_speech = outside_speech = edges = 0
+    flagged = []
     for k, (a, b) in enumerate(kept):
         for edge, direction in ((a, +1), (b, -1)):
             if (direction > 0 and k == 0 and a < 0.05) or (direction < 0 and b > truth["seconds"] - 0.05):
@@ -252,38 +274,45 @@ def judge(out: Path, talk: Path, truth: dict, label: str) -> dict:
             i = int(edge * SR)
             inner = audio[i : i + win] if direction > 0 else audio[i - win : i]
             outer = audio[i - win : i] if direction > 0 else audio[i : i + win]
-            inside_speech += rms(inner) > 3.0 * floor
-            outside_speech += rms(outer) > 3.0 * floor
+            in_, out_ = rms(inner) > 3.0 * floor, rms(outer) > 3.0 * floor
+            inside_speech += in_
+            outside_speech += out_
+            if (in_ or out_) and heard is not None:
+                flagged.append((edge, "starts" if direction > 0 else "ends", "inside" if in_ else "outside", cause(edge, direction, words, heard, matched or {})))
     n = len(words)
     result = {"whole": whole / n, "clipped": clipped / n, "gone": gone / n, "in": inside_speech / max(edges, 1), "out": outside_speech / max(edges, 1), "edges": edges}
     print(
         f"{label}: {n} words said: {100 * result['whole']:.1f}% whole, {100 * result['clipped']:.1f}% clipped by >15 ms, {100 * result['gone']:.1f}% not in the cut; "
         f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS)"
     )
+    for edge, kind, where, why in flagged[:12]:
+        print(f"    a cut {kind} at {edge:.2f} s with speech {where}: {why}")
+    if len(flagged) > 12:
+        print(f"    ... and {len(flagged) - 12} more")
     return result
 
 
 # ------------------------------------------------------------------ main
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--minutes", type=float, default=3)
-    ap.add_argument("--noise-db", type=float, default=-42)
-    ap.add_argument("--seed", type=int, default=11)
-    ap.add_argument("--voice", default=None)
-    ap.add_argument("--rate", type=int, default=185)
-    ap.add_argument("--dry", action="store_true", help="no model: the transcript is the truth with timing errors added")
-    ap.add_argument("--keep", type=Path, default=None)
-    a = ap.parse_args()
-    root = a.keep or Path(tempfile.mkdtemp(prefix="whisper-timing-"))
-    shoot = root / "shoot"
-    print(f"making {a.minutes:g} minutes of speech with {'say' if shutil.which('say') else 'espeak-ng'} in {root}", flush=True)
-    truth = make_talk(shoot, a.minutes, a.seed, a.voice, a.rate, a.noise_db)
-    print(f"{len(truth['words'])} words, {len(truth['pauses'])} pauses, noise bed {a.noise_db:g} dBFS", flush=True)
+RUNS = [  # (voice, words per minute, seed)
+    (None, 185, 11),
+    ("Daniel", 170, 12),
+    ("Alex", 200, 13),
+]
 
+
+def one_run(root: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, n: int) -> dict[str, dict] | None:
+    shoot = root / f"shoot{n}"
+    try:
+        truth = make_talk(shoot, a.minutes, seed, voice, rate, a.noise_db)
+    except subprocess.CalledProcessError:
+        if voice is None:
+            raise
+        print(f"voice {voice} isn't here; skipped")
+        return None
+    print(f"\n#### clip {n}: voice {voice or 'default'}, {rate} words a minute, {len(truth['words'])} words, {len(truth['pauses'])} pauses, noise bed {a.noise_db:g} dBFS", flush=True)
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     if a.dry:
         heard = fake_heard(truth["words"])
         (shoot / "talk.json").write_text(json.dumps({"words": [{"start": h["start"], "end": h["end"], "text": h["text"], "prob": 0.9} for h in heard]}))
@@ -297,21 +326,45 @@ def main() -> int:
         heard = [{"text": w.text, "start": w.start, "end": w.end} for w in tr.words]
         engine = ["--transcriber", "mlx", "--whisper-model", model]
     print("\n== Whisper's word times against the words that were said")
-    compare(truth["words"], heard)
-
+    matched = compare(truth["words"], heard)
     print("\n== the cut, made from that transcript")
     results = {}
     for style in ("tight", "medium"):
-        out = root / f"out_{style}"
+        out = root / f"out{n}_{style}"
         proc = subprocess.run(
             [sys.executable, "-m", "roughcut", "build", str(shoot), "--provider", "none", *engine, "--style", style, "-o", str(out), "--cache-dir", str(root / "cache"), "--no-menu"],
             capture_output=True, text=True,
         )
         if proc.returncode:
             print(proc.stdout[-1500:], proc.stderr[-1500:])
-            return 1
-        results[style] = judge(out, shoot / "talk.mov", truth, style)
-    ok = all(r["whole"] >= 0.80 and r["in"] <= 0.25 and r["out"] <= 0.25 for r in results.values())
+            raise SystemExit(1)
+        results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
+    return results
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--minutes", type=float, default=3)
+    ap.add_argument("--noise-db", type=float, default=-42)
+    ap.add_argument("--runs", type=int, default=1, help="how many clips (different voices and speeds)")
+    ap.add_argument("--dry", action="store_true", help="no model: the transcript is the truth with timing errors added")
+    ap.add_argument("--keep", type=Path, default=None)
+    a = ap.parse_args()
+    root = a.keep or Path(tempfile.mkdtemp(prefix="whisper-timing-"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    print(f"speech by {'say' if shutil.which('say') else 'espeak-ng'} in {root}", flush=True)
+    all_results = []
+    for n, (voice, rate, seed) in enumerate(RUNS[: a.runs], 1):
+        r = one_run(root, a, voice, rate, seed, n)
+        if r:
+            all_results.append(r)
+    print("\n#### all clips")
+    for style in ("tight", "medium"):
+        rs = [r[style] for r in all_results]
+        if rs:
+            m = {k: float(np.mean([x[k] for x in rs])) for k in ("whole", "clipped", "gone", "in", "out")}
+            print(f"{style}: {len(rs)} clips; words whole {100 * m['whole']:.1f}%, clipped {100 * m['clipped']:.1f}%, not in the cut {100 * m['gone']:.1f}%; cut edges inside speech {100 * m['in']:.1f}%, a word's edge thrown away {100 * m['out']:.1f}%")
+    ok = bool(all_results) and all(r[st]["whole"] >= 0.80 and r[st]["in"] <= 0.25 and r[st]["out"] <= 0.25 for r in all_results for st in r)
     print("\nwhisper timing: " + ("done" if ok else "the cut is clearly worse than it should be (see above)"))
     return 0 if ok else 1
 
