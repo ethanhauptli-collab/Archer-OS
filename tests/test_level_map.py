@@ -184,7 +184,7 @@ def test_a_clean_recording_is_left_to_silencedetect(tmp_path_factory, tmp_path):
     )
     clip = analyze([root / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
     assert clip.silence_db == ffmpeg_ops.DEFAULT_NOISE_DB
-    assert not (tmp_path / "cache" / clip.media.fingerprint / "levels10-v1.json").exists()  # no extra pass over a clean clip
+    assert not (tmp_path / "cache" / clip.media.fingerprint / "levels10-v2.json").exists()  # no extra pass over a clean clip
 
 
 def test_a_map_that_finds_no_pauses_is_replaced_by_the_loudness_map(room, tmp_path, monkeypatch):
@@ -192,7 +192,7 @@ def test_a_map_that_finds_no_pauses_is_replaced_by_the_loudness_map(room, tmp_pa
     monkeypatch.setattr(ffmpeg_ops, "noise_threshold", lambda peaks: (-3.0, -30.0))
     clip = analyze([room / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
     assert [(round(s), round(e)) for s, e in clip.silences] == [(0, 1), (4, 6), (10, 12)]
-    assert clip.silence_db == pytest.approx(-35.0, abs=1.0)
+    assert clip.silence_db == -3.0  # the level silencedetect ran at stays; the paper edit and the bed check go by it
     assert "8." not in [w.text for s in clip.segments for w in s.words]
 
 

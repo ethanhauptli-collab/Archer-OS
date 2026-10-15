@@ -158,8 +158,23 @@ def spine_edges(fcpxml: Path) -> tuple[str, Fraction, list[Edge], list[tuple[str
 # ------------------------------------------------------------------ the sound
 
 def listen(path: str) -> list[float]:
-    """The level (dBFS RMS) of each 10 ms of a file's first audio track."""
+    """The level (dBFS RMS) of each 10 ms of a file's first audio track, from its first sample (see audio_offset)."""
     return ffmpeg_ops.window_rms(Path(path), WINDOW)
+
+
+def audio_offset(path: str) -> float:
+    """Seconds into the file its first reading is: how long after the file begins its audio does (0.0 for nearly every file).
+
+    The cut's times are the file's own clock, as the picture sees it; `listen` counts from the first sample.
+    """
+    from . import media
+
+    try:
+        data = media._ffprobe(Path(path))
+        audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+        return media.audio_late(audio, data.get("format") or {}) if audio else 0.0
+    except Exception:  # noqa: BLE001 - not knowing is the same as nothing to allow for
+        return 0.0
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -190,7 +205,7 @@ def _reach(levels: list[float], i: int, step: int, threshold: float, limit: int,
     return quiet, _run(levels, i, step, threshold, limit)
 
 
-def _loud_end(levels: list[float], kept: list[tuple[float, float]] | None) -> float:
+def _loud_end(levels: list[float], kept: list[tuple[float, float]] | None, offset: float = 0.0) -> float:
     """The level (95th percentile) of the loud end of the dialogue that is kept: the whole file's when that is too little to go by.
 
     A file can hold a minute of nat sound and one planned line: the line is a twentieth of it at most, so the whole file's loud end is
@@ -199,7 +214,7 @@ def _loud_end(levels: list[float], kept: list[tuple[float, float]] | None) -> fl
     if kept:
         picked: list[float] = []
         for a, b in kept:
-            picked.extend(levels[max(0, int(a / WINDOW)) : max(0, int(b / WINDOW))])
+            picked.extend(levels[max(0, int((a - offset) / WINDOW)) : max(0, int((b - offset) / WINDOW))])
         if len(picked) >= 100:
             return _percentile(picked, 0.95)
     return _percentile(levels, 0.95)
@@ -217,16 +232,19 @@ class Judged:
     tight_gaps: list[tuple[Edge, float, float, float]] = field(default_factory=list)  # (edit, sound cut off, kept, seconds of quiet between)
 
 
-def judge_detail(edges: list[Edge], levels: list[float], fillers: list[tuple[float, float]] = (), kept: list[tuple[float, float]] | None = None) -> Judged:
+def judge_detail(
+    edges: list[Edge], levels: list[float], fillers: list[tuple[float, float]] = (), kept: list[tuple[float, float]] | None = None, offset: float = 0.0
+) -> Judged:
     """The edits of one file that go through sound, and the two kinds that are worth a listen without being a fault.
 
-    `kept` is the file's kept dialogue as (start, end) seconds: the loud end of the speech is read from it. Sound is what is at least
+    `kept` is the file's kept dialogue as (start, end) seconds: the loud end of the speech is read from it. `offset` is how far into
+    the file the first reading is (a file whose audio starts late); the edits, `kept` and `fillers` are on the file's clock. Sound is what is at least
     SPEECH_OVER_FLOOR over the quiet floor and within SPEECH_WINDOW of the loud end, so a breath in a very quiet room isn't one.
     """
     if len(levels) < 100:
         return Judged()
     floor = max(_percentile(levels, 0.10), FLOOR_LIMIT)
-    loud = _loud_end(levels, kept)
+    loud = _loud_end(levels, kept, offset)
     if loud - floor < MIN_SEPARATION:
         return Judged()
     threshold = max(floor + SPEECH_OVER_FLOOR, loud - SPEECH_WINDOW)
@@ -234,7 +252,7 @@ def judge_detail(edges: list[Edge], levels: list[float], fillers: list[tuple[flo
     side = int(round(TIGHT_GAP / WINDOW))
     out = Judged(floor=floor, loud=loud)
     for e in edges:
-        i = int(round(e.source / WINDOW))
+        i = int(round((e.source - offset) / WINDOW))
         if not 1 <= i < len(levels) - 1:
             continue
         # kept: i onwards for a start, before i for an end; cut away: the other side
@@ -261,10 +279,12 @@ def judge_detail(edges: list[Edge], levels: list[float], fillers: list[tuple[flo
     return out
 
 
-def judge(edges: list[Edge], levels: list[float], fillers: list[tuple[float, float]] = (), kept: list[tuple[float, float]] | None = None) -> tuple[list[tuple[Edge, float, float]], int, float | None]:
+def judge(
+    edges: list[Edge], levels: list[float], fillers: list[tuple[float, float]] = (), kept: list[tuple[float, float]] | None = None, offset: float = 0.0
+) -> tuple[list[tuple[Edge, float, float]], int, float | None]:
     """The edits of one file that go through sound: [(edit, seconds of sound cut off, seconds kept)], how many were a little sound
     only, and the quiet floor used (None: sound and background can't be told apart here, nothing is judged)."""
-    d = judge_detail(edges, levels, fillers, kept)
+    d = judge_detail(edges, levels, fillers, kept, offset)
     return d.found, d.small, d.floor
 
 
@@ -298,17 +318,20 @@ def quiet_runs(
     floors: dict[str, float],
     at_least: float = 0.0,
     louds: dict[str, float] | None = None,
+    offsets: dict[str, float] | None = None,
 ) -> list[tuple[float, Fraction, str, float]]:
     """Every quiet stretch inside the kept dialogue longer than `at_least`: (seconds, where in the cut, the file, seconds into it).
 
-    `louds` is each file's loud end (judge_detail's), which sets how loud a click may be and still sit inside a pause.
+    `louds` is each file's loud end (judge_detail's), which sets how loud a click may be and still sit inside a pause; `offsets` how far
+    into each file its first reading is (a file whose audio starts late).
     """
     runs: list[tuple[float, Fraction, str, float]] = []
     for path, a, b, offset in ranges:
         levels, floor = levels_by_file.get(path), floors.get(path)
         if not levels or floor is None:
             continue
-        i, end = max(0, int(round(a / WINDOW))), min(len(levels), int(round(b / WINDOW)))
+        off = (offsets or {}).get(path, 0.0)
+        i, end = max(0, int(round((a - off) / WINDOW))), min(len(levels), int(round((b - off) / WINDOW)))
         low = _quiet_mask(levels, i, end, floor, (louds or {}).get(path))
         run_from = None
         for m in range(len(low) + 1):
@@ -318,14 +341,21 @@ def quiet_runs(
             elif not quiet and run_from is not None:
                 length = (m - run_from) * WINDOW
                 if length > at_least:
-                    runs.append((length, offset + Fraction((i + run_from) * WINDOW - a).limit_denominator(1000), path, (i + run_from) * WINDOW))
+                    at = (i + run_from) * WINDOW + off  # in the file
+                    runs.append((length, offset + Fraction(at - a).limit_denominator(1000), path, at))
                 run_from = None
     return runs
 
 
-def pauses(ranges: list[tuple[str, float, float, Fraction]], levels_by_file: dict[str, list[float]], floors: dict[str, float], louds: dict[str, float] | None = None) -> tuple[tuple[float, Fraction] | None, int]:
+def pauses(
+    ranges: list[tuple[str, float, float, Fraction]],
+    levels_by_file: dict[str, list[float]],
+    floors: dict[str, float],
+    louds: dict[str, float] | None = None,
+    offsets: dict[str, float] | None = None,
+) -> tuple[tuple[float, Fraction] | None, int]:
     """The longest quiet stretch inside the kept dialogue (seconds, where in the cut) and how many are over a second."""
-    runs = quiet_runs(ranges, levels_by_file, floors, louds=louds)
+    runs = quiet_runs(ranges, levels_by_file, floors, louds=louds, offsets=offsets)
     longest = max(runs, key=lambda r: r[0], default=None)
     return (None if longest is None else (longest[0], longest[1])), sum(1 for r in runs if r[0] > 1.0)
 
@@ -473,6 +503,7 @@ def check(target: Path, *, progress=None) -> Report:
     levels_by_file: dict[str, list[float]] = {}
     floors: dict[str, float] = {}
     louds: dict[str, float] = {}
+    offsets: dict[str, float] = {}
     stalled_drives: set[str] = set()
     stalled = False
     for path in files:
@@ -497,11 +528,15 @@ def check(target: Path, *, progress=None) -> Report:
         if not levels:
             report.problems.append(f"{name}: no audio could be read; not checked")
             continue
+        try:
+            offsets[path] = bounded(audio_offset, path, seconds=SMALL_SECONDS, what=name)
+        except Stalled:
+            offsets[path] = 0.0
         levels_by_file[path] = levels
         report.clips += 1
         report.seconds += len(levels) * WINDOW
         w = texts[path]
-        judged = judge_detail(by_file.get(path, []), levels, [(x.start, x.end) for x in w if x.is_filler], kept_by_file.get(path))
+        judged = judge_detail(by_file.get(path, []), levels, [(x.start, x.end) for x in w if x.is_filler], kept_by_file.get(path), offsets[path])
         if judged.floor is None:
             report.unjudged.append(name)
             continue
@@ -518,8 +553,8 @@ def check(target: Path, *, progress=None) -> Report:
     for group in (report.flagged, report.beside_fillers, report.tight_gaps):
         group.sort(key=lambda f: f.edge.timeline)
     report.fillers.sort(key=lambda f: f[1])
-    report.longest_pause, report.long_pauses = pauses(ranges, levels_by_file, floors, louds)
-    report.long_runs = sorted(quiet_runs(ranges, levels_by_file, floors, at_least=1.0, louds=louds), key=lambda r: -r[0])
+    report.longest_pause, report.long_pauses = pauses(ranges, levels_by_file, floors, louds, offsets)
+    report.long_runs = sorted(quiet_runs(ranges, levels_by_file, floors, at_least=1.0, louds=louds, offsets=offsets), key=lambda r: -r[0])
     return report
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .textio import Stalled, bounded
-from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, split_words_in_silence
+from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, speech_stands_above_room, split_invented_words
 from .transcribe import Transcriber, TranscriptionError, Transcript, find_sidecar, load_sidecar
 
 ROLE_LABELS = {
@@ -71,7 +71,7 @@ class Cache:
         if p.is_file():
             try:
                 return json.loads(p.read_text())
-            except json.JSONDecodeError:
+            except (ValueError, OSError):  # not JSON, not text (a half-written file, a bad disk): made again
                 return None
         return None
 
@@ -279,8 +279,19 @@ def pause_warning(clip: Clip) -> str | None:
 
 
 LOUDNESS_CACHE = "loudness-v1.json"
-LEVELS_CACHE = "levels10-v1.json"  # a noisy clip's loudness every 10 ms, in whole dB
-FLATNESS_CACHE = "flatness-levels-v1.json"  # the spectral flatness of the pauses that loudness shows: tonal is music, not a room
+LEVELS_CACHE = "levels10-v2.json"  # a noisy clip's loudness every 10 ms, in whole dB, with the room's rumble filtered out (LEVEL_HIGHPASS)
+FLATNESS_CACHE = "flatness-levels-v2.json"  # the spectral flatness of the pauses that loudness shows: tonal is music, not a room
+LEVEL_HIGHPASS = 250.0  # Hz: a room's rumble (a car, an air handler) and mains hum are below the speech band and don't count as sound in the loudness map
+
+
+@dataclass
+class _Room:
+    """What a noisy clip's own loudness says: its pauses, the level they stay under, and the room's floor."""
+
+    silences: list[tuple[float, float]]  # on the file's clock
+    db: float
+    floor: float
+    offset: float = 0.0  # seconds into the file the first 10 ms reading is: the clip's audio start
 
 
 def probe_cached(path: Path, cache: Cache) -> MediaInfo:
@@ -288,7 +299,7 @@ def probe_cached(path: Path, cache: Cache) -> MediaInfo:
     from .media import fingerprint
 
     fp = fingerprint(path)
-    cached = cache.get(fp, "probe.json")
+    cached = cache.get(fp, "probe-v2.json")  # v2: with when the audio starts (media.audio_late)
     if cached:
         info = MediaInfo.from_json(cached)
         # The cache is keyed by the file (its resolved path, size and edit date), so the same file reached another way (a link, a folder
@@ -297,7 +308,7 @@ def probe_cached(path: Path, cache: Cache) -> MediaInfo:
         info.path, info.name = str(path), path.name
         return info
     info = probe(path)
-    cache.put(fp, "probe.json", info.to_json())
+    cache.put(fp, "probe-v2.json", info.to_json())
     return info
 
 
@@ -342,7 +353,7 @@ def measure_levels(clips: list[Clip], cache: Cache, *, workers: int = 4, only_mi
         blocks = _loudness_blocks(clip.media, cache)
         if not blocks:
             return
-        s = ffmpeg_ops.level_summary(blocks, speech_spans(clip), clip.duration)
+        s = ffmpeg_ops.level_summary(blocks, speech_spans(clip), clip.duration, clip.media.audio_start)
         clip.loudness, clip.loudness_floor, clip.peak_db, clip.sound_end = s["lufs"], s["floor"], s["peak"], s["end"]
         clip.speech_loudness, clip.speech_peak = s["speech"], s["speech_peak"]
 
@@ -502,33 +513,43 @@ def analyze(
         """The clip's loudness every 10 ms, in whole dB (the same readings whether they were just made or come from the cache)."""
         cached = cache.get(m.fingerprint, LEVELS_CACHE)
         if cached is None:
-            cached = {"window": ffmpeg_ops.LEVEL_WINDOW, "db": [round(v) for v in ffmpeg_ops.window_rms(Path(m.path), ffmpeg_ops.LEVEL_WINDOW)]}
-            cache.put(m.fingerprint, LEVELS_CACHE, cached)
+            readings = ffmpeg_ops.window_rms(Path(m.path), ffmpeg_ops.LEVEL_WINDOW, highpass=LEVEL_HIGHPASS)
+            cached = {"window": ffmpeg_ops.LEVEL_WINDOW, "highpass": LEVEL_HIGHPASS, "db": [round(v) for v in readings]}
+            if readings:  # a read that failed is asked for again next time, not answered with nothing for good
+                cache.put(m.fingerprint, LEVELS_CACHE, cached)
         return [float(v) for v in cached.get("db", [])]
 
     def _by_level(clip: Clip) -> None:
         """A raised silence level means a noisy room. Its own loudness tells the room from the speech where silencedetect's single
-        samples can't (a click splits a pause, a gust cuts it to pieces): the pauses it finds stand in for a map that finds almost
-        none, and the words Whisper wrote over nothing but the room are dropped once there is a transcript."""
+        samples can't (a click splits a pause, a gust cuts it to pieces). What it finds is kept as the clip's room: it is put to use
+        once there is a transcript to check it against (_use_room)."""
         from .pauses import MUSIC_FLATNESS, pause_flatness
 
         if clip.music_bed:  # a song given with --music: no pauses of its own to cut
             return
         m = clip.media
         levels = _levels(m)
-        found = ffmpeg_ops.level_silences(levels, float(m.duration))
+        # The readings count from the first sample; the file's clock (silencedetect's, a person's transcript) from the file's start.
+        offset = float(m.audio_start)
+        found = ffmpeg_ops.level_silences(levels, float(m.duration) - offset)
         if found is None:
             return
-        # Music under the speech isn't a room: its quiet stretches can sit above a quiet real word, so they prove nothing.
+        # Music under the speech isn't a room: its quiet stretches can sit above a quiet real word, so they prove nothing. Nor can a
+        # clip with too little pause to tell music from room (flatness is None) be called one.
         flat = cache.get(m.fingerprint, FLATNESS_CACHE)
         if flat is None:
             flat = {"flatness": pause_flatness(Path(m.path), found["silences"])}
             cache.put(m.fingerprint, FLATNESS_CACHE, flat)
-        if flat.get("flatness") is not None and flat["flatness"] < MUSIC_FLATNESS:
+        if flat.get("flatness") is None or flat["flatness"] < MUSIC_FLATNESS:
             return
-        rooms[clip.id] = [tuple(s) for s in found["silences"]]
-        if not shows_pauses(clip.silences, float(m.duration)) and shows_pauses(found["silences"], float(m.duration)):
-            clip.silences, clip.silence_db = found["silences"], found["db"]
+        rooms[clip.id] = _Room([(round(s + offset, 3), round(e + offset, 3)) for s, e in found["silences"]], found["db"], found["floor"], offset)
+
+    def _use_room(clip: Clip, room: _Room) -> None:
+        """Where silencedetect finds almost no pauses and the loudness does, the loudness map stands in for the clip's silences.
+        The level silencedetect ran at (silence_db) stays: it is what the paper edit and the bed check say about the clip."""
+        dur = float(clip.media.duration)
+        if not shows_pauses(clip.silences, dur) and shows_pauses(room.silences, dur):
+            clip.silences = room.silences
 
     def _silence(clip: Clip) -> None:
         m = clip.media
@@ -546,7 +567,7 @@ def analyze(
             cache.put(m.fingerprint, "noise-floor-v1.json", level)
         clip.silence_db, clip.background_db = level["db"], level["floor"]
         clip.silences = _silence_at(m, clip.silence_db)
-        if clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB:
+        if clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB:  # a noisy room; a quiet recording (a lower level) has no room to read
             default_maps[clip.id] = _silence_at(m, ffmpeg_ops.DEFAULT_NOISE_DB)
             _by_level(clip)
 
@@ -615,21 +636,34 @@ def analyze(
                     failures.succeeded()
                     cache.put(m.fingerprint, key, transcript.to_json())
                     log(f"  done in {time.monotonic() - ts:.1f}s, {len(transcript.words)} words")
+        if transcript is not None and not sidecar and m.audio_start:
+            transcript = transcript.shifted(m.audio_start)  # the engine counted from the audio's first sample; the file's clock starts earlier
         if transcript is not None:
             transcribed += 1
             # Only true silence proves a word was invented. A raised level (music bed, loud
             # room) can sit above a quiet real word, so it never deletes words.
             words = drop_words_in_silence(transcript.words, default_maps.get(clip.id, clip.silences))
-            if clip.id in rooms:
-                words, invented = split_words_in_silence(words, rooms[clip.id])
-                if invented:
-                    shown = ", ".join(f"{w.text.strip()!r} at {w.start:.1f} s" for w in invented[:4])
-                    said = f"{m.name}: left out {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})"
-                    log(said)
-                    left_out.append(said)
+            room = rooms.get(clip.id)
+            if room is not None:
+                levels = _levels(m)
+                if speech_stands_above_room(words, levels, room.floor, ffmpeg_ops.LEVEL_WINDOW, ffmpeg_ops.LEVEL_MIN_SEPARATION, room.offset):
+                    words, invented = split_invented_words(
+                        words, room.silences, levels, room.floor, room.db, ffmpeg_ops.LEVEL_WINDOW,
+                        min_separation=ffmpeg_ops.LEVEL_MIN_SEPARATION, offset=room.offset,
+                    )
+                    _use_room(clip, room)
+                    if invented:
+                        shown = ", ".join(f"{w.text.strip()!r} at {w.start:.1f} s" for w in invented[:4])
+                        said = f"{m.name}: left out {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})"
+                        log(said)
+                        left_out.append(said)
+                else:
+                    log(f"{m.name}: the words are within {ffmpeg_ops.LEVEL_MIN_SEPARATION:g} dB of the room's noise, so its loudness can't tell speech from room; kept every word")
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:
+            if clip.id in rooms:  # no words to check the room against: the map stands in as it always did
+                _use_room(clip, rooms[clip.id])
             regions = ffmpeg_ops.sound_regions(clip.silences, float(m.duration))
             clip.segments = segments_from_regions(clip.id, regions)
             clip.transcript_source = "silence-map"

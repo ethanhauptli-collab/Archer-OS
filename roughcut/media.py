@@ -46,6 +46,7 @@ class MediaInfo:
     codec: str = ""
     fingerprint: str = ""
     warnings: list[str] = field(default_factory=list)
+    audio_start: float = 0.0  # seconds the audio begins after the file does (a trimmed copy): see audio_late
 
     @property
     def stem(self) -> str:
@@ -136,6 +137,31 @@ def _ffprobe(path: Path) -> dict:
     if proc.returncode != 0:
         raise MediaError(f"ffprobe failed on {path.name}: {proc.stderr.strip()[:300]}")
     return json.loads(proc.stdout or "{}")
+
+
+AUDIO_LATE = 0.005  # an audio stream that begins less than this after the file does is on time
+AUDIO_LATE_SAID = 0.1  # and one that is later than this is said in the paper edit
+
+
+def _seconds(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def audio_late(audio: dict, fmt: dict) -> float:
+    """Seconds the first audio stream begins after the file does (0.0 when on time or not known).
+
+    A trimmed copy (a stream copy cut at a keyframe, a QuickTime trim) can have its audio start half a second or more after the
+    picture. ffmpeg's silencedetect and a person's transcript count from the file's clock; the speech engine and the loudness
+    readings count from the first sample, so the analysis adds this to what it reads by sample.
+    """
+    start, base = _seconds(audio.get("start_time")), _seconds((fmt or {}).get("start_time"))
+    if start is None:
+        return 0.0
+    late = start - (base or 0.0)
+    return round(late, 4) if late >= AUDIO_LATE else 0.0
 
 
 def _rotation(stream: dict) -> int:
@@ -242,6 +268,10 @@ def probe(path: Path) -> MediaInfo:
         a0 = audio_streams[0]
         info.audio_channels = int(a0.get("channels") or 2)
         info.audio_rate = int(a0.get("sample_rate") or 48000)
+        if kind == "video":
+            info.audio_start = audio_late(a0, fmt)
+            if info.audio_start >= AUDIO_LATE_SAID:
+                warnings.append(f"the audio starts {info.audio_start:.2f} s after the picture; the cut is allowed for it")
         if kind == "audio":
             seconds = _duration_seconds(a0, fmt)
             samples = round(seconds * info.audio_rate)

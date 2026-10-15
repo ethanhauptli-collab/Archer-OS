@@ -358,13 +358,19 @@ class _ClipIndex:
 CLICK_GAP = 0.04  # sound shorter than this between two silences is a click, not a word: they are one pause
 
 
-def _join_close(silences) -> list[tuple[float, float]]:
+def _join_close(silences, words=None) -> list[tuple[float, float]]:
     """The silence map with a pause a click split put back together. silencedetect compares single samples with its level, so one
     click in the middle of a pause ends one silence and starts the next at the same moment; each half is then judged on its own
-    (and the second never cut, as the piece already begins where the first ended)."""
+    (and the second never cut, as the piece already begins where the first ended).
+
+    Not across a word: a short soft word ("I", "a") can sound in that gap, and joined, the pause would be cut over it. `words` is
+    the clip's (start, end) spans; word_in_pause asks the same of them as it does for a breath.
+    """
+    spoken = sorted(words) if words else []
+    starts = [s for s, _ in spoken]
     out: list[tuple[float, float]] = []
     for s, e in sorted(silences):
-        if out and s - out[-1][1] < CLICK_GAP:
+        if out and s - out[-1][1] < CLICK_GAP and not (spoken and word_in_pause(spoken, starts, out[-1][0], out[-1][1], s, e)):
             out[-1] = (out[-1][0], max(out[-1][1], e))
         else:
             out.append((s, e))
@@ -377,8 +383,8 @@ def _index(clip: Clip) -> _ClipIndex:
     memo = clip.__dict__.get("_timeline_index")
     if memo is not None and memo[0] == key:
         return memo[1]
-    silences = _Spans(_join_close(clip.silences))
     spoken = _Spans((w.start, w.end) for seg in clip.segments for w in seg.words)
+    silences = _Spans(_join_close(clip.silences, spoken.spans))
     breaths = sorted(clip.breaths)
 
     def breath_between(a: float, b: float) -> bool:

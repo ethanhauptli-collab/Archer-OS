@@ -67,6 +67,58 @@ def split_words_in_silence(words: list[Word], silences: list[tuple[float, float]
     return kept, dropped
 
 
+def _word_readings(levels: list[float], w: Word, window: float, offset: float = 0.0) -> list[float]:
+    """The readings under a word. `offset` is how far into the file the first reading is (a file whose audio starts late)."""
+    i = max(0, int((w.start - offset) / window))
+    return levels[i : max(i + 1, int((w.end - offset) / window))]
+
+
+def speech_stands_above_room(
+    words: list[Word], levels: list[float], floor: float, window: float = 0.01, min_separation: float = 12.0, offset: float = 0.0
+) -> bool:
+    """Is the transcript's own speech clearly louder than the room? The median reading inside the words, against the room's floor.
+
+    The loudest twentieth of a clip says nothing about its talker when a horn, a door or a laugh is that loud; the words are where
+    the talker is. Within `min_separation` of the room, loudness can't tell the speech from the room and proves nothing.
+    """
+    inside = sorted(v for w in words for v in _word_readings(levels, w, window, offset))
+    return bool(inside) and inside[len(inside) // 2] - floor >= min_separation
+
+
+def split_invented_words(
+    words: list[Word],
+    silences: list[tuple[float, float]],
+    levels: list[float],
+    floor: float,
+    pause_db: float,
+    window: float = 0.01,
+    tolerance: float = 0.05,
+    min_separation: float = 12.0,
+    offset: float = 0.0,
+) -> tuple[list[Word], list[Word]]:
+    """(the words kept, the words Whisper wrote over nothing but the room) by the clip's own 10 ms loudness.
+
+    A word is a candidate when it lies fully inside a loudness pause (split_words_in_silence). It is dropped only if the words of the
+    clip stand clearly above the room (speech_stands_above_room), so the map can tell speech from the room at all, and if its own
+    readings (their 90th percentile) are under the pause level. The second test is made on the word itself, not on the pause, which
+    a click rule closed over a short soft word ("a", "I") that sounds a little over the room.
+    """
+    kept, candidates = split_words_in_silence(words, silences, tolerance)
+    if not candidates:
+        return words, []
+    if not speech_stands_above_room(words, levels, floor, window, min_separation, offset):
+        return words, []
+    invented: list[Word] = []
+    for w in candidates:
+        r = sorted(_word_readings(levels, w, window, offset))
+        if r and r[int(0.9 * (len(r) - 1))] <= pause_db:
+            invented.append(w)
+        else:
+            kept.append(w)
+    kept.sort(key=lambda w: (w.start, w.end))
+    return kept, invented
+
+
 def drop_words_in_silence(words: list[Word], silences: list[tuple[float, float]], tolerance: float = 0.05) -> list[Word]:
     """Whisper sometimes invents words over silence; remove any fully inside one."""
     return split_words_in_silence(words, silences, tolerance)[0]

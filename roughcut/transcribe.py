@@ -70,6 +70,14 @@ class Transcript:
     def to_json(self) -> dict:
         return {"language": self.language, "source": self.source, "words": [asdict(w) for w in self.words]}
 
+    def shifted(self, seconds: float) -> "Transcript":
+        """The same words `seconds` later (the speech engine counts from the first sample; see media.audio_late)."""
+        if not seconds:
+            return self
+        return Transcript(
+            words=[Word(w.start + seconds, w.end + seconds, w.text, w.prob) for w in self.words], language=self.language, source=self.source
+        )
+
     @classmethod
     def from_json(cls, d: dict) -> "Transcript":
         return cls(
@@ -106,6 +114,11 @@ def resolve_backend(name: str) -> str:
     )
 
 
+# How mlx-whisper is asked, for the transcript cache. 2: without hallucination_silence_threshold, which left holes of about 2 s with
+# speech in them (below). Transcripts made the first way are in the cache of anyone who cut footage before, under the same key.
+MLX_ASKED = 2
+
+
 class Transcriber:
     def __init__(self, backend: str, model: str | None = None, language: str | None = None, verbatim: bool = True):
         self.backend = backend
@@ -116,7 +129,10 @@ class Transcriber:
 
     @property
     def cache_key(self) -> str:
-        return f"{self.backend}-{self.model}-{self.language or 'auto'}-{'v' if self.verbatim else 'c'}".replace("/", "_")
+        key = f"{self.backend}-{self.model}-{self.language or 'auto'}-{'v' if self.verbatim else 'c'}"
+        if self.backend == "mlx":
+            key += f"-w{MLX_ASKED}"  # a transcript made another way is made again
+        return key.replace("/", "_")
 
     def transcribe(self, path: Path) -> Transcript:
         if self.backend == "mlx":
@@ -135,7 +151,7 @@ class Transcriber:
             word_timestamps=True,
             # mlx-whisper only uses initial_prompt for the first 30s window.
             # Conditioning on its own (disfluent) output carries the verbatim
-            # style forward; the silence guard below curbs runaway repeats.
+            # style forward.
             condition_on_previous_text=self.verbatim,
             # No hallucination_silence_threshold: it is meant to skip silent stretches where Whisper invents text, but on real
             # speech it also skipped the words after a long token (an em dash joining two words), leaving 2 s holes in the

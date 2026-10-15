@@ -61,10 +61,15 @@ def window_peaks(path: Path, window: float = 0.05) -> list[float]:
     return peaks
 
 
-def window_rms(path: Path, window: float = 0.01, rate: int = 16000) -> list[float]:
-    """RMS level (dBFS) of each `window` seconds of the first audio track, mixed down to mono at `rate`; [] if it can't be read."""
+def window_rms(path: Path, window: float = 0.01, rate: int = 16000, highpass: float | None = None) -> list[float]:
+    """RMS level (dBFS) of each `window` seconds of the first audio track, mixed down to mono at `rate`; [] if it can't be read.
+
+    `highpass` (Hz) filters the rumble out first, twice over (24 dB an octave): a car, an air handler or mains hum is below the
+    speech band, and counted in the level it hides a quiet word from a reading that is meant to tell speech from the room.
+    """
+    hp = f"highpass=f={highpass:g},highpass=f={highpass:g}," if highpass else ""
     af = (
-        f"aformat=channel_layouts=mono,aresample={rate},asetnsamples=n={int(rate * window)}:p=0,"
+        f"aformat=channel_layouts=mono,aresample={rate},{hp}asetnsamples=n={int(rate * window)}:p=0,"
         "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-"
     )
     cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-af", af, "-f", "null", "-"]
@@ -176,7 +181,7 @@ def _percentile(values: list[float], q: float) -> float:
     return v[min(len(v) - 1, int(q * len(v)))]
 
 
-def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, duration: float | None = None) -> dict:
+def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, duration: float | None = None, offset: float = 0.0) -> dict:
     """Loudness facts for one clip from its `loudness_blocks`.
 
     lufs: integrated loudness of the whole clip (what its nat sound or music
@@ -185,6 +190,8 @@ def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, 
     momentary loudness). peak / speech_peak: sample peak of the clip / of
     the words (99.5th percentile of 100 ms blocks, so one bump doesn't
     count). end: where the last sound fades out (for back-timing music).
+
+    `offset`: seconds into the file the first block is (a file whose audio starts late); `spans` and `end` are on the file's clock.
     """
     step = blocks.get("step", LOUDNESS_STEP)
     m, peaks = blocks.get("m") or [], blocks.get("peak") or []
@@ -204,7 +211,7 @@ def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, 
         spans = sorted(spans)
         inside, j = [], 0
         for i in range(len(m)):
-            centre = (i + 1) * step - 0.2
+            centre = (i + 1) * step - 0.2 + offset
             while j < len(spans) and spans[j][1] < centre:
                 j += 1
             if j < len(spans) and spans[j][0] <= centre:
@@ -216,7 +223,7 @@ def level_summary(blocks: dict, spans: list[tuple[float, float]] | None = None, 
         loud_enough = max(ABSOLUTE_GATE, out["lufs"] - 30.0)
         last = max((i for i, v in enumerate(m) if v > loud_enough), default=None)
         if last is not None:
-            end = round((last + 1) * step, 2)
+            end = round((last + 1) * step + offset, 2)
             out["end"] = min(end, duration) if duration is not None else end
     return out
 
