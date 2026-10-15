@@ -55,8 +55,10 @@ END_REACH = 0.80  # for a word's end: seconds after the transcript's end in whic
 
 # The same early end shows as a pause that isn't there: the next word follows at once, and a run of words was split through the sound
 # between them. On a clip whose silence map shows its pauses (they would show here too), a transcript gap that is longer than the
-# style's pause by no more than FAKE_GAP, with no silence in it, is not a pause.
+# style's pause by no more than FAKE_GAP, with no silence in it, is not a pause. On a clip whose map shows none (a loud room or wind
+# hides them), the transcript is all there is to go by, and only the bias itself can be allowed for: EARLY_END.
 FAKE_GAP = 0.45
+EARLY_END = 0.10
 
 
 @dataclass
@@ -315,8 +317,11 @@ def _spans(silences) -> _Spans:
 
 def _sound_runs_through(ix: "_ClipIndex", sil: _Spans, max_gap: float, a: float, b: float) -> bool:
     """The transcript puts a pause of `b - a` seconds between two words, longer than the style's by no more than FAKE_GAP, on a
-    clip whose silence map finds its pauses, and the map has no silence in it: a word that ended early, not a pause."""
-    return FAKE_GAP > 0 and ix.shows_pauses and max_gap < b - a <= max_gap + FAKE_GAP and sil.overlap(a, b) < 0.5 * max_gap
+    clip whose silence map finds its pauses, and the map has no silence in it: a word that ended early, not a pause. On a clip whose
+    map finds none, a gap longer than the style's by no more than EARLY_END is the same thing, for the same reason."""
+    if not ix.shows_pauses:
+        return max_gap < b - a <= max_gap + EARLY_END
+    return FAKE_GAP > 0 and max_gap < b - a <= max_gap + FAKE_GAP and sil.overlap(a, b) < 0.5 * max_gap
 
 
 # One-off forms taking a plain list of silences. The timeline itself uses a clip's _index().

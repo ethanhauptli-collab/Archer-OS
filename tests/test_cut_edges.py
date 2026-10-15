@@ -19,7 +19,7 @@ from conftest import SPEECH, ffmpeg, make_clip, spread_words
 from roughcut.cli import main
 from roughcut.segments import build_segments
 from roughcut.timecode import parse_fcpx_time as T
-from roughcut.timeline import EDGE_SLACK, END_REACH, FAKE_GAP, STYLES, _Spans, speech_pieces
+from roughcut.timeline import EARLY_END, EDGE_SLACK, END_REACH, FAKE_GAP, STYLES, _Spans, speech_pieces
 from roughcut.transcribe import Word
 
 
@@ -161,6 +161,12 @@ def test_a_pause_the_silence_map_sees_still_splits_it():
 
 def test_without_a_silence_map_the_transcripts_gap_is_the_pause():
     assert len(_pair(0.5, silences=[])) == 2
+
+
+def test_without_a_silence_map_a_gap_a_word_end_early_could_make_is_not_a_pause():
+    """Nothing but the transcript to go by, so only the bias itself is allowed for: EARLY_END more than the style's pause."""
+    assert len(_pair(STYLES["tight"].max_gap + EARLY_END - 0.02, silences=[])) == 1
+    assert len(_pair(STYLES["tight"].max_gap + EARLY_END + 0.05, silences=[])) == 2
 
 
 def test_a_gap_longer_than_a_word_ends_early_is_a_pause():

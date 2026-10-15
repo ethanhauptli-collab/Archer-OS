@@ -493,6 +493,12 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         build(shoot, out, style, root / "cache", engine)
         results[style] = judge(out, shoot / "talk.mov", truth, style, heard, matched)
     dump(n, truth, heard, root / f"out{n}_tight")
+    clip = json.loads((root / f"out{n}_tight" / "analysis.json").read_text())["clips"][0]
+    quiet = sum(e - s_ for s_, e in clip.get("silences", []))
+    print(
+        f"silence map: {len(clip.get('silences', []))} silences, {100 * quiet / truth['seconds']:.0f}% of the clip quiet, found at {clip.get('silence_db')} dB over a background of {clip.get('background_db')} dB; "
+        f"it {'shows' if len(clip.get('silences', [])) >= 2 and quiet >= 0.03 * truth['seconds'] else 'does not show'} the clip's pauses"
+    )
     return {"n": n, "shoot": shoot, "truth": truth, "heard": heard, "matched": matched, "results": results}
 
 
@@ -553,56 +559,58 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
 
 # What the sweep tries: how far past a transcript's last word a sound still going is taken for its tail, the transcript gap that is not
 # taken for a pause when the silence map hears sound through it, and the paddings.
-SWEEP = [  # (pacing, end reach, fake gap, pad_out or None, start slack or None, pad_in or None)
-    ("tight", 0.80, 0.45, None, None, None),  # as shipped
-    ("tight", 0.60, 0.45, None, None, None),
-    ("tight", 1.00, 0.45, None, None, None),
-    ("tight", 0.80, 0.00, None, None, None),  # without the gap rule
-    ("tight", 0.80, 0.30, None, None, None),
-    ("tight", 0.80, 0.60, None, None, None),
-    ("tight", 0.80, 0.45, 0.16, None, None),
-    ("tight", 0.80, 0.45, None, None, 0.08),
-    ("tight", 0.80, 0.45, None, 0.20, None),
-    ("medium", 0.80, 0.45, None, None, None),  # as shipped
-    ("medium", 0.80, 0.00, None, None, None),
+SWEEP = [  # (pacing, end reach, fake gap, pad_out or None, start slack or None, pad_in or None, early end or None)
+    ("tight", 0.80, 0.45, None, None, None, None),  # as shipped
+    ("tight", 0.80, 0.45, None, None, None, 0.00),  # nothing allowed for the early end where the silence map shows no pauses
+    ("tight", 0.80, 0.45, None, None, None, 0.15),
+    ("tight", 0.80, 0.45, None, None, None, 0.25),
+    ("tight", 0.80, 0.00, None, None, None, 0.00),  # neither
+    ("tight", 0.80, 0.45, 0.16, None, None, None),
+    ("tight", 0.80, 0.45, 0.16, None, None, 0.15),
+    ("medium", 0.80, 0.45, None, None, None, None),  # as shipped
+    ("medium", 0.80, 0.45, None, None, None, 0.00),
 ]
 
 
 @contextlib.contextmanager
-def tuned(style: str, reach: float, fake_gap: float, pad_out: float | None, start_slack: float | None = None, pad_in: float | None = None):
+def tuned(style: str, reach: float, fake_gap: float, pad_out: float | None, start_slack: float | None = None, pad_in: float | None = None, early_end: float | None = None):
     from roughcut import timeline
 
-    saved = (timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style])
+    saved = (timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style], getattr(timeline, "EARLY_END", None))
     try:
         timeline.END_REACH, timeline.FAKE_GAP = reach, fake_gap
         if start_slack is not None:
             timeline.EDGE_SLACK = start_slack
+        if early_end is not None and saved[4] is not None:
+            timeline.EARLY_END = early_end
         changes = {k: v for k, v in (("pad_out", pad_out), ("pad_in", pad_in)) if v is not None}
         if changes:
             timeline.STYLES[style] = dataclasses.replace(saved[3], **changes)
         yield
     finally:
-        timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style] = saved
+        timeline.END_REACH, timeline.FAKE_GAP, timeline.EDGE_SLACK, timeline.STYLES[style] = saved[:4]
+        if saved[4] is not None:
+            timeline.EARLY_END = saved[4]
 
 
 def sweep(root: Path, clips: list[dict], reading: dict | None) -> None:
     print("\n#### the same transcripts cut with other settings (every clip, the cut measured against the audio)")
-    for k, (style, reach, fake_gap, pad_out, start_slack, pad_in) in enumerate(SWEEP):
+    for k, (style, reach, fake_gap, pad_out, start_slack, pad_in, early_end) in enumerate(SWEEP):
         rows = []
         for c in clips:
             out = root / f"sw{k}_{c['n']}"
-            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in):
+            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in, early_end):
                 build(c["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             rows.append(judge(out, c["shoot"] / "talk.mov", c["truth"], "", brief=True))
         person = ""
         if reading is not None:
             out = root / f"sw{k}_reading"
-            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in):
+            with tuned(style, reach, fake_gap, pad_out, start_slack, pad_in, early_end):
                 build(reading["shoot"], out, style, root / "cache", ["--transcriber", "none"], in_process=True)
             j = judge_audio(out, reading["shoot"] / "talk.mov")
             person = f"   | a person reading: edges inside speech {100 * j['in']:4.1f}%, thrown away {100 * j['out']:4.1f}%, kept {j['kept']:5.0f} s"
         m = {key: float(np.mean([r[key] for r in rows])) for key in ("whole", "clipped", "gone", "in", "out", "kept")}
-        pad = "".join(f", {name} {v:g}" for name, v in (("pad_out", pad_out), ("start slack", start_slack), ("pad_in", pad_in)) if v is not None)
+        pad = "".join(f", {name} {v:g}" for name, v in (("pad_out", pad_out), ("start slack", start_slack), ("pad_in", pad_in), ("early end", early_end)) if v is not None)
         per_clip = ", ".join("%.1f" % (100 * r["whole"]) for r in rows)
         print(
             f"{style:<6} end reach {reach:.2f} s, transcript gap +{fake_gap:.2f} s{pad}: words whole {100 * m['whole']:5.1f}%, clipped {100 * m['clipped']:5.1f}%, "
