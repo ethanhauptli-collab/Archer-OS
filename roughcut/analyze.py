@@ -280,6 +280,7 @@ def pause_warning(clip: Clip) -> str | None:
 
 LOUDNESS_CACHE = "loudness-v1.json"
 LEVELS_CACHE = "levels10-v1.json"  # a noisy clip's loudness every 10 ms, in whole dB
+FLATNESS_CACHE = "flatness-levels-v1.json"  # the spectral flatness of the pauses that loudness shows: tonal is music, not a room
 
 
 def probe_cached(path: Path, cache: Cache) -> MediaInfo:
@@ -509,10 +510,21 @@ def analyze(
         """A raised silence level means a noisy room. Its own loudness tells the room from the speech where silencedetect's single
         samples can't (a click splits a pause, a gust cuts it to pieces): the pauses it finds stand in for a map that finds almost
         none, and the words Whisper wrote over nothing but the room are dropped once there is a transcript."""
+        from .pauses import MUSIC_FLATNESS, pause_flatness
+
+        if clip.music_bed:  # a song given with --music: no pauses of its own to cut
+            return
         m = clip.media
         levels = _levels(m)
         found = ffmpeg_ops.level_silences(levels, float(m.duration))
         if found is None:
+            return
+        # Music under the speech isn't a room: its quiet stretches can sit above a quiet real word, so they prove nothing.
+        flat = cache.get(m.fingerprint, FLATNESS_CACHE)
+        if flat is None:
+            flat = {"flatness": pause_flatness(Path(m.path), found["silences"])}
+            cache.put(m.fingerprint, FLATNESS_CACHE, flat)
+        if flat.get("flatness") is not None and flat["flatness"] < MUSIC_FLATNESS:
             return
         rooms[clip.id] = [tuple(s) for s in found["silences"]]
         if not shows_pauses(clip.silences, float(m.duration)) and shows_pauses(found["silences"], float(m.duration)):
@@ -568,6 +580,7 @@ def analyze(
             clip.transcript_source = "music"
     audible = [c for c in clips if c.media.has_audio and not c.music_bed]
     failures = _TranscribeFailures()
+    left_out: list[str] = []  # the words dropped as inventions over a noisy room, for the paper edit's notes
     transcribed = 0
     for n, clip in enumerate(audible, 1):
         m = clip.media
@@ -611,7 +624,9 @@ def analyze(
                 words, invented = split_words_in_silence(words, rooms[clip.id])
                 if invented:
                     shown = ", ".join(f"{w.text.strip()!r} at {w.start:.1f} s" for w in invented[:4])
-                    log(f"{m.name}: dropped {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})")
+                    said = f"{m.name}: left out {len(invented)} word{'s' if len(invented) != 1 else ''} Whisper wrote over nothing but the room's noise ({shown}{', ...' if len(invented) > 4 else ''})"
+                    log(said)
+                    left_out.append(said)
             clip.segments = build_segments(clip.id, words) if words else []
             clip.transcript_source = transcript.source
         else:
@@ -635,6 +650,7 @@ def analyze(
     from .pauses import mark_beds, mark_breaths
 
     notes += mark_beds(clips, cache, workers=workers)
+    notes += left_out
     mark_breaths(clips, cache, workers=workers)
     for clip in clips:
         if clip.silence_db is not None and clip.silence_db != ffmpeg_ops.DEFAULT_NOISE_DB and clip.role in ("aroll", "voiceover"):

@@ -16,6 +16,7 @@ from conftest import make_clip
 
 from roughcut import ffmpeg_ops
 from roughcut.analyze import Analysis, Cache, analyze
+from roughcut.cli import main
 from roughcut.ffmpeg_ops import LEVEL_FLOOR_LIMIT, level_silences, level_threshold
 from roughcut.plan import heuristic_plan
 from roughcut.segments import build_segments, drop_words_in_silence, split_words_in_silence
@@ -193,3 +194,40 @@ def test_a_map_that_finds_no_pauses_is_replaced_by_the_loudness_map(room, tmp_pa
     assert [(round(s), round(e)) for s, e in clip.silences] == [(0, 1), (4, 6), (10, 12)]
     assert clip.silence_db == pytest.approx(-35.0, abs=1.0)
     assert "8." not in [w.text for s in clip.segments for w in s.words]
+
+
+def test_a_music_bed_is_not_a_room_so_nothing_is_dropped_over_it(tmp_path_factory, tmp_path):
+    """Music under the speech has quiet stretches of its own; a word there may be a real one the music covers."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    root = tmp_path_factory.mktemp("bed")
+    gates = "+".join(f"between(t,{s},{e})" for s, e, _ in SENTENCES)
+    speech = f"0.5*sin(2*PI*220*t)*(0.7+0.3*sin(2*PI*3*t))*({gates})"
+    chord = "+".join(f"0.03*sin(2*PI*{f}*t)" for f in (261.6, 329.6, 392.0))
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", f"color=c=gray:size=320x180:rate=30:duration={SECONDS}",
+         "-f", "lavfi", "-i", f"aevalsrc=exprs='{speech}':s=48000:d={SECONDS}",
+         "-f", "lavfi", "-i", f"aevalsrc=exprs='{chord}':s=48000:d={SECONDS}",
+         "-filter_complex", "[1:a][2:a]amix=inputs=2:normalize=0[a]",
+         "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(root / "talk.mov")],
+        check=True,
+    )
+    words = []
+    for s, e, text in SENTENCES:
+        step = (e - s) / len(text.split())
+        words += [{"start": round(s + i * step, 3), "end": round(s + (i + 1) * step - 0.05, 3), "text": w} for i, w in enumerate(text.split())]
+    words.append({"start": 4.6, "end": 5.2, "text": "softly"})  # said under the music, say
+    words.sort(key=lambda w: w["start"])
+    (root / "talk.json").write_text(json.dumps({"words": words}))
+    clip = analyze([root / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
+    assert clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB  # a raised level, the case the loudness map looks at
+    assert "softly" in [w.text for s in clip.segments for w in s.words]
+    assert clip.bed == "music"
+
+
+def test_the_paper_edit_says_which_words_were_left_out(room, tmp_path):
+    out = tmp_path / "out"
+    assert main(["build", str(room), "--provider", "none", "--transcriber", "none", "--no-menu", "-o", str(out), "--cache-dir", str(tmp_path / "cache")]) == 0
+    report = (out / "edit_report.md").read_text()
+    assert "left out 1 word Whisper wrote over nothing but the room's noise ('8.' at 4.6 s)" in report

@@ -428,7 +428,7 @@ def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
     DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
 
 
-def checked(out: Path, label: str, detail: bool = False) -> None:
+def checked(out: Path, label: str, detail: bool = False):
     """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists. With `detail`,
     what is around each pause over a second that the cut left (the words Whisper heard and the silences the map found)."""
     from roughcut import cutcheck
@@ -436,13 +436,13 @@ def checked(out: Path, label: str, detail: bool = False) -> None:
     report = cutcheck.check(out)
     if report.unjudged and not report.edits:
         print(f"roughcut check on {label}: not judged, the background is within {cutcheck.MIN_SEPARATION:.0f} dB of the speech")
-        return
+        return None
     pauses = f", the longest pause left {report.longest_pause[0]:.2f} s, {report.long_pauses} over a second" if report.longest_pause else ""
     print(f"roughcut check on {label}: {report.edits} dialogue edits, {len(report.flagged)} go through sound, {report.small} only just{pauses}")
     for f in report.flagged[:4]:
         print(f"    {cutcheck.timecode(f.edge.timeline, report.frame_duration)} {f.edge.kind} {1000 * f.cut_off:.0f} ms of sound cut off: {f.words}")
     if not detail or not report.long_runs:
-        return
+        return report
     from roughcut import ffmpeg_ops
 
     all_clips = json.loads((out / "analysis.json").read_text())["clips"]
@@ -473,6 +473,7 @@ def checked(out: Path, label: str, detail: bool = False) -> None:
         print(f"        silences on the map: {quiet or 'none'} | breaths: {islands or 'none'} | kept: {kept}")
         if windows and rms:
             print(f"        50 ms peaks in it: {above} of {len(windows)} over the map's level, max {max(windows):.0f} dB, median {sorted(windows)[len(windows) // 2]:.0f} dB; 10 ms levels: max {max(rms):.0f}, median {sorted(rms)[len(rms) // 2]:.0f}, min {min(rms):.0f} dB")
+    return report
 
 
 def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> None:
@@ -550,27 +551,64 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
     return {"n": n, "shoot": shoot, "truth": truth, "heard": heard, "matched": matched, "results": results}
 
 
-READING = "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3"  # a public-domain reading (LibriVox)
+READINGS = [  # (folder, where the audio is): public-domain readings (LibriVox), by different people in different rooms
+    ("reading", "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3"),
+    ("reading-austen", "librivox:Austen"),  # the most downloaded LibriVox item by an author: the second chapter of it
+    ("reading-doyle", "librivox:Doyle"),
+    ("reading-twain", "librivox:Twain"),
+]
 
 
-def human_clip(shoots: Path, a: argparse.Namespace) -> Path | None:
+def reading_url(source: str) -> str | None:
+    """A file's URL, or for `librivox:Author` the second chapter's 64 kbps MP3 of the most downloaded LibriVox item by that author."""
+    import urllib.parse
+    import urllib.request
+
+    if source.startswith("http"):
+        return source
+
+    def fetch(url: str):
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "roughcut-timing"}), timeout=60) as r:
+            return json.loads(r.read())
+
+    query = f"collection:(librivoxaudio) AND mediatype:(audio) AND creator:({source.split(':', 1)[1]})"
+    search = "https://archive.org/advancedsearch.php?" + urllib.parse.urlencode(
+        {"q": query, "fl[]": "identifier", "sort[]": "downloads desc", "rows": 6, "output": "json"}
+    )
+    for doc in fetch(search)["response"]["docs"]:
+        names = sorted(f["name"] for f in fetch(f"https://archive.org/metadata/{doc['identifier']}").get("files", []) if f.get("name", "").lower().endswith("64kb.mp3"))
+        if len(names) >= 2:
+            return f"https://archive.org/download/{doc['identifier']}/{urllib.parse.quote(names[1])}"
+    return None
+
+
+def human_clip(shoots: Path, a: argparse.Namespace, folder: str, source: str) -> Path | None:
     """A few minutes of a person reading, as the same kind of MOV; None when it can't be had (no network)."""
-    shoot = shoots / "reading"
+    shoot = shoots / folder
     mov = shoot / "talk.mov"
+    stray = shoot / "reading.mp3"  # the source is kept beside the shoots, so it isn't footage of the cut
+    if stray.exists():
+        stray.unlink()
     if mov.exists():
         return shoot
     shoot.mkdir(parents=True, exist_ok=True)
-    mp3 = shoot / "reading.mp3"
-    if a.reading_file:
+    (shoots / "downloads").mkdir(exist_ok=True)
+    mp3 = shoots / "downloads" / f"{folder}.mp3"
+    if a.reading_file and folder == "reading":
         mp3 = a.reading_file
     elif not mp3.exists():
         import urllib.request
 
         try:
-            with urllib.request.urlopen(urllib.request.Request(READING, headers={"User-Agent": "roughcut-timing"}), timeout=60) as r:
+            url = reading_url(source)
+            if url is None:
+                print(f"\n#### {folder}: no recording found for {source}; skipped")
+                return None
+            print(f"\n#### {folder}: {url}")
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "roughcut-timing"}), timeout=120) as r:
                 mp3.write_bytes(r.read())
         except Exception as e:  # no network, a moved file: the rest still runs
-            print(f"\n#### the reading could not be fetched ({e}); skipped")
+            print(f"\n#### {folder}: could not be fetched ({e}); skipped")
             return None
     seconds = 60 if a.dry else 240
     subprocess.run(
@@ -581,12 +619,12 @@ def human_clip(shoots: Path, a: argparse.Namespace) -> Path | None:
     return shoot
 
 
-def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
-    shoot = human_clip(shoots, a)
+def one_reading(root: Path, shoots: Path, a: argparse.Namespace, folder: str = "reading", source: str = "") -> dict | None:
+    shoot = human_clip(shoots, a, folder, source or READINGS[0][1])
     if shoot is None:
         return None
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
-    print("\n#### a person reading (public domain): Whisper's words are the only transcript, the cut is judged by the audio alone", flush=True)
+    print(f"\n#### a person reading (public domain, {folder}): Whisper's words are the only transcript, the cut is judged by the audio alone", flush=True)
     if a.dry:  # no model: the cut goes by the silence map alone
         print("dry run: no transcript")
     elif not (shoot / "talk.json").exists():
@@ -599,11 +637,16 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
         print(f"{len(json.loads((shoot / 'talk.json').read_text())['words'])} words heard")
     results = {}
     for style in ("tight", "medium"):
-        out = root / f"outR_{style}"
+        out = root / f"outR_{folder}_{style}"
         build(shoot, out, style, root / "cache", ["--transcriber", "none"])
         results[style] = judge_audio(out, shoot / "talk.mov", style)
-        checked(out, f"the {style} cut of the reading", detail=True)
-    return {"shoot": shoot, "results": results}
+        report = checked(out, f"the {style} cut of the reading", detail=folder == "reading")
+        if report is not None:
+            results[style]["edits"] = report.edits
+            results[style]["through"] = len(report.flagged)
+            results[style]["pause"] = report.longest_pause[0] if report.longest_pause else 0.0
+            results[style]["long_pauses"] = report.long_pauses
+    return {"shoot": shoot, "results": results, "folder": folder}
 
 
 # What the sweep tries: how far past a transcript's last word a sound still going is taken for its tail, the transcript gap that is not
@@ -710,7 +753,29 @@ def main() -> int:
             print(f"{style}: {len(rs)} clips; words whole {100 * m['whole']:.1f}%, clipped {100 * m['clipped']:.1f}%, not in the cut {100 * m['gone']:.1f}%; cut edges inside speech {100 * m['in']:.1f}%, a word's edge thrown away {100 * m['out']:.1f}%")
     ok = bool(all_results) and all(r[st]["whole"] >= 0.80 and r[st]["in"] <= 0.25 and r[st]["out"] <= 0.25 for r in all_results for st in r)
     print("\nwhisper timing: " + ("done" if ok else "the cut is clearly worse than it should be (see above)"))
-    reading = one_reading(root, shoots, a) if a.reading else None
+    readings = []
+    if a.reading:
+        for folder, source in READINGS:
+            try:
+                r = one_reading(root, shoots, a, folder, source)
+            except Exception as e:  # informational: one recording that won't work must not stop the rest
+                print(f"\n#### {folder}: failed ({type(e).__name__}: {str(e)[:200]}); skipped")
+                r = None
+            if r:
+                readings.append(r)
+    reading = readings[0] if readings else None
+    if len(readings) > 1:
+        print("\n#### all the readings")
+        for style in ("tight", "medium"):
+            rs = [r["results"][style] for r in readings]
+            judged = [x for x in rs if "edits" in x]
+            line = f"{style}: {len(rs)} readings; cut edges inside speech {100 * float(np.mean([x['in'] for x in rs])):.1f}%, a word's edge thrown away {100 * float(np.mean([x['out'] for x in rs])):.1f}%"
+            if judged:
+                line += (
+                    f"; by roughcut check: {sum(x['edits'] for x in judged)} dialogue edits, {sum(x['through'] for x in judged)} go through sound, "
+                    f"longest pause left {max(x['pause'] for x in judged):.2f} s, {sum(x['long_pauses'] for x in judged)} over a second"
+                )
+            print(line)
     if a.sweep and done:
         sweep(root, done, reading)
         details(root, done)

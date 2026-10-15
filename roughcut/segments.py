@@ -7,6 +7,7 @@ That split is what keeps the output reliable.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from .transcribe import Word
@@ -53,10 +54,15 @@ def split_words_in_silence(words: list[Word], silences: list[tuple[float, float]
     """(the words kept, the words dropped): Whisper sometimes invents words over silence, so any word fully inside one goes."""
     if not silences:
         return words, []
+    spans = sorted(silences)
+    starts = [s for s, _ in spans]
     kept: list[Word] = []
     dropped: list[Word] = []
     for w in words:
-        inside = any(s - tolerance <= w.start and w.end <= e + tolerance for s, e in silences)
+        # Silences don't overlap: only the last one to start by the word's start (give or take the tolerance), or the one before it
+        # for a word too short to tell the two apart, can hold the word.
+        i = bisect.bisect_right(starts, w.start + tolerance) - 1
+        inside = any(s - tolerance <= w.start and w.end <= e + tolerance for s, e in spans[max(0, i - 1) : i + 1])
         (dropped if inside else kept).append(w)
     return kept, dropped
 
