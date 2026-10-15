@@ -2,7 +2,7 @@
 
 Every word is said on its own by a speech synthesizer (macOS `say`; `espeak-ng` for a dry run elsewhere), so each word's true start
 and end are known to the sample. The words become sentences, the sentences a few minutes of talk over a noise bed (room tone, a
-60 Hz hum, wind gusts), as AAC in a MOV, like a phone's: three clips of three minutes in different voices and one of twelve. Then:
+60 Hz hum, wind gusts), as AAC in a MOV, like a phone's: three clips of three minutes in different voices, one of twelve and one with spoken um and uh. Then:
 
   1. Whisper (the model the app uses by default, or $WHISPER_MODEL) transcribes it and its word times are compared with the truth:
      how many words, how far off their starts and ends are, and what it put into the long pauses;
@@ -18,7 +18,7 @@ It prints numbers and exits 0: it is a measurement. Synthetic speech is cleaner 
 case for Whisper, not the typical one. The speech and Whisper's transcript of it are kept in `--shoots DIR` (the CI cache), so a
 second run needs no model.
 
-    python .github/scripts/whisper_timing.py [--runs 4] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep] [--reading] [--data]
+    python .github/scripts/whisper_timing.py [--runs 5] [--minutes 3] [--dry] [--keep DIR] [--shoots DIR] [--sweep] [--reading] [--data]
 `--dry` takes the transcript from the truth with timing errors added, so the generator, the comparison, the cut and the sweep can be
 tried without a model. `--data` prints each clip's words said and heard and its silence map as `DATA` lines (gzip and base64) to cut
 them again offline.
@@ -81,7 +81,7 @@ def extent(x: np.ndarray, floor: float = 0.004) -> tuple[int, int]:
     return (int(idx[0]), int(idx[-1]) + 1) if len(idx) else (0, len(x))
 
 
-def make_talk(out: Path, minutes: float, seed: int, voice: str | None, rate: int, noise_db: float) -> dict:
+def make_talk(out: Path, minutes: float, seed: int, voice: str | None, rate: int, noise_db: float, fillers: float = 0.0) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     work = out / ".work"
     work.mkdir(exist_ok=True)
@@ -94,7 +94,8 @@ def make_talk(out: Path, minutes: float, seed: int, voice: str | None, rate: int
     while t < seconds - 8:
         gain = 10 ** (rng.uniform(-3, 2) / 20)
         for _ in range(rng.randint(6, 13)):
-            text = rng.choice(VOCAB)
+            filler = bool(fillers) and rng.random() < fillers  # a spoken "um" or "uh", which the cut is meant to take out
+            text = rng.choice(("um", "uh")) if filler else rng.choice(VOCAB)
             x = say(text, work, voice, rate)
             a, b = extent(x)
             if a >= b:
@@ -104,7 +105,7 @@ def make_talk(out: Path, minutes: float, seed: int, voice: str | None, rate: int
             if i + len(x) >= n:
                 break
             audio[i : i + len(x)] += x
-            words.append({"text": text, "start": round(i / SR, 4), "end": round((i + len(x)) / SR, 4)})
+            words.append({"text": text, "start": round(i / SR, 4), "end": round((i + len(x)) / SR, 4), **({"filler": True} if filler else {})})
             t += len(x) / SR + rng.uniform(0.03, 0.11)
         gap = rng.uniform(0.35, 1.5) + (rng.uniform(3, 8) if rng.random() < 0.07 else 0)
         pauses.append({"after": words[-1]["end"], "length": round(gap, 3)})
@@ -190,6 +191,18 @@ def invented(truth: dict, heard: list[dict], at_least: float = 1.0) -> None:
     print(f"Whisper put {len(found)} words into the {len(spans)} pauses of {at_least:g} s or more" + (f": {shown}" if found else ""))
 
 
+def fillers_heard(truth: dict, heard: list[dict]) -> None:
+    """How many of the spoken um/uh Whisper wrote down (the cut can only take out what the transcript has)."""
+    from roughcut.transcribe import Word
+
+    said = [w for w in truth["words"] if w.get("filler")]
+    if not said:
+        return
+    wrote = sum(1 for h in heard if Word(h["start"], h["end"], h["text"]).is_filler)
+    near = sum(1 for w in said if any(Word(h["start"], h["end"], h["text"]).is_filler and abs(h["start"] - w["start"]) < 0.3 for h in heard))
+    print(f"Whisper wrote {wrote} um/uh for the {len(said)} that were said; {near} of those are where one was said")
+
+
 def fake_heard(truth_words: list[dict], seed: int = 5) -> list[dict]:
     """--dry: the truth with the kinds of error Whisper makes."""
     rng = random.Random(seed)
@@ -267,7 +280,10 @@ def cause(edge: float, direction: int, truth_words: list[dict], heard: list[dict
 def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | None = None, matched: dict[int, int] | None = None, brief: bool = False, show: int = 12, context: bool = False) -> dict:
     kept = kept_ranges(next(out.glob("*.fcpxml")))
     audio = load_audio(talk)
-    words = truth["words"]
+    every = truth["words"]  # `matched` counts in these
+    words = [w for w in every if not w.get("filler")]
+    fillers = [w for w in every if w.get("filler")]
+    fillers_cut = sum(1 for w in fillers if sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept) < 0.5 * (w["end"] - w["start"]))
     whole = gone = clipped = 0
     for w in words:
         inside = sum(max(0.0, min(w["end"], b) - max(w["start"], a)) for a, b in kept)
@@ -298,7 +314,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
             inside_speech += in_
             outside_speech += out_
             if (in_ or out_) and heard is not None:
-                flagged.append((edge, "starts" if direction > 0 else "ends", "inside" if in_ else "outside", cause(edge, direction, words, heard, matched or {})))
+                flagged.append((edge, "starts" if direction > 0 else "ends", "inside" if in_ else "outside", cause(edge, direction, every, heard, matched or {})))
     n = len(words)
 
     def out_time(t: float) -> float:  # where an instant of the source falls in the cut
@@ -317,6 +333,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
     result = {
         "whole": whole / n, "clipped": clipped / n, "gone": gone / n, "in": inside_speech / max(edges, 1), "out": outside_speech / max(edges, 1),
         "edges": edges, "kept": sum(b - a for a, b in kept), "longest": max(pauses, default=0.0), "over1": sum(1 for g in pauses if g > 1.0),
+        "fillers": len(fillers), "fillers_cut": fillers_cut,
     }
     if brief:
         return result
@@ -324,6 +341,7 @@ def judge(out: Path, talk: Path, truth: dict, label: str, heard: list[dict] | No
         f"{label}: {n} words said: {100 * result['whole']:.1f}% whole, {100 * result['clipped']:.1f}% clipped by >15 ms, {100 * result['gone']:.1f}% not in the cut; "
         f"of {edges} cut edges {100 * result['in']:.1f}% start or end inside speech and {100 * result['out']:.1f}% threw a word's edge away (noise floor {db(floor):.0f} dBFS); "
         f"the longest pause left between words is {result['longest']:.2f} s, {result['over1']} are over a second"
+        + (f"; {fillers_cut} of {len(fillers)} spoken um/uh cut out" if fillers else "")
     )
     near = []
     if context and flagged:
@@ -372,11 +390,12 @@ def judge_audio(out: Path, talk: Path, label: str = "") -> dict:
 # ------------------------------------------------------------------ main
 
 
-RUNS = [  # (voice, words per minute, seed, minutes)
-    (None, 185, 11, 3),
-    ("Daniel", 170, 12, 3),
-    ("Alex", 200, 13, 3),
-    (None, 175, 14, 12),  # a long recording: Whisper works through it a window at a time
+RUNS = [  # (voice, words per minute, seed, minutes, share of the words that are a spoken um or uh)
+    (None, 185, 11, 3, 0.0),
+    ("Daniel", 170, 12, 3, 0.0),
+    ("Alex", 200, 13, 3, 0.0),
+    (None, 175, 14, 12, 0.0),  # a long recording: Whisper works through it a window at a time
+    (None, 170, 15, 3, 0.08),  # with fillers
 ]
 
 
@@ -420,7 +439,7 @@ def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *,
         raise SystemExit(1)
 
 
-def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, n: int) -> dict | None:
+def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, rate: int, seed: int, minutes: float, fillers: float, n: int) -> dict | None:
     shoot = shoots / f"shoot{n}"
     model = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
     kept_truth, kept_heard = shoot / "truth.json", shoot / "heard.json"
@@ -431,7 +450,7 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
         engine = ["--transcriber", "none"]
     else:
         try:
-            truth = make_talk(shoot, a.minutes or minutes, seed, voice, rate, a.noise_db)
+            truth = make_talk(shoot, a.minutes or minutes, seed, voice, rate, a.noise_db, fillers)
         except subprocess.CalledProcessError:
             if voice is None:
                 raise
@@ -455,6 +474,7 @@ def one_run(root: Path, shoots: Path, a: argparse.Namespace, voice: str | None, 
     print("\n== Whisper's word times against the words that were said")
     matched = compare(truth["words"], heard)
     invented(truth, heard)
+    fillers_heard(truth, heard)
     print("\n== the cut, made from that transcript")
     results = {}
     for style in ("tight", "medium"):
@@ -609,8 +629,8 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     print(f"speech by {'say' if shutil.which('say') else 'espeak-ng'} in {shoots}, cuts in {root}", flush=True)
     done = []
-    for n, (voice, rate, seed, minutes) in enumerate(RUNS[: a.runs], 1):
-        r = one_run(root, shoots, a, voice, rate, seed, minutes, n)
+    for n, (voice, rate, seed, minutes, fillers) in enumerate(RUNS[: a.runs], 1):
+        r = one_run(root, shoots, a, voice, rate, seed, minutes, fillers, n)
         if r:
             done.append(r)
     all_results = [r["results"] for r in done]
