@@ -428,15 +428,30 @@ def dump(n: int, truth: dict, heard: list[dict], analysis: Path) -> None:
     DATA_LINES.extend(f"DATA {n} {i}/{len(chunks)} {chunk}" for i, chunk in enumerate(chunks))
 
 
-def checked(out: Path, label: str) -> None:
-    """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists."""
+def checked(out: Path, label: str, detail: bool = False) -> None:
+    """`roughcut check` on a finished cut, as the owner would run it: the summary line and the first edits it lists. With `detail`,
+    what is around each pause over a second that the cut left (the words Whisper heard and the silences the map found)."""
     from roughcut import cutcheck
 
     report = cutcheck.check(out)
-    pauses = f", the longest pause left {report.longest_pause[0]:.2f} s" if report.longest_pause else ""
+    if report.unjudged and not report.edits:
+        print(f"roughcut check on {label}: not judged, the background is within {cutcheck.MIN_SEPARATION:.0f} dB of the speech")
+        return
+    pauses = f", the longest pause left {report.longest_pause[0]:.2f} s, {report.long_pauses} over a second" if report.longest_pause else ""
     print(f"roughcut check on {label}: {report.edits} dialogue edits, {len(report.flagged)} go through sound, {report.small} only just{pauses}")
     for f in report.flagged[:4]:
         print(f"    {cutcheck.timecode(f.edge.timeline, report.frame_duration)} {f.edge.kind} {1000 * f.cut_off:.0f} ms of sound cut off: {f.words}")
+    if not detail or not report.long_runs:
+        return
+    clips = json.loads((out / "analysis.json").read_text())["clips"]
+    clip = clips[0]
+    words = [w for s in clip.get("segments", []) for w in s.get("words", [])]
+    silences = [tuple(x) for x in clip.get("silences", [])]
+    print(f"    the clip's silence map: {len(silences)} silences, found at {clip.get('silence_db')} dB over a background of {clip.get('background_db')} dB")
+    for length, at, _path, src in report.long_runs[:6]:
+        near = ", ".join(f"{w['text'].strip()!r} {w['start']:.2f}-{w['end']:.2f}" for w in words if src - 1.2 <= w["start"] <= src + length + 1.2)
+        quiet = ", ".join(f"{a:.2f}-{b:.2f}" for a, b in silences if b >= src - 1.0 and a <= src + length + 1.0)
+        print(f"    a pause of {length:.2f} s at {cutcheck.timecode(at, report.frame_duration)} (file {src:.2f}-{src + length:.2f} s): Whisper's words near it: {near or 'none'} | silences on the map: {quiet or 'none'}")
 
 
 def build(shoot: Path, out: Path, style: str, cache: Path, engine: list[str], *, in_process: bool = False) -> None:
@@ -566,7 +581,7 @@ def one_reading(root: Path, shoots: Path, a: argparse.Namespace) -> dict | None:
         out = root / f"outR_{style}"
         build(shoot, out, style, root / "cache", ["--transcriber", "none"])
         results[style] = judge_audio(out, shoot / "talk.mov", style)
-        checked(out, f"the {style} cut of the reading")
+        checked(out, f"the {style} cut of the reading", detail=True)
     return {"shoot": shoot, "results": results}
 
 

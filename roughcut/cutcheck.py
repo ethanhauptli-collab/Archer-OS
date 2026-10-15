@@ -72,6 +72,7 @@ class Report:
     unjudged: list[str] = field(default_factory=list)  # files too noisy to tell sound from background
     longest_pause: tuple[float, Fraction] | None = None
     long_pauses: int = 0  # kept pauses over a second
+    long_runs: list[tuple[float, Fraction, str, float]] = field(default_factory=list)  # those pauses, longest first: (seconds, where in the cut, file, seconds into it)
     fillers: list[tuple[str, Fraction]] = field(default_factory=list)  # (the word, where) still in the cut
     problems: list[str] = field(default_factory=list)
 
@@ -195,10 +196,9 @@ def judge(edges: list[Edge], levels: list[float], fillers: list[tuple[float, flo
     return found, small, floor
 
 
-def pauses(ranges: list[tuple[str, float, float, Fraction]], levels_by_file: dict[str, list[float]], floors: dict[str, float]) -> tuple[tuple[float, Fraction] | None, int]:
-    """The longest quiet stretch inside the kept dialogue (seconds, where in the cut) and how many are over a second."""
-    longest: tuple[float, Fraction] | None = None
-    over = 0
+def quiet_runs(ranges: list[tuple[str, float, float, Fraction]], levels_by_file: dict[str, list[float]], floors: dict[str, float], at_least: float = 0.0) -> list[tuple[float, Fraction, str, float]]:
+    """Every quiet stretch inside the kept dialogue longer than `at_least`: (seconds, where in the cut, the file, seconds into it)."""
+    runs: list[tuple[float, Fraction, str, float]] = []
     for path, a, b, offset in ranges:
         levels, floor = levels_by_file.get(path), floors.get(path)
         if not levels or floor is None:
@@ -212,12 +212,17 @@ def pauses(ranges: list[tuple[str, float, float, Fraction]], levels_by_file: dic
                 run_from = k
             elif not low and run_from is not None:
                 length = (k - run_from) * WINDOW
-                if length > 1.0:
-                    over += 1
-                if longest is None or length > longest[0]:
-                    longest = (length, offset + Fraction(run_from * WINDOW - a).limit_denominator(1000))
+                if length > at_least:
+                    runs.append((length, offset + Fraction(run_from * WINDOW - a).limit_denominator(1000), path, run_from * WINDOW))
                 run_from = None
-    return longest, over
+    return runs
+
+
+def pauses(ranges: list[tuple[str, float, float, Fraction]], levels_by_file: dict[str, list[float]], floors: dict[str, float]) -> tuple[tuple[float, Fraction] | None, int]:
+    """The longest quiet stretch inside the kept dialogue (seconds, where in the cut) and how many are over a second."""
+    runs = quiet_runs(ranges, levels_by_file, floors)
+    longest = max(runs, key=lambda r: r[0], default=None)
+    return (None if longest is None else (longest[0], longest[1])), sum(1 for r in runs if r[0] > 1.0)
 
 
 # ------------------------------------------------------------------ the words
@@ -329,6 +334,7 @@ def check(target: Path, *, progress=None) -> Report:
     report.flagged.sort(key=lambda f: f.edge.timeline)
     report.fillers.sort(key=lambda f: f[1])
     report.longest_pause, report.long_pauses = pauses(ranges, levels_by_file, floors)
+    report.long_runs = sorted(quiet_runs(ranges, levels_by_file, floors, at_least=1.0), key=lambda r: -r[0])
     return report
 
 
@@ -364,6 +370,9 @@ def render(report: Report, limit: int = 15) -> str:
         if report.longest_pause is not None:
             length, at = report.longest_pause
             lines.append(f"  The longest pause left in the dialogue is {length:.2f} s (at {timecode(at, report.frame_duration)}); {report.long_pauses} over a second.")
+            if report.long_pauses > 1 and report.long_runs:
+                shown = ", ".join(f"{timecode(t, report.frame_duration)} ({s:.1f} s)" for s, t, _, _ in report.long_runs[:5])
+                lines.append(f"  Over a second: {shown}{' ...' if len(report.long_runs) > 5 else ''}.")
         if report.fillers:
             shown = ", ".join(f"{w} at {timecode(t, report.frame_duration)}" for w, t in report.fillers[:5])
             lines.append(f"  {len(report.fillers)} um/uh still in the cut: {shown}{' ...' if len(report.fillers) > 5 else ''}.")
@@ -410,6 +419,7 @@ def as_json(report: Report) -> dict:
         "not_judged": report.unjudged,
         "longest_pause": None if report.longest_pause is None else {"seconds": round(report.longest_pause[0], 2), "timecode": timecode(report.longest_pause[1], report.frame_duration)},
         "pauses_over_a_second": report.long_pauses,
+        "long_pauses": [{"timecode": timecode(t, report.frame_duration), "seconds": round(s, 2), "file": p, "source_seconds": round(src, 3)} for s, t, p, src in report.long_runs],
         "fillers_left": [{"word": w, "timecode": timecode(t, report.frame_duration)} for w, t in report.fillers],
         "problems": report.problems,
     }

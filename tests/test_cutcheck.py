@@ -77,6 +77,29 @@ def test_a_recording_whose_background_is_near_its_speech_is_not_judged():
     assert judge([_edge("ends", 5.0)], levels) == ([], 0, None)
 
 
+def test_every_quiet_stretch_inside_the_kept_dialogue_is_listed_with_where_it_is():
+    path = "/footage/talk.mov"
+    levels = _levels([(0.0, 1.0), (2.5, 3.9)])
+    runs = cutcheck.quiet_runs([(path, 0.0, 4.0, Fraction(10))], {path: levels}, {path: QUIET}, at_least=1.0)
+    (length, at, found_in, source), = runs
+    assert length == pytest.approx(1.5, abs=0.02) and found_in == path and source == pytest.approx(1.0, abs=0.01)
+    assert at == Fraction(11)  # ten seconds into the cut, a second into the kept piece
+    short = cutcheck.quiet_runs([(path, 0.0, 4.0, Fraction(0))], {path: levels}, {path: QUIET})
+    assert [round(r[0], 2) for r in short] == [1.5, 0.1]  # the last tenth of a second is quiet too
+    assert cutcheck.pauses([(path, 0.0, 4.0, Fraction(0))], {path: levels}, {path: QUIET})[1] == 1  # one over a second
+
+
+def test_the_report_says_where_the_long_pauses_are():
+    frame = Fraction(1001, 30000)
+    report = cutcheck.Report("/x/cut.fcpxml", "Trip Rough Cut", frame, edits=10, clips=1, seconds=60.0)
+    report.longest_pause, report.long_pauses = (1.4, Fraction(30)), 2
+    report.long_runs = [(1.4, Fraction(30), "/f.mov", 31.0), (1.1, Fraction(70), "/f.mov", 75.0)]
+    text = cutcheck.render(report)
+    assert f"Over a second: {cutcheck.timecode(Fraction(30), frame)} (1.4 s), {cutcheck.timecode(Fraction(70), frame)} (1.1 s)." in text
+    report.long_pauses, report.long_runs = 1, report.long_runs[:1]
+    assert "Over a second" not in cutcheck.render(report)  # the one pause is already named as the longest
+
+
 # ------------------------------------------------------------------ the whole command
 
 WORDS = [  # (start, end): a sentence of five words, a pause, a sentence of five more
@@ -142,6 +165,7 @@ def test_the_command_prints_the_report_and_the_json(word_by_word, tmp_path, caps
     assert main(["check", str(out), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["through_sound"] == [] and data["edits"] >= 2 and data["files"] == 1
+    assert data["long_pauses"] == [] and data["pauses_over_a_second"] == 0
 
 
 def test_a_folder_with_no_cut_is_said_plainly(tmp_path, capsys):
