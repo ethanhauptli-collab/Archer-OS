@@ -17,7 +17,7 @@ import pytest
 
 from roughcut import ffmpeg_ops, pauses
 from roughcut.analyze import Analysis, Cache, analyze
-from roughcut.segments import split_invented_words
+from roughcut.segments import speech_stands_above_room, split_invented_words
 from roughcut.timeline import _join_close
 from roughcut.transcribe import Transcriber, Transcript, Word
 
@@ -44,7 +44,7 @@ def test_a_word_is_the_rooms_only_when_the_words_themselves_stand_above_it():
     kept, invented = split_invented_words(words, silences, soft, FLOOR, PAUSE)
     assert invented == [] and len(kept) == 4
     clear = _readings(spans=[(1.0, 1.5, -30.0), (2.5, 3.0, -58.0), (5.0, 5.5, -30.0), (7.0, 7.5, -30.0)])
-    kept, invented = split_invented_words(words, [(0.0, 1.0), (1.6, 4.5), (5.6, 12.0)], clear, FLOOR, PAUSE)
+    kept, invented = split_invented_words(words, [(0.0, 1.0), (1.6, 4.5), (5.6, 6.9), (7.6, 12.0)], clear, FLOOR, PAUSE)
     assert [w.text for w in invented] == ["this"] and [w.text for w in kept] == ["so", "is", "it"]
 
 
@@ -55,6 +55,23 @@ def test_a_short_soft_word_is_not_a_click():
     levels = _readings(spans=[(1.0, 1.5, -30.0), (3.0, 3.05, -51.0), (3.5, 4.0, -58.0), (6.5, 7.5, -30.0)])
     kept, invented = split_invented_words(words, silences, levels, FLOOR, PAUSE)
     assert [w.text for w in invented] == ["ghost"] and "a" in [w.text for w in kept]
+
+
+def test_a_made_up_word_over_the_room_with_a_click_in_it_is_still_dropped():
+    """A verse number Whisper wrote into room tone, with a breath or a click inside it: it is long, so it is not a click's work."""
+    words = [Word(1.0, 1.5, "so"), Word(3.0, 3.5, "17."), Word(6.5, 7.5, "arena")]
+    levels = _readings(spans=[(1.0, 1.5, -30.0), (3.0, 3.5, -58.0), (3.2, 3.24, -51.0), (6.5, 7.5, -30.0)])
+    kept, invented = split_invented_words(words, [(1.6, 6.4)], levels, FLOOR, PAUSE)
+    assert [w.text for w in invented] == ["17."] and [w.text for w in kept] == ["so", "arena"]
+
+
+def test_speech_that_is_loud_where_it_is_voiced_stands_above_a_noisy_room():
+    """Only the voiced part of a word is far over the room; the consonants and the gaps between its sounds are not. The talker is
+    read at the loud quarter of the readings inside the words, not their median."""
+    words = [Word(1.0, 2.0, "so"), Word(3.0, 4.0, "this")]
+    levels = _readings(spans=[(1.0, 1.4, -30.0), (1.4, 2.0, -58.0), (3.0, 3.4, -30.0), (3.4, 4.0, -58.0)])  # 40% voiced, the rest the room
+    assert speech_stands_above_room(words, levels, FLOOR)
+    assert not speech_stands_above_room(words, _readings(spans=[(1.0, 2.0, -52.0), (3.0, 4.0, -52.0)]), FLOOR)
 
 
 def test_nothing_to_judge_with_no_words_or_no_readings():

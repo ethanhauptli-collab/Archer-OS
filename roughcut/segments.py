@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from .transcribe import Word
 
 SENTENCE_END = (".", "?", "!", "…")
+CLICK_REACH = 0.2  # seconds: a word shorter than this can be closed over by the click rule (a burst of 50 ms inside a pause)
 
 
 @dataclass
@@ -76,13 +77,14 @@ def _word_readings(levels: list[float], w: Word, window: float, offset: float = 
 def speech_stands_above_room(
     words: list[Word], levels: list[float], floor: float, window: float = 0.01, min_separation: float = 12.0, offset: float = 0.0
 ) -> bool:
-    """Is the transcript's own speech clearly louder than the room? The median reading inside the words, against the room's floor.
+    """Is the transcript's own speech clearly louder than the room? The loud quarter of the readings inside the words (the voiced part
+    of a word is far over the room, its consonants and the gaps between its sounds are not), against the room's floor.
 
     The loudest twentieth of a clip says nothing about its talker when a horn, a door or a laugh is that loud; the words are where
     the talker is. Within `min_separation` of the room, loudness can't tell the speech from the room and proves nothing.
     """
     inside = sorted(v for w in words for v in _word_readings(levels, w, window, offset))
-    return bool(inside) and inside[len(inside) // 2] - floor >= min_separation
+    return bool(inside) and inside[(len(inside) * 3) // 4] - floor >= min_separation
 
 
 def split_invented_words(
@@ -99,9 +101,10 @@ def split_invented_words(
     """(the words kept, the words Whisper wrote over nothing but the room) by the clip's own 10 ms loudness.
 
     A word is a candidate when it lies fully inside a loudness pause (split_words_in_silence). It is dropped only if the words of the
-    clip stand clearly above the room (speech_stands_above_room), so the map can tell speech from the room at all, and if its own
-    readings (their 90th percentile) are under the pause level. The second test is made on the word itself, not on the pause, which
-    a click rule closed over a short soft word ("a", "I") that sounds a little over the room.
+    clip stand clearly above the room (speech_stands_above_room), so the map can tell speech from the room at all. A short word
+    (under CLICK_REACH) must also have its own readings (their 90th percentile) under the pause level: the click rule closes a pause
+    over a burst of 50 ms, which can be a short soft word ("a", "I") that sounds a little over the room. A longer word is no
+    click's work, so lying in a pause is enough: a verse number Whisper wrote into room tone, with a breath inside it, goes.
     """
     kept, candidates = split_words_in_silence(words, silences, tolerance)
     if not candidates:
@@ -111,7 +114,8 @@ def split_invented_words(
     invented: list[Word] = []
     for w in candidates:
         r = sorted(_word_readings(levels, w, window, offset))
-        if r and r[int(0.9 * (len(r) - 1))] <= pause_db:
+        long_enough = (w.end - w.start) >= CLICK_REACH
+        if long_enough or (r and r[int(0.9 * (len(r) - 1))] <= pause_db):
             invented.append(w)
         else:
             kept.append(w)
