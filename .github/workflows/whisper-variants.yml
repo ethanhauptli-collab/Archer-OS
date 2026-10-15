@@ -1,0 +1,35 @@
+name: Whisper variants
+
+# Does the way roughcut asks Whisper for words lose speech? Transcribes the clips whisper-timing keeps in several ways and counts
+# the sound no word is near (.github/scripts/whisper_variants.py). Informational: it prints numbers and never fails on them.
+# By hand, or when the script changes. It reads the clips the Whisper timing workflow saved and writes nothing back.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/scripts/whisper_variants.py"
+      - ".github/workflows/whisper-variants.yml"
+
+concurrency:
+  group: whisper-variants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  variants:
+    name: Whisper, asked in several ways (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: brew install ffmpeg
+      - run: python -m pip install -e '.[mac]'
+      - name: The clips and their transcripts, as the last timing run kept them
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/whisper-shoots
+          key: whisper-shoots-v5
+      - name: Transcribe each clip in each way
+        run: python .github/scripts/whisper_variants.py --shoots "$RUNNER_TEMP/whisper-shoots"
