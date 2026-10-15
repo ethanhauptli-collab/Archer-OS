@@ -1,0 +1,70 @@
+name: Graphics with Google Chrome (macOS)
+
+# On a Mac the graphics are drawn by the Google Chrome that is already installed: Playwright's own browser is tried first
+# (graphics._launch_options) and a Mac that never ran `playwright install` doesn't have it. The main CI installs that browser, so
+# its tests never start Chrome. This job installs none, so the renderer has only the runner's Chrome to work with, and runs the
+# tests that start a browser: the render, the page's confinement (its content policy, the dead proxy, no name lookups), the
+# sandbox probe, the brand fonts and the doctor row.
+# By hand, or when the renderer or its tests change. Not part of the main CI run, which is on every push.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "roughcut/graphics.py"
+      - "roughcut/graphics_preview.py"
+      - "roughcut/brand_fonts.py"
+      - "tests/test_graphics*.py"
+      - "tests/test_brand_fonts.py"
+      - "tests/test_lifecycle.py"
+      - ".github/workflows/mac-chrome-graphics.yml"
+
+concurrency:
+  group: mac-chrome-graphics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chrome:
+    name: Renderer on Google Chrome, no Playwright browser (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: brew install ffmpeg
+      - run: python -m pip install -e '.[dev,graphics]'
+      - name: Chrome is installed and Playwright has no browser of its own
+        run: |
+          CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          test -x "$CHROME" || { echo "this runner has no Google Chrome"; exit 1; }
+          "$CHROME" --version
+          if [ -d "$HOME/Library/Caches/ms-playwright" ] && [ -n "$(ls -A "$HOME/Library/Caches/ms-playwright")" ]; then
+            echo "a Playwright browser is installed, so this would not test Chrome:"; ls "$HOME/Library/Caches/ms-playwright"; exit 1
+          fi
+          echo "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-unset}"
+      - name: Which browser the renderer starts, and whether its sandbox runs
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          from roughcut import graphics
+
+          print("renderer_problem:", graphics.renderer_problem())
+          with sync_playwright() as p:
+              browser = graphics.launch_browser(p)
+              page = browser.new_page()
+              page.set_content("<p id=a>hi</p>")
+              print("page drew:", page.inner_text("#a") == "hi")
+              print("browser:", browser.browser_type.name, browser.version)
+              print("sandbox on:", graphics.SANDBOX.on)
+              browser.close()
+          PY
+      - name: Doctor's Graphics row
+        run: |
+          python -m roughcut doctor --json > doctor.json || true
+          python -c "import json; r = json.load(open('doctor.json')); print('graphics:', r['graphics'] or 'ready'); assert r['graphics'] is None, r['graphics']"
+      - name: The tests that start a browser
+        run: >
+          python -m pytest -q
+          tests/test_brand_fonts.py tests/test_graphics.py tests/test_graphics_render.py tests/test_graphics_confinement.py
+          tests/test_lifecycle.py tests/test_presets_paths_update.py
