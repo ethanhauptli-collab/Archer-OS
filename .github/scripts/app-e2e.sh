@@ -10,6 +10,13 @@
 #      Apple's DTD), Adjust > Quick change > Re-cut (version 2, version 1 in history/).
 #   2. A run Cancel stops (a stand-in for the command-line tool that speaks the progress protocol and waits).
 #   3. A run that ends on a usage limit.
+#   4 to 8. The Recent menu; Venture Studio's music through the app (a made-up Studio); the AI path with a stand-in for Claude Code
+#      (the graphics rendered in Chrome, a revision, a usage limit while the graphics are designed, Finish graphics); Studio's
+#      sound effects.
+#   9 to 12. What else a person does with the window, each in a shell of its own so one that fails doesn't hide the others: the
+#      file panel (Choose… for footage, a song and a folder of sound effects), a real drag of files onto the window
+#      (ui-drag-source.swift starts the drag), a revision stopped by a usage limit and Finish without AI, Update Roughcut… in
+#      the app menu (a real update of a throwaway clone).
 # A picture and the Accessibility tree of the steps go to WORKFOLDER/pictures.
 set -euo pipefail
 
@@ -32,6 +39,7 @@ sleep 3
 
 DRIVE="$WORK/ui-drive"
 swiftc -O .github/scripts/ui-drive.swift -o "$DRIVE"
+swiftc -O .github/scripts/ui-drag-source.swift -o "$WORK/ui-drag-source"
 
 quit_app() {
     osascript -e "tell application id \"$BUNDLE\" to quit" > /dev/null 2>&1 || true
@@ -562,6 +570,313 @@ grep -q "^## Sound effects" "$FOUT/edit_report.md"
 grep -q "^## Venture Studio" "$FOUT/edit_report.md"
 rm -f "$HOME/.local/bin/claude"
 
+
+# --- 9 to 12. What else a person does with the window. Each scenario runs in a shell of its own (errexit would be switched off
+# for a function called from an `if`), so a step that fails stops that scenario and the next one still runs; what failed is
+# told at the end and fails the run. ---
+install_claude() {
+    mkdir -p "$HOME/.local/bin"
+    sed "1s|.*|#!$PYTHON|" .github/scripts/fake-claude.py > "$HOME/.local/bin/claude"
+    chmod +x "$HOME/.local/bin/claude"
+}
+
+fresh_state() {
+    echo '{}' > "$CLAUDE_STATE"
+    rm -f "$CLAUDE_STATE.log"
+}
+
+# 9. The file panel: Choose… for the footage (a sheet on the window), for a song and for a folder of sound effects (panels of
+# their own), each reached with Go to the folder; then an AI build that uses all three.
+scenario_panels() {
+    quit_app
+    defaults delete "$BUNDLE" 2> /dev/null || true
+    install_claude
+    fresh_state
+    rm -rf "$WORK/Panel shoot" "$WORK/Panel shoot_roughcut" "$WORK/My sounds" "$WORK/My songs"
+    cp -R "$SHOOT" "$WORK/Panel shoot"
+    mkdir -p "$WORK/My sounds" "$WORK/My songs"
+    cp "$WORK/studio-fake/Studio Library/Sound Effects/"*.wav "$WORK/My sounds/"
+    ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/My songs/Panel Song.m4a"
+    open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
+    cat > "$WORK/panels.txt" <<EOF
+wait-window 90
+see "Start with your footage" 90
+press "Choose…"
+see "Open" 20
+screen 40-panel-footage
+key cmd-shift-g
+pause 1
+screen 40-panel-footage-goto
+type "$WORK/Panel shoot"
+key return
+pause 1
+screen 40-panel-footage-there
+press "Open" 15
+see "Panel shoot" 20
+shot 41-footage-chosen
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "Add"
+pause 1
+press "Add"
+pause 1
+shot 42-panels-add
+press "^Next"
+see "Add a song" 20
+press "Choose a song…"
+see "Open" 20
+key cmd-shift-g
+pause 1
+type "$WORK/My songs/Panel Song.m4a"
+key return
+pause 1
+screen 43-panel-song
+press "Open" 15
+see "Panel Song.m4a" 20
+shot 43-song-chosen
+press "^Next"
+see "Where are your sound effects?" 20
+press "Choose a folder…"
+see "Open" 20
+key cmd-shift-g
+pause 1
+type "$WORK/My sounds"
+key return
+pause 1
+screen 44-panel-sounds
+press "Open" 15
+see "My sounds" 20
+shot 45-sounds-chosen
+press "^Next"
+see "^Claude designs lower thirds" 20
+press "^Next"
+see "Ready to build" 30
+shot 46-panels-ready
+press "Build rough cut"
+see "Your rough cut is ready" 300
+see "*2 of 2 on the timeline" 10
+shot 47-panels-done
+EOF
+    drive "$WORK/panels.txt"
+    "$PYTHON" - "$WORK/Panel shoot_roughcut" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
+import glob
+import sys
+from urllib.parse import unquote
+
+from lxml import etree
+
+out, dtd_path = sys.argv[1:]
+path = glob.glob(out + "/*v1.fcpxml")[0]
+doc = etree.parse(path)
+dtd = etree.DTD(dtd_path)
+assert dtd.validate(doc), dtd.error_log.filter_from_errors()
+sources = {a.get("id"): unquote(r.get("src") or "") for a in doc.iter("asset") for r in a.iter("media-rep")}
+names = {a.get("id"): a.get("name") for a in doc.iter("asset")}
+accents = [sources.get(el.get("ref"), "") for el in doc.iter() if el.get("audioRole") == "effects.SFX"]
+graphics = [names.get(c.get("ref")) for c in doc.iter("asset-clip") if c.get("lane") and (names.get(c.get("ref")) or "").startswith("G0")]
+print("song:", [s for s in sources.values() if s.endswith(".m4a")])
+print("sound-effect accents:", accents)
+print("graphics:", graphics)
+assert any(s.endswith("My songs/Panel Song.m4a") for s in sources.values()), "the song chosen in the panel isn't the music bed"
+assert accents and all("/My sounds/" in a for a in accents), accents
+assert len(graphics) == 2, graphics
+PY
+    grep -q "^## Sound effects" "$WORK/Panel shoot_roughcut/edit_report.md"
+}
+
+# 10. A real drag: ui-drag-source puts a file in a window of its own, ui-drive presses the button down on it, walks to the drop
+# and lets go. The footage is dropped on the first step, a song on the Music step.
+scenario_drag() {
+    quit_app
+    defaults delete "$BUNDLE" 2> /dev/null || true
+    install_claude
+    fresh_state
+    rm -rf "$WORK/Drag shoot"
+    cp -R "$SHOOT" "$WORK/Drag shoot"
+    mkdir -p "$WORK/My songs"
+    [ -f "$WORK/My songs/Panel Song.m4a" ] || ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/My songs/Panel Song.m4a"
+    open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
+    cat > "$WORK/drag-1.txt" <<EOF
+wait-window 90
+see "Start with your footage" 90
+EOF
+    drive "$WORK/drag-1.txt"
+    "$WORK/ui-drag-source" "$WORK/Drag shoot" 80 600 > "$WORK/drag-source-1.log" 2>&1 &
+    local tile=$!
+    sleep 3
+    cat "$WORK/drag-source-1.log"
+    cat > "$WORK/drag-2.txt" <<EOF
+screen 50-drag-before
+drag 125 645 "Drop folders or clips here" 30
+see "Drag shoot" 20
+shot 51-footage-dropped
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "Add"
+see "Added" 10
+press "^Next"
+see "Add a song" 20
+EOF
+    drive "$WORK/drag-2.txt" || { kill "$tile" 2> /dev/null || true; cat "$WORK/drag-source-1.log"; return 1; }
+    kill "$tile" 2> /dev/null || true
+    cat "$WORK/drag-source-1.log"
+    grep -q "drag ended: taken" "$WORK/drag-source-1.log"
+    "$WORK/ui-drag-source" "$WORK/My songs/Panel Song.m4a" 80 600 > "$WORK/drag-source-2.log" 2>&1 &
+    tile=$!
+    sleep 3
+    cat > "$WORK/drag-3.txt" <<EOF
+screen 52-song-before
+drag 125 645 "Drop a song here" 30
+see "Panel Song.m4a" 20
+shot 53-song-dropped
+EOF
+    drive "$WORK/drag-3.txt" || { kill "$tile" 2> /dev/null || true; cat "$WORK/drag-source-2.log"; return 1; }
+    kill "$tile" 2> /dev/null || true
+    cat "$WORK/drag-source-2.log"
+    grep -q "drag ended: taken" "$WORK/drag-source-2.log"
+}
+
+# 11. A revision stopped by a usage limit while a reworded graphic is designed: the new version is written with the plan saved,
+# and Finish without AI cuts again from that plan with no model.
+scenario_stopped_revision() {
+    quit_app
+    defaults delete "$BUNDLE" 2> /dev/null || true
+    install_claude
+    fresh_state
+    rm -rf "$WORK/Revise shoot" "$WORK/Revise shoot_roughcut"
+    cp -R "$SHOOT" "$WORK/Revise shoot"
+    open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP" "$WORK/Revise shoot"
+    cat > "$WORK/rev-1.txt" <<'EOF'
+wait-window 90
+see "Your footage" 90
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "^Next"
+see "^Claude designs lower thirds" 20
+press "^Next"
+see "Ready to build" 30
+press "Build rough cut"
+see "Your rough cut is ready" 300
+see "*2 of 2 on the timeline" 10
+EOF
+    drive "$WORK/rev-1.txt"
+    echo '{"limit": "design"}' > "$CLAUDE_STATE"
+    cat > "$WORK/rev-2.txt" <<'EOF'
+press "Not quite right? Adjust…"
+see "What should change?" 30
+press "^Ask Claude"
+focus AXTextArea
+type "Use a bolder lower third."
+press "Revise with Claude"
+see "Finish without AI" 300
+see "*Version 2 was written" 10
+shot 34-revision-stopped
+dump 34-revision-stopped
+EOF
+    drive "$WORK/rev-2.txt"
+    echo '{}' > "$CLAUDE_STATE"
+    : > "$CLAUDE_STATE.log"
+    cat > "$WORK/rev-3.txt" <<'EOF'
+press "Finish without AI"
+see "^Version 3" 300
+shot 35-finished-without-ai
+dump 35-finished-without-ai
+EOF
+    drive "$WORK/rev-3.txt"
+    "$PYTHON" - "$WORK/Revise shoot_roughcut" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" "$CLAUDE_STATE.log" <<'PY'
+import glob
+import json
+import sys
+
+from lxml import etree
+
+out, dtd_path, log_path = sys.argv[1:]
+versions = json.load(open(out + "/versions.json"))
+print("versions.json:", json.dumps(versions)[:600])
+cuts = sorted(glob.glob(out + "/*v3.fcpxml"))
+assert cuts, "no version 3 was written"
+doc = etree.parse(cuts[0])
+dtd = etree.DTD(dtd_path)
+assert dtd.validate(doc), dtd.error_log.filter_from_errors()
+asked = [json.loads(line)["kind"] for line in open(log_path) if line.strip()]
+print("what Claude was asked while finishing without AI:", asked)
+assert asked == [], "Finish without AI called the model: %s" % asked
+PY
+}
+
+# 12. Update Roughcut… in the app menu, a real update: a throwaway clone with a newer commit upstream, reached through a
+# command-line tool that runs `roughcut update` from that clone (the app's own tool is the checkout this run was built from).
+scenario_update() {
+    quit_app
+    defaults delete "$BUNDLE" 2> /dev/null || true
+    install_claude
+    fresh_state
+    local upd="$WORK/update"
+    rm -rf "$upd"
+    mkdir -p "$upd/seed"
+    git -C "$ROOT" archive HEAD | tar -x -C "$upd/seed"
+    git -C "$upd/seed" init -q -b main
+    git -C "$upd/seed" -c user.name=ci -c user.email=ci@example.com add -A
+    git -C "$upd/seed" -c user.name=ci -c user.email=ci@example.com commit -q -m "Roughcut as it is on this runner"
+    git clone -q --bare "$upd/seed" "$upd/origin.git"
+    git clone -q "$upd/origin.git" "$upd/clone"
+    git clone -q "$upd/origin.git" "$upd/author"
+    sed -i '' -E 's/^__version__ = "[^"]+"/__version__ = "99.0.0"/' "$upd/author/roughcut/__init__.py"
+    git -C "$upd/author" -c user.name=ci -c user.email=ci@example.com commit -q -am "A newer version"
+    git -C "$upd/author" push -q origin HEAD:main
+    cat > "$WORK/update-roughcut" <<EOF
+#!/bin/bash
+if [ "\${1:-}" = update ]; then
+    cd "$upd/clone"
+    exec "$PYTHON" -m roughcut update
+fi
+exec "$ROOT/.venv/bin/roughcut" "\$@"
+EOF
+    chmod +x "$WORK/update-roughcut"
+    defaults write "$BUNDLE" roughcutCLIPath "$WORK/update-roughcut"
+    open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
+    cat > "$WORK/update.txt" <<'EOF'
+wait-window 90
+see "Start with your footage" 90
+menu "Roughcut" "Update Roughcut…"
+see "Roughcut update" 180
+screen 60-update-alert
+shot 60-update-alert
+see "*Updated roughcut" 10
+see "*99.0.0" 10
+press "OK"
+gone "Roughcut update" 30
+EOF
+    drive "$WORK/update.txt"
+    test "$(git -C "$upd/clone" log -1 --format=%s)" = "A newer version"
+    defaults delete "$BUNDLE" roughcutCLIPath
+}
+
+export ROOT WORK APP BUNDLE SHOTS PYTHON DRIVE SHOOT STUDIO_DIR CLAUDE_STATE
+export -f quit_app drive install_claude fresh_state scenario_panels scenario_drag scenario_stopped_revision scenario_update
+FAILED=()
+for name in scenario_panels scenario_drag scenario_stopped_revision scenario_update; do
+    echo "::group::$name"
+    if "$BASH" -euo pipefail -c "$name"; then
+        echo "scenario passed: $name"
+    else
+        echo "scenario FAILED: $name"
+        FAILED+=("$name")
+    fi
+    echo "::endgroup::"
+done
+pkill -x ui-drag-source || true
+rm -f "$HOME/.local/bin/claude"
 quit_app
 defaults delete "$BUNDLE" 2> /dev/null || true
+if [ "${#FAILED[@]}" -gt 0 ]; then
+    echo "The packaged app, driven end to end: these scenarios failed: ${FAILED[*]}"
+    exit 1
+fi
 echo "The packaged app, driven end to end: passed"

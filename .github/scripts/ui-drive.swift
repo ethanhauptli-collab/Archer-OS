@@ -15,7 +15,12 @@
 //   type "TEXT"                keys, one at a time, into whatever has the keyboard
 //   key NAME                   return, escape, tab or space, with cmd- / shift- / opt- in front
 //   shot NAME                  OUTPUT_FOLDER/NAME.png, a picture of the app's window
+//   screen NAME                OUTPUT_FOLDER/NAME.png, a picture of the whole screen (a file panel is a window of its own)
 //   dump NAME                  OUTPUT_FOLDER/NAME.ax.txt, the Accessibility tree
+//   press-if "LABEL" [SECONDS] press "LABEL" when there is such a button within the time, and go on when there is not
+//   drag X Y "LABEL" [SECONDS] the left button goes down at the screen point X, Y (a file in ui-drag-source's window), the pointer
+//                              walks to the middle of what is called LABEL and the button comes up there: a drop
+//   menu "MENU" "ITEM"         the menu bar's menu called MENU is opened with a click on its title, and the item chosen
 //   pause SECONDS
 // A step that doesn't happen in time stops the run (exit 1) after saving failure.png and failure.ax.txt.
 import AppKit
@@ -184,6 +189,14 @@ func savePicture(_ name: String) {
     process.waitUntilExit()
 }
 
+func savePictureOfScreen(_ name: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    process.arguments = ["-x", outputFolder + "/" + name + ".png"]
+    try? process.run()
+    process.waitUntilExit()
+}
+
 func saveTree(_ name: String) {
     var lines: [String] = []
     for node in nodes() {
@@ -227,6 +240,7 @@ func failStep(_ message: String) -> Never {
         write(line, to: FileHandle.standardError)
     }
     savePicture("failure")
+    savePictureOfScreen("failure-screen")
     saveTree("failure")
     exit(1)
 }
@@ -320,6 +334,42 @@ func screenSignature() -> String {
 
 var realClicks = 0
 var pressedWithAccessibility = 0
+var drops = 0
+
+/// A drag as a hand makes it: the button goes down on what is to be carried, the pointer moves a little (a drag starts only
+/// after it has moved some way) and then walks to the target, stays there a moment (the target says it will take it) and the
+/// button comes up.
+func dragMouse(from start: CGPoint, to end: CGPoint) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    func post(_ type: CGEventType, _ point: CGPoint, count: Int64 = 0) {
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        if count > 0 {
+            event.setIntegerValueField(.mouseEventClickState, value: count)
+        }
+        event.post(tap: .cghidEventTap)
+    }
+    post(.mouseMoved, start)
+    Thread.sleep(forTimeInterval: 0.3)
+    post(.leftMouseDown, start, count: 1)
+    Thread.sleep(forTimeInterval: 0.2)
+    var here = start
+    for step in 1...6 {
+        here = CGPoint(x: start.x + CGFloat(step) * 4, y: start.y - CGFloat(step) * 2)
+        post(.leftMouseDragged, here)
+        Thread.sleep(forTimeInterval: 0.04)
+    }
+    let steps = 70
+    let from = here
+    for step in 1...steps {
+        let t = CGFloat(step) / CGFloat(steps)
+        post(.leftMouseDragged, CGPoint(x: from.x + (end.x - from.x) * t, y: from.y + (end.y - from.y) * t))
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    Thread.sleep(forTimeInterval: 0.6)
+    post(.leftMouseDragged, end)
+    Thread.sleep(forTimeInterval: 0.2)
+    post(.leftMouseUp, end, count: 1)
+}
 
 /// Rolls the wheel over a point (negative: the content moves up, as a swipe down the page).
 func scrollWheel(at point: CGPoint, by pixels: Int32) {
@@ -359,7 +409,7 @@ func pressKey(_ name: String) {
             break
         }
     }
-    let codes: [String: CGKeyCode] = ["return": 36, "tab": 48, "space": 49, "escape": 53, "n": 45, "a": 0, "v": 9, "w": 13, "comma": 43]
+    let codes: [String: CGKeyCode] = ["return": 36, "tab": 48, "space": 49, "escape": 53, "n": 45, "a": 0, "v": 9, "w": 13, "comma": 43, "g": 5]
     guard let code = codes[key] else { failStep("no key called \(name)") }
     for down in [true, false] {
         let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
@@ -469,7 +519,8 @@ for rawLine in script.split(separator: "\n") {
         var target: Node?
         let ok = waitFor(timeout: seconds(parts, at: 2, default: 30)) {
             let all = nodes()
-            let window = all.first { $0.role == "AXWindow" }?.frame
+            // The app's windows: the main one, and a file panel when one is open.
+            let windows = all.filter { $0.role == "AXWindow" }.compactMap { $0.frame }
             let found = all.filter { node in
                 guard buttonRoles.contains(node.role), node.enabled, matches(node.labels, label),
                       let box = node.frame, box.width > 2, box.height > 2 else { return false }
@@ -477,7 +528,7 @@ for rawLine in script.split(separator: "\n") {
                     return true
                 }
                 let centre = CGPoint(x: box.midX, y: box.midY)
-                if let window, !window.contains(centre) {
+                if !windows.isEmpty, !windows.contains(where: { $0.contains(centre) }) {
                     return false
                 }
                 if let viewport = node.viewport, !viewport.contains(centre) {
@@ -508,6 +559,88 @@ for rawLine in script.split(separator: "\n") {
             } else {
                 realClicks += 1
             }
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+    case "press-if":
+        // The same click as press, for a button that may not be there (a panel that already chose what was asked for).
+        let (label, which) = splitIndex(parts[1])
+        var target: Node?
+        _ = waitFor(timeout: seconds(parts, at: 2, default: 5)) {
+            let all = nodes()
+            let windows = all.filter { $0.role == "AXWindow" }.compactMap { $0.frame }
+            let found = all.filter { node in
+                guard buttonRoles.contains(node.role), node.enabled, matches(node.labels, label),
+                      let box = node.frame, box.width > 2, box.height > 2 else { return false }
+                let centre = CGPoint(x: box.midX, y: box.midY)
+                return windows.isEmpty || windows.contains(where: { $0.contains(centre) })
+            }
+            target = found.count >= which ? found[which - 1] : nil
+            return target != nil
+        }
+        if let node = target, let box = node.frame {
+            bringToFront()
+            click(at: CGPoint(x: box.midX, y: box.midY))
+            realClicks += 1
+            Thread.sleep(forTimeInterval: 0.8)
+        } else {
+            say("  no such button; going on")
+        }
+    case "drag":
+        guard parts.count >= 4, let startX = Double(parts[1]), let startY = Double(parts[2]) else {
+            failStep("drag needs the screen point to start from and the label to drop on")
+        }
+        let label = parts[3]
+        var target: Node?
+        let seen = waitFor(timeout: seconds(parts, at: 4, default: 30)) {
+            target = nodes().first { node in
+                guard matches(node.labels, label), let box = node.frame, box.width > 2, box.height > 2 else { return false }
+                return node.viewport?.contains(CGPoint(x: box.midX, y: box.midY)) ?? true
+            }
+            return target != nil
+        }
+        guard seen, let node = target, let box = node.frame else {
+            failStep("nothing in view called \u{201C}\(label)\u{201D} to drop on")
+        }
+        say("  dragging from (\(Int(startX)), \(Int(startY))) to (\(Int(box.midX)), \(Int(box.midY)))")
+        dragMouse(from: CGPoint(x: startX, y: startY), to: CGPoint(x: box.midX, y: box.midY))
+        drops += 1
+        Thread.sleep(forTimeInterval: 1.0)
+    case "menu":
+        guard parts.count >= 3, let app = runningApp() else { failStep("menu needs a menu and an item") }
+        bringToFront()
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        var title: AXUIElement?
+        let titleSeen = waitFor(timeout: 15) {
+            guard let bar = attribute(root, "AXMenuBar") else { return false }
+            title = children(bar as! AXUIElement).first { string($0, "AXTitle") == parts[1] }
+            return title != nil
+        }
+        guard titleSeen, let menu = title, let titleBox = frame(of: menu) else {
+            failStep("no menu called \u{201C}\(parts[1])\u{201D} in the menu bar")
+        }
+        click(at: CGPoint(x: titleBox.midX, y: titleBox.midY))
+        var entry: AXUIElement?
+        let itemSeen = waitFor(timeout: 10) {
+            for list in children(menu) {
+                if let hit = children(list).first(where: { string($0, "AXTitle") == parts[2] }) {
+                    entry = hit
+                    return true
+                }
+            }
+            return false
+        }
+        guard itemSeen, let item = entry, let itemBox = frame(of: item) else {
+            failStep("no item called \u{201C}\(parts[2])\u{201D} in the \u{201C}\(parts[1])\u{201D} menu")
+        }
+        click(at: CGPoint(x: itemBox.midX, y: itemBox.midY))
+        Thread.sleep(forTimeInterval: 1.0)
+        // Still open: the click didn't take; choose the item the way a screen reader does.
+        if children(menu).contains(where: { !children($0).isEmpty }) {
+            say("  the menu is still open; choosing with Accessibility")
+            AXUIElementPerformAction(item, "AXPress" as CFString)
+            pressedWithAccessibility += 1
+        } else {
+            realClicks += 1
         }
         Thread.sleep(forTimeInterval: 0.5)
     case "scroll-to":
@@ -568,6 +701,8 @@ for rawLine in script.split(separator: "\n") {
         pressKey(parts[1])
     case "shot":
         savePicture(parts[1])
+    case "screen":
+        savePictureOfScreen(parts[1])
     case "dump":
         saveTree(parts[1])
     case "pause":
@@ -576,4 +711,4 @@ for rawLine in script.split(separator: "\n") {
         failStep("no step called \(parts[0])")
     }
 }
-say("ui-drive: \(stepNumber) steps done (\(realClicks) real clicks, \(pressedWithAccessibility) presses through Accessibility)")
+say("ui-drive: \(stepNumber) steps done (\(realClicks) real clicks, \(pressedWithAccessibility) presses through Accessibility, \(drops) drops)")

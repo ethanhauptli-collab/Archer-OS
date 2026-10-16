@@ -106,6 +106,8 @@ def main() -> None:
     music = [clip for clip, role in others if role == "Music"]
     cutaways = [clip for clip, role in others if role in ("B-Roll", "Stills")]
     revising = "<editor_notes>" in prompt or "<revision" in prompt or "REVISION" in prompt
+    # "Use a bolder lower third" in a revision's notes: the lower third's words change, so it needs a design of its own.
+    retitled = revising and "bolder lower third" in prompt.lower()
     if revising and len(lines) > 1:
         lines = lines[:-1]
     ids = [i for i, _ in lines]
@@ -133,7 +135,7 @@ def main() -> None:
         if lines:
             first = lines[0]
             words = " ".join(re.sub(r"[^\w']", "", w) for w in first[1].split()[:3])
-            graphics.append({"kind": "lower_third", "segment": first[0], "words": words, "text": "Orange County", "subtext": "Food festival",
+            graphics.append({"kind": "lower_third", "segment": first[0], "words": words, "text": "Orange County Food Festival" if retitled else "Orange County", "subtext": "Food festival",
                              "seconds": 3, "direction": ""})
         if len(lines) > 1:
             second = lines[-1]

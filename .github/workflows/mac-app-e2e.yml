@@ -3,7 +3,9 @@ name: Mac app end to end
 # The packaged Mac app on an Apple Silicon runner, driven the way a person drives it (its Accessibility tree and real mouse
 # clicks, .github/scripts/ui-drive.swift): the first launch with nothing signed in, footage handed to the app, Footage > Brief >
 # Add > Ready, a build with no AI through the app's own process runner, the finished cut checked against Apple's DTD, a re-cut
-# from Adjust, a run Cancel stops, a run that ends on a usage limit. A picture and the Accessibility tree of the steps go on the
+# from Adjust, a run Cancel stops, a run that ends on a usage limit, Venture Studio's music and sound effects (a made-up Studio),
+# the AI path with a stand-in for Claude Code, the file panel, a real drag of files onto the window, a revision stopped by a usage
+# limit and Finish without AI, and Update Roughcut… in the menu. A picture and the Accessibility tree of the steps go on the
 # ui-e2e branch (replaced each time). The footage is made up (macOS `say` and ffmpeg): no one's footage, key or account.
 on:
   workflow_dispatch:
@@ -15,6 +17,7 @@ on:
       - "roughcut/**"
       - ".github/scripts/app-e2e.sh"
       - ".github/scripts/ui-drive.swift"
+      - ".github/scripts/ui-drag-source.swift"
       - ".github/scripts/fake-studio.py"
       - ".github/scripts/fake-claude.py"
       - ".github/workflows/mac-app-e2e.yml"
@@ -30,9 +33,13 @@ jobs:
   drive:
     name: Drive the packaged app
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v5
+      - name: Compile the drivers (a mistake in them shows up here, before the app is built)
+        run: |
+          swiftc -O .github/scripts/ui-drive.swift -o "$RUNNER_TEMP/ui-drive"
+          swiftc -O .github/scripts/ui-drag-source.swift -o "$RUNNER_TEMP/ui-drag-source"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
