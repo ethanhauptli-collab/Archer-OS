@@ -389,7 +389,7 @@ type "Drop the last line."
 shot 26-ai-revise
 press "Revise with Claude"
 see "^Version 2" 300
-see "*Removed V01.S003" 10
+see "*tickets start at twenty dollars" 10
 shot 27-ai-revised
 dump 27-ai-revised
 EOF
