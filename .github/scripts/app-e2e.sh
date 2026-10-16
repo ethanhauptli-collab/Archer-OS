@@ -116,8 +116,8 @@ press "Venture OC"
 see "*Pauses trimmed hard" 10
 focus AXTextArea
 key cmd-a
-type "Open on Maria's line about the pier."
-see "*Maria's line about the pier" 10
+type "Open on the line about the pier. Keep the numbers."
+see "*the line about the pier" 10
 shot 04-brief
 dump 04-brief
 press "^Next"
