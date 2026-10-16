@@ -9,6 +9,7 @@
 //   press "LABEL" [SECONDS]    a real mouse click in the middle of the enabled button called LABEL (same ways to match)
 //   press-ax "LABEL" [SECONDS] the same through Accessibility's press, for a control a click can't reach
 //   scroll-to "LABEL"         roll the wheel over the page until something called LABEL is in view
+//   focus ROLE                 a click in the first enabled element of that role (AXTextArea, AXTextField), to type into it
 //   type "TEXT"                keys, one at a time, into whatever has the keyboard
 //   key NAME                   return, escape, tab or space, with cmd- / shift- / opt- in front
 //   shot NAME                  OUTPUT_FOLDER/NAME.png, a picture of the app's window
@@ -462,6 +463,9 @@ for rawLine in script.split(separator: "\n") {
             target = all.first { node in
                 guard buttonRoles.contains(node.role), node.enabled, matches(node.labels, label),
                       let box = node.frame, box.width > 2, box.height > 2 else { return false }
+                if node.role == "AXMenuItem" {
+                    return true
+                }
                 let centre = CGPoint(x: box.midX, y: box.midY)
                 if let window, !window.contains(centre) {
                     return false
@@ -515,6 +519,22 @@ for rawLine in script.split(separator: "\n") {
         if !arrived {
             failStep("could not scroll \u{201C}\(label)\u{201D} into view")
         }
+    case "focus":
+        let role = parts[1]
+        var field: Node?
+        let found = waitFor(timeout: seconds(parts, at: 2, default: 20)) {
+            field = nodes().first { node in
+                guard node.role == role, node.enabled, let box = node.frame, box.width > 2, box.height > 2 else { return false }
+                return node.viewport?.contains(CGPoint(x: box.midX, y: box.midY)) ?? true
+            }
+            return field != nil
+        }
+        guard found, let target = field, let box = target.frame else {
+            failStep("no \(role) to put the keyboard in")
+        }
+        bringToFront()
+        click(at: CGPoint(x: box.midX, y: box.midY))
+        Thread.sleep(forTimeInterval: 0.4)
     case "type":
         typeText(parts[1])
     case "key":

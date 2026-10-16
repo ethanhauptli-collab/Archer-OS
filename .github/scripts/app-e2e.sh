@@ -111,9 +111,13 @@ shot 03-footage
 dump 03-footage
 press "^Next"
 see "What is this video?" 30
-# A preset fills the brief, the length and the feel.
+# A preset fills the brief, the length and the feel; the brief takes typing.
 press "Venture OC"
 see "*Pauses trimmed hard" 10
+focus AXTextArea
+key cmd-a
+type "Open on Maria's line about the pier."
+see "*Maria's line about the pier" 10
 shot 04-brief
 dump 04-brief
 press "^Next"
@@ -148,6 +152,10 @@ press "Re-cut"
 see "^Version 2" 300
 shot 10-recut-done
 dump 10-recut-done
+# Back to the line: the footage and brief stay.
+press "New Cut"
+see "Ready to build" 20
+shot 10b-new-cut
 EOF
 drive "$WORK/build.txt"
 
@@ -259,6 +267,23 @@ shot 13-usage-limit
 dump 13-usage-limit
 EOF
 drive "$WORK/limit.txt"
+
+# --- 4. The cuts made before, from the toolbar's Recent menu, in a fresh launch with the real command-line tool ---
+quit_app
+defaults delete "$BUNDLE" roughcutCLIPath 2> /dev/null || true
+open -a "$APP"
+cat > "$WORK/recent.txt" <<'EOF'
+wait-window 90
+press "Clock" 60
+see "^Walk and talk" 10
+shot 14-recent-menu
+dump 14-recent-menu
+press "^Walk and talk"
+press "Open"
+see "^Version 2" 30
+shot 15-recent-opened
+EOF
+drive "$WORK/recent.txt"
 
 quit_app
 defaults delete "$BUNDLE" 2> /dev/null || true
