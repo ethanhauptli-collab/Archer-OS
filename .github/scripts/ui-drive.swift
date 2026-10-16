@@ -12,7 +12,9 @@
 //   click "LABEL" [SECONDS]    a real click on anything in view called LABEL (a row in a list), not only a button
 //   scroll-to "LABEL"         roll the wheel over the page until something called LABEL is in view
 //   focus ROLE                 a click in the first enabled element of that role (AXTextArea, AXTextField), to type into it
-//   type "TEXT"                keys, one at a time, into whatever has the keyboard
+//   type "TEXT" [MS]           keys, one at a time (MS milliseconds apart, 20 when not said), into whatever has the keyboard
+//   fill "TEXT" [SECONDS]      the text set through Accessibility in the text field that has the keyboard (or the last one on
+//                              screen), for a field that doesn't take typed keys well (the file panel's Go to Folder)
 //   key NAME                   return, escape, tab or space, with cmd- / shift- / opt- in front
 //   shot NAME                  OUTPUT_FOLDER/NAME.png, a picture of the app's window
 //   screen NAME                OUTPUT_FOLDER/NAME.png, a picture of the whole screen (a file panel is a window of its own)
@@ -380,7 +382,7 @@ func scrollWheel(at point: CGPoint, by pixels: Int32) {
     Thread.sleep(forTimeInterval: 0.25)
 }
 
-func typeText(_ text: String) {
+func typeText(_ text: String, delay: Double = 0.02) {
     for character in text {
         let units = Array(String(character).utf16)
         for down in [true, false] {
@@ -388,7 +390,7 @@ func typeText(_ text: String) {
             event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             event?.post(tap: .cghidEventTap)
         }
-        Thread.sleep(forTimeInterval: 0.02)
+        Thread.sleep(forTimeInterval: delay)
     }
 }
 
@@ -696,7 +698,28 @@ for rawLine in script.split(separator: "\n") {
         click(at: CGPoint(x: box.midX, y: box.midY))
         Thread.sleep(forTimeInterval: 0.4)
     case "type":
-        typeText(parts[1])
+        typeText(parts[1], delay: seconds(parts, at: 2, default: 20) / 1000)
+    case "fill":
+        guard let app = runningApp() else { failStep("the app isn't running") }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        var field: AXUIElement?
+        let ready = waitFor(timeout: seconds(parts, at: 2, default: 10)) {
+            if let focused = attribute(root, "AXFocusedUIElement") {
+                let element = focused as! AXUIElement
+                if ["AXTextField", "AXComboBox", "AXTextArea"].contains(string(element, "AXRole")) {
+                    field = element
+                    return true
+                }
+            }
+            field = nodes().last(where: { ["AXTextField", "AXComboBox"].contains($0.role) && $0.enabled })?.element
+            return field != nil
+        }
+        guard ready, let element = field else { failStep("no text field to put \u{201C}\(parts[1])\u{201D} in") }
+        let result = AXUIElementSetAttributeValue(element, "AXValue" as CFString, parts[1] as CFString)
+        say("  set the field (\(string(element, "AXRole"))): \(result == .success ? "ok" : "error \(result.rawValue)")")
+        if result != .success {
+            failStep("the field wouldn't take the text")
+        }
     case "key":
         pressKey(parts[1])
     case "shot":

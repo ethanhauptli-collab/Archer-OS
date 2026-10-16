@@ -586,31 +586,82 @@ fresh_state() {
 }
 
 # 9. The file panel: Choose… for the footage (a sheet on the window), for a song and for a folder of sound effects (panels of
-# their own), each reached with Go to the folder; then an AI build that uses all three.
+# their own). Each is reached with Go to Folder (its field filled through Accessibility), the item clicked in the list, Open; then
+# an AI build that uses all three.
+panel_files() {
+    rm -rf "$WORK/panel-files"
+    mkdir -p "$WORK/panel-files/My sounds"
+    cp -R "$SHOOT" "$WORK/panel-files/Panel shoot"
+    cp "$WORK/studio-fake/Studio Library/Sound Effects/"*.wav "$WORK/panel-files/My sounds/"
+    ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/panel-files/Panel Song.m4a"
+}
+
+# What the panel does with typed keys and where it starts: pictures and Accessibility trees, nothing asserted.
+scenario_panel_notes() {
+    quit_app
+    defaults delete "$BUNDLE" 2> /dev/null || true
+    install_claude
+    fresh_state
+    panel_files
+    open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
+    cat > "$WORK/panel-notes-1.txt" <<EOF
+wait-window 90
+see "Start with your footage" 90
+press "Choose…"
+see "Open" 20
+pause 1
+dump 39-panel
+screen 39-panel
+key cmd-shift-g
+pause 2
+dump 39-goto
+screen 39-goto
+type "$WORK/panel-files" 120
+pause 1
+dump 39-typed
+screen 39-typed
+key escape
+pause 1
+screen 39-escaped
+dump 39-escaped
+EOF
+    drive "$WORK/panel-notes-1.txt"
+    defaults write "$BUNDLE" NSNavLastRootDirectory "$WORK/panel-files"
+    cat > "$WORK/panel-notes-2.txt" <<EOF
+press-if "Cancel" 5
+pause 1
+press "Choose…"
+see "Open" 20
+pause 2
+screen 39-start-directory
+dump 39-start-directory
+press "Cancel" 10
+EOF
+    drive "$WORK/panel-notes-2.txt"
+}
+
 scenario_panels() {
     quit_app
     defaults delete "$BUNDLE" 2> /dev/null || true
     install_claude
     fresh_state
-    rm -rf "$WORK/Panel shoot" "$WORK/Panel shoot_roughcut" "$WORK/My sounds" "$WORK/My songs"
-    cp -R "$SHOOT" "$WORK/Panel shoot"
-    mkdir -p "$WORK/My sounds" "$WORK/My songs"
-    cp "$WORK/studio-fake/Studio Library/Sound Effects/"*.wav "$WORK/My sounds/"
-    ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/My songs/Panel Song.m4a"
+    panel_files
     open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
     cat > "$WORK/panels.txt" <<EOF
 wait-window 90
 see "Start with your footage" 90
 press "Choose…"
 see "Open" 20
-screen 40-panel-footage
 key cmd-shift-g
-pause 1
-screen 40-panel-footage-goto
-type "$WORK/Panel shoot"
+pause 2
+fill "$WORK/panel-files"
+dump 40-filled
+screen 40-filled
 key return
-pause 1
-screen 40-panel-footage-there
+pause 2
+screen 40-there
+dump 40-there
+click "Panel shoot" 15
 press "Open" 15
 see "Panel shoot" 20
 shot 41-footage-chosen
@@ -628,11 +679,12 @@ see "Add a song" 20
 press "Choose a song…"
 see "Open" 20
 key cmd-shift-g
-pause 1
-type "$WORK/My songs/Panel Song.m4a"
+pause 2
+fill "$WORK/panel-files"
 key return
-pause 1
+pause 2
 screen 43-panel-song
+click "Panel Song.m4a" 15
 press "Open" 15
 see "Panel Song.m4a" 20
 shot 43-song-chosen
@@ -641,11 +693,12 @@ see "Where are your sound effects?" 20
 press "Choose a folder…"
 see "Open" 20
 key cmd-shift-g
-pause 1
-type "$WORK/My sounds"
+pause 2
+fill "$WORK/panel-files"
 key return
-pause 1
+pause 2
 screen 44-panel-sounds
+click "My sounds" 15
 press "Open" 15
 see "My sounds" 20
 shot 45-sounds-chosen
@@ -660,7 +713,7 @@ see "*2 of 2 on the timeline" 10
 shot 47-panels-done
 EOF
     drive "$WORK/panels.txt"
-    "$PYTHON" - "$WORK/Panel shoot_roughcut" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
+    "$PYTHON" - "$WORK/panel-files/Panel shoot_roughcut" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
 import glob
 import sys
 from urllib.parse import unquote
@@ -679,11 +732,11 @@ graphics = [names.get(c.get("ref")) for c in doc.iter("asset-clip") if c.get("la
 print("song:", [s for s in sources.values() if s.endswith(".m4a")])
 print("sound-effect accents:", accents)
 print("graphics:", graphics)
-assert any(s.endswith("My songs/Panel Song.m4a") for s in sources.values()), "the song chosen in the panel isn't the music bed"
+assert any(s.endswith("panel-files/Panel Song.m4a") for s in sources.values()), "the song chosen in the panel isn't the music bed"
 assert accents and all("/My sounds/" in a for a in accents), accents
 assert len(graphics) == 2, graphics
 PY
-    grep -q "^## Sound effects" "$WORK/Panel shoot_roughcut/edit_report.md"
+    grep -q "^## Sound effects" "$WORK/panel-files/Panel shoot_roughcut/edit_report.md"
 }
 
 # 10. A real drag: ui-drag-source puts a file in a window of its own, ui-drive presses the button down on it, walks to the drop
@@ -696,7 +749,7 @@ scenario_drag() {
     rm -rf "$WORK/Drag shoot"
     cp -R "$SHOOT" "$WORK/Drag shoot"
     mkdir -p "$WORK/My songs"
-    [ -f "$WORK/My songs/Panel Song.m4a" ] || ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/My songs/Panel Song.m4a"
+    ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=262:duration=30:sample_rate=48000" -c:a aac "$WORK/My songs/Panel Song.m4a"
     open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP"
     cat > "$WORK/drag-1.txt" <<EOF
 wait-window 90
@@ -755,6 +808,8 @@ wait-window 90
 see "Your footage" 90
 press "^Next"
 see "What is this video?" 30
+press "Venture OC"
+see "*Pauses trimmed hard" 10
 press "^Next"
 see "Add anything else to the line?" 30
 press "^Next"
@@ -859,8 +914,10 @@ EOF
 }
 
 export ROOT WORK APP BUNDLE SHOTS PYTHON DRIVE SHOOT STUDIO_DIR CLAUDE_STATE
-export -f quit_app drive install_claude fresh_state scenario_panels scenario_drag scenario_stopped_revision scenario_update
+export -f quit_app drive install_claude fresh_state panel_files scenario_panel_notes scenario_panels scenario_drag scenario_stopped_revision scenario_update
 FAILED=()
+# What the file panel does with typed keys and where it starts: looked at, never asserted.
+"$BASH" -euo pipefail -c scenario_panel_notes || echo "(the notes on the file panel stopped early; they are only pictures)"
 for name in scenario_panels scenario_drag scenario_stopped_revision scenario_update; do
     echo "::group::$name"
     if "$BASH" -euo pipefail -c "$name"; then
