@@ -2,6 +2,8 @@
 # A picture of every screen of the packaged Mac app, light and dark, taken on this Mac.
 #   mac/scripts/build-app.sh && .github/scripts/ui-previews.sh FOLDER
 # The app opens itself at each screen with made-up content (ROUGHCUT_UI_PREVIEW, see mac/Sources/Roughcut/UIPreview.swift).
+# Beside each light picture goes the screen's Accessibility tree (FOLDER/ax/NAME.ax.txt): what a screen reader, and the
+# "Mac app end to end" check, find on it.
 set -euo pipefail
 
 OUT="${1:?usage: ui-previews.sh FOLDER}"
@@ -10,8 +12,11 @@ SCREENS="getready footage-empty footage brief add music effects graphics ready r
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$OUT"
-WINDOW_ID="$(mktemp -d)/window-id"
+TOOLS="$(mktemp -d)"
+WINDOW_ID="$TOOLS/window-id"
+DRIVE="$TOOLS/ui-drive"
 swiftc -O "$HERE/window-id.swift" -o "$WINDOW_ID"
+swiftc -O "$HERE/ui-drive.swift" -o "$DRIVE" || echo "ui-drive did not compile: no Accessibility trees"
 
 for appearance in light dark; do
     for screen in $SCREENS; do
@@ -32,6 +37,10 @@ for appearance in light dark; do
         else
             echo "$name: no window found, taking the whole screen"
             screencapture -x "$OUT/$name.png" || true
+        fi
+        if [ "$appearance" = light ] && [ -x "$DRIVE" ]; then
+            echo "dump $screen" > "$TOOLS/dump.txt"
+            "$DRIVE" "$pid" "$TOOLS/dump.txt" "$OUT/ax" > /dev/null 2>&1 || echo "$name: no Accessibility tree"
         fi
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true

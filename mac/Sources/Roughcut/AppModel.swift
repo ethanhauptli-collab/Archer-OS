@@ -148,6 +148,15 @@ final class AppModel {
         }
     }
 
+    /// Footage handed to the app from outside (`open -a Roughcut FOLDER`, Open With): added to the build and shown at the first
+    /// step. A run that is going is left alone; a cut on screen gives way to the line (its footage and brief stay for another pass).
+    func openFootage(_ urls: [URL]) {
+        guard !isRunning else { return }
+        startOver()
+        addSources(urls)
+        flow.go(to: .footage)
+    }
+
     func removeSource(_ url: URL) {
         options.sources.removeAll { $0 == url }
         footageTasks[url]?.cancel()

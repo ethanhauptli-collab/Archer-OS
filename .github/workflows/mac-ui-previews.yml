@@ -12,6 +12,7 @@ on:
       - "mac/Package.swift"
       - ".github/scripts/ui-previews.sh"
       - ".github/scripts/window-id.swift"
+      - ".github/scripts/ui-drive.swift"
       - ".github/workflows/mac-ui-previews.yml"
 
 permissions:
@@ -41,6 +42,9 @@ jobs:
           git switch --orphan ui-previews
           git rm -rf --quiet . || true
           cp "$RUNNER_TEMP"/pictures/*.png .
+          if [ -d "$RUNNER_TEMP/pictures/ax" ]; then
+              cp -R "$RUNNER_TEMP/pictures/ax" ax
+          fi
           echo "Pictures of the Mac app at $sha. Made-up content only." > README.txt
           git add .
           git commit --quiet -m "Pictures of the Mac app at $sha"

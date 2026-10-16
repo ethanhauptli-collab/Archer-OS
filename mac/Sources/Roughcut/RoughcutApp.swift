@@ -3,7 +3,27 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var model: AppModel?
+    private weak var model: AppModel?
+    /// Footage that arrived before the window had its model (`open -a Roughcut FOLDER` starting the app).
+    private var waitingFootage: [URL] = []
+
+    /// Folders and clips handed to the app from outside are footage for the next build.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        waitingFootage.append(contentsOf: urls)
+        addWaitingFootage()
+    }
+
+    func attach(_ model: AppModel) {
+        self.model = model
+        addWaitingFootage()
+    }
+
+    private func addWaitingFootage() {
+        guard UIPreview.screen == nil, let model, !waitingFootage.isEmpty else { return }
+        let urls = waitingFootage
+        waitingFootage = []
+        model.openFootage(urls)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Needed when launched as a bare executable (`swift run`, Xcode) so the
@@ -70,7 +90,7 @@ struct RoughcutApp: App {
                 } message: {
                     Text(model.updateOutput ?? "")
                 }
-                .onAppear { appDelegate.model = model }
+                .onAppear { appDelegate.attach(model) }
                 .task {
                     if let screen = UIPreview.screen {
                         model.applyPreview(screen)
