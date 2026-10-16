@@ -224,6 +224,67 @@ final class BuildLineTests: XCTestCase {
         XCTAssertEqual(ready.footerNote(for: bad, footage: nil), bad.problems.first)
     }
 
+    // MARK: The Ready step
+
+    func testReadySaysWhatEachStationHolds() {
+        var options = form()
+        options.presetName = "venture-oc"
+        options.targetLength = "90s"
+        options.style = .tight
+        options.setGraphics(true)
+        options.music = [URL(fileURLWithPath: "/Volumes/Music/upbeat_bed.m4a")]
+        options.sfx = [URL(fileURLWithPath: "/Volumes/Sounds/Whooshes")]
+        options.sfxFrom = ["Hits"]
+        func detail(_ station: LineStation, footage: FootageCount? = nil) -> String {
+            BuildFlow.readyDetail(of: station, options: options, footage: footage)
+        }
+        XCTAssertEqual(detail(.footage), "1 source")
+        XCTAssertEqual(detail(.footage, footage: FootageCount(videos: 14, recordings: 1, stills: 2)), "14 videos, 2 stills and 1 recording")
+        XCTAssertEqual(detail(.brief), "Venture OC. About 1:30, tight pace.")
+        XCTAssertEqual(detail(.part(.music)), "upbeat_bed.m4a. Ends on the last frame.")
+        XCTAssertEqual(detail(.part(.effects)), "Whooshes, Studio: Hits")
+        XCTAssertEqual(detail(.part(.graphics)), "Venture OC look, designed by Claude.")
+        options.presetName = ""
+        XCTAssertEqual(detail(.part(.graphics)), "Designed by Claude in its own look.")
+        options.graphicsStyle = "warm"
+        XCTAssertEqual(detail(.part(.graphics)), "Your look, designed by Claude.")
+        options.sources = []
+        XCTAssertEqual(detail(.footage), "No footage yet")
+    }
+
+    func testTheBriefInTheReadyListIsItsFirstSentenceOrAShortLead() {
+        var options = form()
+        options.brief = "A promo for the pier. Keep the numbers."
+        XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "A promo for the pier.")
+        options.brief = String(repeating: "word ", count: 40)
+        let long = BuildFlow.readyDetail(of: .brief, options: options, footage: nil)
+        XCTAssertTrue(long.hasSuffix("…"))
+        XCTAssertLessThanOrEqual(long.count, 82)
+        options.brief = ""
+        XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "No brief")
+        options.targetLength = "45s"
+        XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "About 0:45.")
+    }
+
+    func testFineTuneSummarySaysWhatTheDefaultsAre() {
+        var options = form()
+        XCTAssertEqual(
+            BuildFlow.fineTuneSummary(for: options),
+            "Plans with Claude Code. YouTube loudness. Matches your footage. Also builds a dialogue-only version."
+        )
+        options.dialogueLevel = .louder
+        options.format = .vertical
+        options.stringout = false
+        options.keepFillers = true
+        options.fades = false
+        options.punchIn = .on
+        options.provider = .none
+        XCTAssertEqual(
+            BuildFlow.fineTuneSummary(for: options),
+            "No AI planning. Loud for phones. Format Vertical 9:16. Keeps um and uh. No audio fades. Punch-ins on."
+        )
+    }
+
     func testEveryPlannerSaysWhatItCosts() {
         for provider in ModelProvider.allCases {
             XCTAssertFalse(provider.usageNote.isEmpty, "\(provider)")

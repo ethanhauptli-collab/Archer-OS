@@ -231,6 +231,76 @@ public struct BuildFlow: Equatable, Sendable {
         }
     }
 
+    // MARK: The Ready step
+
+    /// A station in a sentence, for the Ready step's list.
+    public static func readyDetail(of station: LineStation, options: BuildOptions, footage: FootageCount?) -> String {
+        switch station {
+        case .footage:
+            if options.sources.isEmpty { return "No footage yet" }
+            if let footage, !footage.isEmpty { return footage.sentence }
+            return "\(options.sources.count) source\(options.sources.count == 1 ? "" : "s")"
+        case .brief:
+            var shape: [String] = []
+            if let seconds = TimeText.seconds(from: options.targetLength) { shape.append("About \(TimeText.clock(seconds))") }
+            if options.style != .auto { shape.append("\(options.style.rawValue) pace") }
+            let tail = shape.isEmpty ? "" : " " + shape.joined(separator: ", ") + "."
+            if !options.presetName.isEmpty { return Preset.displayName(for: options.presetName) + "." + tail }
+            let lead = Self.lead(of: options.brief)
+            return lead.isEmpty ? (tail.isEmpty ? "No brief" : tail.trimmingCharacters(in: .whitespaces)) : lead + tail
+        case .add, .build:
+            return ""
+        case .part(.music):
+            let names = options.music.map(\.lastPathComponent)
+            switch names.count {
+            case 0: return "No song chosen yet"
+            case 1: return names[0] + ". Ends on the last frame."
+            default: return "\(names.count) songs: " + names.prefix(2).joined(separator: ", ") + (names.count > 2 ? " and more" : "")
+            }
+        case .part(.effects):
+            var names = options.sfx.map(\.lastPathComponent)
+            names += options.sfxFrom.map { "Studio: \($0)" }
+            switch names.count {
+            case 0: return "Nothing chosen yet"
+            case 1: return names[0]
+            default: return names.prefix(2).joined(separator: ", ") + (names.count > 2 ? " and more" : "")
+            }
+        case .part(.graphics):
+            if !options.presetName.isEmpty { return "\(Preset.displayName(for: options.presetName)) look, designed by Claude." }
+            return options.graphicsStyle.trimmed.isEmpty ? "Designed by Claude in its own look." : "Your look, designed by Claude."
+        }
+    }
+
+    /// The first sentence of a brief, or its first 80 characters, with an ellipsis when it was cut.
+    static func lead(of brief: String) -> String {
+        let text = brief.trimmed.replacingOccurrences(of: "\n", with: " ")
+        guard !text.isEmpty else { return "" }
+        if let end = text.firstIndex(where: { ".!?".contains($0) }), text.distance(from: text.startIndex, to: end) < 80 {
+            return String(text[...end])
+        }
+        return text.count <= 80 ? text : String(text.prefix(80)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    /// What Fine-tune would change, in a line: the settings most cuts leave alone.
+    public static func fineTuneSummary(for options: BuildOptions) -> String {
+        var parts = [options.provider.plannerPhrase]
+        switch options.dialogueLevel {
+        case .standard: parts.append("YouTube loudness")
+        case .louder: parts.append("Loud for phones")
+        case .off: parts.append("Original levels")
+        }
+        parts.append(options.format == .auto ? "Matches your footage" : "Format \(options.format.title)")
+        if options.stringout { parts.append("Also builds a dialogue-only version") }
+        if options.keepFillers { parts.append("Keeps um and uh") }
+        if !options.fades { parts.append("No audio fades") }
+        switch options.punchIn {
+        case .on: parts.append("Punch-ins on")
+        case .off: parts.append("No punch-ins")
+        case .auto: break
+        }
+        return parts.joined(separator: ". ") + "."
+    }
+
     // MARK: Moving
 
     public mutating func go(to step: FlowStep) {
@@ -323,6 +393,18 @@ public struct BuildFlow: Equatable, Sendable {
 }
 
 public extension ModelProvider {
+    /// "Plans with Claude Code", for the Fine-tune summary.
+    var plannerPhrase: String {
+        switch self {
+        case .anthropic: return "Plans with Claude (API key)"
+        case .claudeCode: return "Plans with Claude Code"
+        case .openai: return "Plans with OpenAI"
+        case .ollama: return "Plans with Ollama"
+        case .openaiCompatible: return "Plans with your own server"
+        case .none: return "No AI planning"
+        }
+    }
+
     /// What building with this planner costs the person, in a line.
     var usageNote: String {
         switch self {

@@ -27,6 +27,11 @@ final class AppModel {
     // Form
     var options: BuildOptions = AppModel.loadPreferences()
 
+    // The build as a line of steps (see BuildFlow): where the person is, and what is in each footage source.
+    var flow = BuildFlow()
+    private(set) var footageCounts: [URL: FootageCount] = [:]
+    @ObservationIgnored private var footageTasks: [URL: Task<Void, Never>] = [:]
+
     // Run state
     private(set) var phase: Phase = .idle
     private(set) var runKind: RunKind = .build
@@ -138,12 +143,78 @@ final class AppModel {
             let clean = url.standardizedFileURL
             if !options.sources.contains(clean) {
                 options.sources.append(clean)
+                countFootage(in: clean)
             }
         }
     }
 
     func removeSource(_ url: URL) {
         options.sources.removeAll { $0 == url }
+        footageTasks[url]?.cancel()
+        footageTasks[url] = nil
+        footageCounts[url] = nil
+    }
+
+    /// What the dropped sources hold, once every one has been counted (nil while any is still being read, or when there are none).
+    var footageSummary: FootageCount? {
+        guard !options.sources.isEmpty else { return nil }
+        var total = FootageCount()
+        for source in options.sources {
+            guard let counted = footageCounts[source] else { return nil }
+            total = total + counted
+        }
+        return total
+    }
+
+    /// Counts a source's files from their names, off the main thread and for a few seconds at most: a folder on a share that
+    /// has stopped answering never holds up the window (its count just doesn't appear).
+    private func countFootage(in source: URL) {
+        footageTasks[source]?.cancel()
+        footageTasks[source] = Task { [weak self] in
+            let counted = await Task.detached(priority: .utility) {
+                FootageCount.count(source: source, deadline: Date().addingTimeInterval(4))
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.footageCounts[source] = counted
+            self.footageTasks[source] = nil
+        }
+    }
+
+    // MARK: The line of steps
+
+    func go(to step: FlowStep) {
+        flow.go(to: step)
+    }
+
+    func goNext() {
+        guard flow.canAdvance(for: options) else { return }
+        flow.goNext(for: options)
+    }
+
+    func goBack() {
+        flow.goBack(for: options)
+    }
+
+    /// A click on a station of the strip. Without footage only the first step makes sense.
+    func jump(toStation id: String) {
+        guard !isRunning else { return }
+        guard let step = flow.steps(for: options).first(where: { flow.station(of: $0).id == id }) else { return }
+        if options.sources.isEmpty && step != .footage { return }
+        flow.go(to: step)
+    }
+
+    /// Puts a part on the line (Music and Effects wait for their files in their own step; Graphics need a model).
+    func addPart(_ part: LinePart) {
+        flow.add(part, to: &options)
+    }
+
+    func removePart(_ part: LinePart) {
+        flow.remove(part, from: &options)
+    }
+
+    /// After anything that can change the line (a preset, the provider): a step whose part is gone becomes the Add step.
+    func repairFlow() {
+        flow.repair(for: options)
     }
 
     // MARK: Music bed
@@ -275,12 +346,13 @@ final class AppModel {
         process?.cancel()
     }
 
-    /// Back to the form, keeping the footage and brief for another pass.
+    /// Back to the line, keeping the footage and brief for another pass (at Ready; at the first step when there is no footage).
     func startOver() {
         guard !isRunning else { return }
         clearProblem()
         finishGraphicsTriedInVain = false
         phase = .idle
+        flow.go(to: options.sources.isEmpty ? .footage : .ready)
     }
 
     private func clearProblem() {
