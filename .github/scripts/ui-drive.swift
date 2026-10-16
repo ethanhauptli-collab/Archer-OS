@@ -8,6 +8,7 @@
 //   gone "TEXT" [SECONDS]      nothing is called TEXT any more
 //   press "LABEL" [SECONDS]    a real mouse click in the middle of the enabled button called LABEL (same ways to match)
 //   press-ax "LABEL" [SECONDS] the same through Accessibility's press, for a control a click can't reach
+//   scroll-to "LABEL"         roll the wheel over the page until something called LABEL is in view
 //   type "TEXT"                keys, one at a time, into whatever has the keyboard
 //   key NAME                   return, escape, tab or space, with cmd- / shift- / opt- in front
 //   shot NAME                  OUTPUT_FOLDER/NAME.png, a picture of the app's window
@@ -86,6 +87,8 @@ struct Node {
     let enabled: Bool
     let frame: CGRect?
     let depth: Int
+    /// The visible part of the scroll area the node sits in (nil outside one): a control scrolled out of it can't be clicked.
+    let viewport: CGRect?
 }
 
 /// The app by its bundle identifier, or, when a process number is given instead, that process.
@@ -106,7 +109,7 @@ func runningApp() -> NSRunningApplication? {
 func nodes(limit: Int = 6000) -> [Node] {
     guard let app = runningApp() else { return [] }
     var found: [Node] = []
-    func visit(_ element: AXUIElement, _ depth: Int) {
+    func visit(_ element: AXUIElement, _ depth: Int, _ viewport: CGRect?) {
         guard found.count < limit, depth < 60 else { return }
         let role = string(element, "AXRole")
         var labels: [String] = []
@@ -122,15 +125,17 @@ func nodes(limit: Int = 6000) -> [Node] {
             }
         }
         let enabled = (attribute(element, "AXEnabled") as? NSNumber)?.boolValue ?? true
-        found.append(Node(element: element, role: role, labels: labels, enabled: enabled, frame: frame(of: element), depth: depth))
+        let box = frame(of: element)
+        found.append(Node(element: element, role: role, labels: labels, enabled: enabled, frame: box, depth: depth, viewport: viewport))
         if role == "AXMenuBar" {
             return
         }
+        let inside = role == "AXScrollArea" ? box : viewport
         for child in children(element) {
-            visit(child, depth + 1)
+            visit(child, depth + 1, inside)
         }
     }
-    visit(AXUIElementCreateApplication(app.processIdentifier), 0)
+    visit(AXUIElementCreateApplication(app.processIdentifier), 0, nil)
     return found
 }
 
@@ -313,6 +318,15 @@ func screenSignature() -> String {
 var realClicks = 0
 var pressedWithAccessibility = 0
 
+/// Rolls the wheel over a point (negative: the content moves up, as a swipe down the page).
+func scrollWheel(at point: CGPoint, by pixels: Int32) {
+    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.05)
+    let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: pixels, wheel2: 0, wheel3: 0)
+    event?.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.25)
+}
+
 func typeText(_ text: String) {
     for character in text {
         let units = Array(String(character).utf16)
@@ -448,7 +462,11 @@ for rawLine in script.split(separator: "\n") {
             target = all.first { node in
                 guard buttonRoles.contains(node.role), node.enabled, matches(node.labels, label),
                       let box = node.frame, box.width > 2, box.height > 2 else { return false }
-                if let window, !window.contains(CGPoint(x: box.midX, y: box.midY)) {
+                let centre = CGPoint(x: box.midX, y: box.midY)
+                if let window, !window.contains(centre) {
+                    return false
+                }
+                if let viewport = node.viewport, !viewport.contains(centre) {
                     return false
                 }
                 return true
@@ -477,6 +495,26 @@ for rawLine in script.split(separator: "\n") {
             }
         }
         Thread.sleep(forTimeInterval: 0.5)
+    case "scroll-to":
+        let label = parts[1]
+        var arrived = false
+        for _ in 0..<30 {
+            let all = nodes()
+            if let node = all.first(where: { matches($0.labels, label) && $0.frame != nil }), let box = node.frame {
+                let centre = CGPoint(x: box.midX, y: box.midY)
+                if node.viewport?.contains(centre) ?? true {
+                    arrived = true
+                    break
+                }
+            }
+            // Down the page: over the biggest scroll area on screen.
+            let areas = all.filter { $0.role == "AXScrollArea" }.compactMap { $0.frame }
+            guard let area = areas.max(by: { $0.width * $0.height < $1.width * $1.height }) else { break }
+            scrollWheel(at: CGPoint(x: area.midX, y: area.midY), by: -160)
+        }
+        if !arrived {
+            failStep("could not scroll \u{201C}\(label)\u{201D} into view")
+        }
     case "type":
         typeText(parts[1])
     case "key":

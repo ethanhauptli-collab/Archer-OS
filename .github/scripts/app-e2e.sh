@@ -111,7 +111,11 @@ shot 03-footage
 dump 03-footage
 press "^Next"
 see "What is this video?" 30
+# A preset fills the brief, the length and the feel.
+press "Venture OC"
+see "*Pauses trimmed hard" 10
 shot 04-brief
+dump 04-brief
 press "^Next"
 see "Add anything else to the line?" 30
 shot 05-add
@@ -119,11 +123,20 @@ press "^Next"
 see "Ready to build" 30
 shot 06-ready
 dump 06-ready
+press "Fine-tune…"
+see "Fine-tune" 20
+scroll-to "Keep um and uh"
+shot 06b-fine-tune
+dump 06b-fine-tune
+press "Keep um and uh"
+press "Done"
+see "Ready to build" 20
 press "Build rough cut"
 pause 1
 shot 07-running
 see "Your rough cut is ready" 300
 see "*Made without AI" 10
+see "*tight, no AI" 10
 shot 08-done
 dump 08-done
 press "Not quite right? Adjust…"
@@ -147,6 +160,20 @@ V1="$(ls "$OUT"/history/*/*v1.fcpxml | head -1)"
 V2="$(ls "$OUT"/*v2.fcpxml | head -1)"
 test -f "$V1"
 test -f "$V2"
+# What the window chose reached the engine: the preset's tight pacing and the kept um/uh in version 1's project, the quick
+# change's loose pacing in version 2 with the kept um/uh still in it.
+"$PYTHON" - "$OUT/result.json" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1]))
+cut = result["cut"]
+print("version", result["version"], "cut", cut)
+assert result["version"] == 2, result["version"]
+assert cut["style"] == "loose", cut
+assert cut["keep_fillers"] is True, cut
+PY
+grep -q "tight, no AI" "$V1"
 "$PYTHON" - "$V1" "$V2" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
 import sys
 from fractions import Fraction
