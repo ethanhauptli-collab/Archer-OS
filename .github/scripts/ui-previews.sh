@@ -6,7 +6,7 @@ set -euo pipefail
 
 OUT="${1:?usage: ui-previews.sh FOLDER}"
 APP_BIN="mac/build/Roughcut.app/Contents/MacOS/Roughcut"
-SCREENS="getready footage-empty footage brief add music effects graphics ready finetune running-listen running done adjust"
+SCREENS="getready footage-empty footage brief add music effects graphics ready ready-problem failed finetune running-listen running done done-stopped adjust"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$OUT"

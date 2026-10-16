@@ -17,8 +17,8 @@ enum UIPreview {
 
     /// Every screen, in the order of the line.
     static let screens = [
-        "getready", "footage-empty", "footage", "brief", "add", "music", "effects", "graphics", "ready", "finetune",
-        "running-listen", "running", "done", "adjust",
+        "getready", "footage-empty", "footage", "brief", "add", "music", "effects", "graphics", "ready", "ready-problem", "failed",
+        "finetune", "running-listen", "running", "done", "done-stopped", "adjust",
     ]
 
     /// `roughcut doctor --json` as it printed on a Mac where everything is installed.
@@ -38,4 +38,10 @@ enum UIPreview {
     static let doneLine = #"""
     {"event": "done", "result": {"title": "OC Food Fest", "out_dir": "/Users/you/Movies/OC Food Fest_roughcut", "fcpxml": "/Users/you/Movies/OC Food Fest_roughcut/OC Food Fest v1.fcpxml", "report": "/Users/you/Movies/OC Food Fest_roughcut/edit_report.md", "captions": "/Users/you/Movies/OC Food Fest_roughcut/OC Food Fest v1.srt", "rough_seconds": 33.4, "stringout_seconds": 35.2, "edits": 10, "broll": 6, "sections": ["Cold open", "Maria", "On the pier", "Wrap"], "planned_by": "claude-code:claude-opus-5-5", "fell_back": false, "warnings": ["3 graphics sit outside the title-safe area.", "V03.S004: an um was left in because it is part of a word."], "version": 1, "project": "OC Food Fest - Rough Cut v1 (tight, opus-5-5)", "event": "OC Food Fest (2026-10-16)", "graphics": {"planned": 4, "placed": 4, "rendered": 4}, "visual_log": {"described": 7, "total": 7}, "skipped": {"files": [], "plan_refs": 0}, "usage": {"calls": 4, "dollars": 0.0, "subscription_calls": 4, "unpriced_calls": 0}, "report_html": "/Users/you/Movies/OC Food Fest_roughcut/edit_report.html", "cut": {"style": "tight", "format": null, "keep_fillers": false, "stringout": true, "punch_in": false}, "changes": null}}
     """#
+}
+
+extension UIPreview {
+    /// The same cut when a run stopped after writing it, before its graphics were made.
+    static let doneStoppedLine = doneLine
+        .replacingOccurrences(of: #""graphics": {"planned": 4, "placed": 4, "rendered": 4}"#, with: #""graphics": {"planned": 4, "placed": 4, "rendered": 0, "note": "none of the 4 were made yet: the run stopped before their designs came back"}, "partial": true"#)
 }

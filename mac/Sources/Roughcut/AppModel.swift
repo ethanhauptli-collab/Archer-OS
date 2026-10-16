@@ -965,13 +965,19 @@ extension AppModel {
         if screen == "effects" {
             form.sfx = [URL(fileURLWithPath: "/Volumes/Sounds/Whooshes")]
         }
+        if screen == "ready-problem" || screen == "failed" {
+            form.music = [song]
+        }
+        if screen == "ready-problem" {
+            form.targetLength = "soon"
+        }
         switch screen {
         case "brief": next.go(to: .brief)
         case "add": next.go(to: .add)
         case "music": next.go(to: .part(.music))
         case "effects": next.go(to: .part(.effects))
         case "graphics": next.go(to: .part(.graphics))
-        case "ready": next.go(to: .ready)
+        case "ready", "ready-problem", "failed": next.go(to: .ready)
         case "finetune": next.go(to: .fineTune)
         default: break
         }
@@ -1004,6 +1010,20 @@ extension AppModel {
             }
             stageStatus = statuses
             log = ["$ roughcut build …", "Reading 16 files", "Planning the edit with claude-code:claude-opus-5-5"]
+        case "failed":
+            runKind = .build
+            failureKind = "usage_limit"
+            resumeFolder = URL(fileURLWithPath: "/Users/you/Movies/OC Food Fest_roughcut")
+            phase = .failed("Your Claude plan's usage limit was reached while the edit was planned.")
+        case "done-stopped":
+            let line = UIPreview.doneStoppedLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let result = JSONLines.event(from: line)?.result {
+                runKind = .build
+                runProblem = "Version 1 was written, but its graphics weren't finished: your Claude plan's usage limit was reached."
+                runAdvice = "Nothing is lost: the plan and every design that came back are saved. After your plan resets, click Finish graphics: it makes the rest without planning the cut again."
+                resumeFolder = URL(fileURLWithPath: "/Users/you/Movies/OC Food Fest_roughcut")
+                phase = .finished(result)
+            }
         case "done", "adjust":
             if let result = JSONLines.event(from: UIPreview.doneLine.trimmingCharacters(in: .whitespacesAndNewlines))?.result {
                 recentRuns = [RecentRun(result: result, finishedAt: Date().addingTimeInterval(-3600))]
