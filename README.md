@@ -53,6 +53,16 @@ After a cut you can:
 
 **Recent rough cuts** on the main screen reopen earlier results.
 
+### Your first real shoot
+
+Start with a handful of clips (a few minutes of footage) instead of the whole card, so the first cut comes back quickly and you can judge it.
+
+1. Build it, in the app or in Terminal. The first build transcribes the footage on your Mac, and the first transcription downloads the speech model once.
+2. Import the `.fcpxml` into Final Cut and open the project the result screen names.
+3. Play the first half minute and look for four things: cuts that land on the words without clipping the end of one, B-roll that starts on the words it shows, graphics sitting above the B-roll, and music that ducks under speech. In the Timeline Index, the roles should read dialogue, B-Roll, effects and music.
+4. Run `roughcut check <the output folder>` in Terminal. It lists any cut that goes through the middle of a sound, with the timecode to go to in Final Cut, and any pause over a second left in the dialogue.
+5. If something is off, the output folder already holds what it takes to find out why: `roughcut.log` (what each step decided), `edit_report.md` (the paper edit, with its Warnings) and `plan.json`. Send those and the `roughcut check` output.
+
 ## Using Terminal
 
 A Venture OC promo, using the preset and adding this video's specifics:
