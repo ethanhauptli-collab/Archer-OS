@@ -28,6 +28,12 @@ struct ResultView: View {
         ) && ReviseOptions.lengthProblem(model.reviseTarget) == nil
     }
 
+    private var headline: String {
+        if result.fellBack { return "Made without the AI" }
+        if result.partial == true { return "Written, but the graphics aren't made yet" }
+        return "Your rough cut is ready"
+    }
+
     private var subtitle: String {
         if result.fellBack {
             return "The AI step failed, so this is the stringout with dead air removed. The warnings say why."
@@ -83,7 +89,7 @@ struct ResultView: View {
                 Image(systemName: result.fellBack ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                     .font(.system(size: 34))
                     .foregroundStyle(result.fellBack ? LineTheme.amberDeep : LineTheme.finished)
-                StepHeader(title: result.fellBack ? "Made without the AI" : "Your rough cut is ready", subtitle: subtitle)
+                StepHeader(title: headline, subtitle: subtitle)
             }
             cutCard
             importNote

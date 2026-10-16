@@ -244,7 +244,11 @@ public struct BuildFlow: Equatable, Sendable {
             var shape: [String] = []
             if let seconds = TimeText.seconds(from: options.targetLength) { shape.append("About \(TimeText.clock(seconds))") }
             if options.style != .auto { shape.append("\(options.style.rawValue) pace") }
-            let tail = shape.isEmpty ? "" : " " + shape.joined(separator: ", ") + "."
+            var said = shape.joined(separator: ", ")
+            if let first = said.first {
+                said = first.uppercased() + said.dropFirst()  // "tight pace" starts a sentence
+            }
+            let tail = shape.isEmpty ? "" : " " + said + "."
             if !options.presetName.isEmpty { return Preset.displayName(for: options.presetName) + "." + tail }
             let lead = Self.lead(of: options.brief)
             return lead.isEmpty ? (tail.isEmpty ? "No brief" : tail.trimmingCharacters(in: .whitespaces)) : lead + tail
@@ -385,7 +389,9 @@ public struct BuildFlow: Equatable, Sendable {
             let sources = "\(options.sources.count) source\(options.sources.count == 1 ? "" : "s")"
             return sources
         case .ready:
-            return options.problems.first ?? options.provider.usageNote
+            let problems = options.problems.count
+            if problems == 0 { return options.provider.usageNote }
+            return problems == 1 ? "One thing to fix before building" : "\(problems) things to fix before building"
         default:
             return nil
         }

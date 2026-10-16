@@ -221,7 +221,9 @@ final class BuildLineTests: XCTestCase {
         var bad = form()
         bad.targetLength = "soon"
         XCTAssertFalse(ready.canAdvance(for: bad))
-        XCTAssertEqual(ready.footerNote(for: bad, footage: nil), bad.problems.first)
+        XCTAssertEqual(ready.footerNote(for: bad, footage: nil), "One thing to fix before building")
+        bad.music = [URL(fileURLWithPath: "/Users/you/Music/gone.m4a")]
+        XCTAssertEqual(ready.footerNote(for: bad, footage: nil), "2 things to fix before building")
     }
 
     // MARK: The Ready step
@@ -264,6 +266,11 @@ final class BuildLineTests: XCTestCase {
         XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "No brief")
         options.targetLength = "45s"
         XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "About 0:45.")
+        options.targetLength = ""
+        options.style = .tight
+        XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "Tight pace.", "the shape starts a sentence")
+        options.presetName = "venture-oc"
+        XCTAssertEqual(BuildFlow.readyDetail(of: .brief, options: options, footage: nil), "Venture OC. Tight pace.")
     }
 
     func testFineTuneSummarySaysWhatTheDefaultsAre() {
