@@ -225,44 +225,89 @@ func failStep(_ message: String) -> Never {
 
 // MARK: Events
 
-/// An app started from a script is not the active one on a runner (its window stays in the inactive look, and the first click
-/// on such a window may only wake it): Accessibility is asked to put it in front, and the window is raised.
+/// An app started from a script is not the active one on a runner (its window stays in the inactive look, and a click on it
+/// may only wake it): Accessibility is asked to put it in front, the window is raised, and, when the app still says it is not
+/// active, a click on the title bar (which does nothing but make the window the one in front) comes before the real click.
 func bringToFront() {
     guard let app = runningApp() else { return }
     let element = AXUIElementCreateApplication(app.processIdentifier)
     AXUIElementSetAttributeValue(element, "AXFrontmost" as CFString, kCFBooleanTrue)
-    if let window = (attribute(element, "AXWindows") as? [AXUIElement])?.first {
+    let window = (attribute(element, "AXWindows") as? [AXUIElement])?.first
+    if let window {
         AXUIElementPerformAction(window, "AXRaise" as CFString)
     }
     app.activate()
-    let front = waitFor(timeout: 5) { (attribute(element, "AXFrontmost") as? NSNumber)?.boolValue == true }
-    say("  frontmost: \(front)")
+    Thread.sleep(forTimeInterval: 0.3)
+    let active = runningApp()?.isActive ?? false
+    say("  active: \(active)")
+    if !active, let window, let box = frame(of: window) {
+        say("  clicking the title bar to wake the window")
+        click(at: CGPoint(x: box.midX, y: box.minY + 10), quiet: true)
+        Thread.sleep(forTimeInterval: 0.5)
+        say("  active: \(runningApp()?.isActive ?? false)")
+    }
 }
 
 /// A click as the mouse makes it: the pointer moves there, then down and up, each saying it is click number one (SwiftUI's
-/// buttons count clicks, and a press that says zero is not a tap).
-func click(at point: CGPoint) {
-    let source = CGEventSource(stateID: .hidSystemState)
-    func post(_ type: CGEventType) {
+/// buttons count clicks, and a press that says zero is not a tap). UI_DRIVE_CLICK picks another way when asked:
+/// session, annotated (another place to post to), pid (straight to the app), slow (the pointer walks up to the button and the
+/// press is held), double (two clicks).
+func click(at point: CGPoint, quiet: Bool = false) {
+    let way = ProcessInfo.processInfo.environment["UI_DRIVE_CLICK"] ?? "hid"
+    let source = CGEventSource(stateID: way == "combined" ? .combinedSessionState : .hidSystemState)
+    func post(_ type: CGEventType, count: Int64 = 1) {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
         if type == .leftMouseDown || type == .leftMouseUp {
-            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.setIntegerValueField(.mouseEventClickState, value: count)
         }
-        event.post(tap: .cghidEventTap)
+        switch way {
+        case "session": event.post(tap: .cgSessionEventTap)
+        case "annotated": event.post(tap: .cgAnnotatedSessionEventTap)
+        case "pid": event.postToPid(appPID)
+        default: event.post(tap: .cghidEventTap)
+        }
+    }
+    if way == "slow" {
+        for step in stride(from: 8, through: 1, by: -1) {
+            let near = CGPoint(x: point.x - CGFloat(step * 6), y: point.y - CGFloat(step * 3))
+            CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: near, mouseButton: .left)?.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.03)
+        }
     }
     post(.mouseMoved)
     Thread.sleep(forTimeInterval: 0.15)
-    if let here = CGEvent(source: nil)?.location {
-        say("  cursor at (\(Int(here.x)), \(Int(here.y)))")
+    if !quiet, let here = CGEvent(source: nil)?.location {
+        say("  cursor at (\(Int(here.x)), \(Int(here.y))), way \(way)")
     }
     post(.leftMouseDown)
-    Thread.sleep(forTimeInterval: 0.06)
+    Thread.sleep(forTimeInterval: way == "slow" ? 0.2 : 0.06)
     post(.leftMouseUp)
+    if way == "double" {
+        Thread.sleep(forTimeInterval: 0.08)
+        post(.leftMouseDown, count: 2)
+        Thread.sleep(forTimeInterval: 0.06)
+        post(.leftMouseUp, count: 2)
+    }
 }
 
-/// Everything on screen as one text, to tell whether a click did anything.
+/// What is on screen as one text, to tell whether a click did anything: the toolbar and what animates are left out.
 func screenSignature() -> String {
-    nodes().map { $0.labels.joined(separator: "|") }.joined(separator: "\n")
+    var skipBelow: Int?
+    var parts: [String] = []
+    for node in nodes() {
+        if let depth = skipBelow {
+            if node.depth > depth {
+                continue
+            }
+            skipBelow = nil
+        }
+        if node.role == "AXToolbar" || node.role == "AXBusyIndicator" || node.role == "AXProgressIndicator" {
+            skipBelow = node.depth
+            continue
+        }
+        parts.append(node.role + ":" + node.labels.joined(separator: "|"))
+    }
+    return parts.joined(separator: "\n")
 }
 
 var realClicks = 0
@@ -422,7 +467,7 @@ for rawLine in script.split(separator: "\n") {
             say("  clicking at (\(Int(box.midX)), \(Int(box.midY)))")
             click(at: CGPoint(x: box.midX, y: box.midY))
             Thread.sleep(forTimeInterval: 1.0)
-            if screenSignature() == before {
+            if screenSignature() == before && ProcessInfo.processInfo.environment["UI_DRIVE_NO_FALLBACK"] == nil {
                 // Nothing on screen changed: say so, and press the button the way a screen reader does.
                 say("  the click changed nothing; pressing with Accessibility")
                 AXUIElementPerformAction(node.element, "AXPress" as CFString)
