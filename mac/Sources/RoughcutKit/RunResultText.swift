@@ -1,6 +1,17 @@
 import Foundation
 
 public extension RunResult {
+    /// The big line over a finished cut: the cut is ready, unless it was written before its graphics were made (or some of the
+    /// ones it has room for weren't designed or didn't render, as after a usage limit), or the AI step failed.
+    var headline: String {
+        if fellBack { return "Made without the AI" }
+        if partial == true { return "Written, but the graphics aren't made yet" }
+        if let graphics, graphics.planned > 0, graphics.rendered < graphics.placed {
+            return graphics.rendered == 0 ? "Written, but the graphics aren't made yet" : "Written, but some graphics aren't made yet"
+        }
+        return "Your rough cut is ready"
+    }
+
     /// The line under the headline of a finished cut: its version, and who planned it (or that nobody did).
     var subtitle: String {
         if fellBack {

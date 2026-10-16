@@ -46,6 +46,29 @@ final class RunResultTextTests: XCTestCase {
         XCTAssertTrue(plain.subtitle.hasPrefix("The AI step failed"))
     }
 
+    func testTheHeadlineSaysWhenGraphicsAreMissing() throws {
+        var cut = try result(plannedBy: "claude-code:claude-opus-5-5")
+        cut.fellBack = false
+        cut.partial = nil
+        cut.graphics = GraphicsSummary(planned: 2, placed: 2, rendered: 2, note: nil, pending: nil)
+        XCTAssertEqual(cut.headline, "Your rough cut is ready")
+
+        cut.graphics = GraphicsSummary(planned: 2, placed: 2, rendered: 0, note: "2 not designed: the usage limit was reached", pending: nil)
+        XCTAssertEqual(cut.headline, "Written, but the graphics aren't made yet")
+        cut.graphics = GraphicsSummary(planned: 2, placed: 2, rendered: 1, note: nil, pending: nil)
+        XCTAssertEqual(cut.headline, "Written, but some graphics aren't made yet")
+
+        cut.graphics = GraphicsSummary(planned: 3, placed: 2, rendered: 2, note: nil, pending: nil)
+        XCTAssertEqual(cut.headline, "Your rough cut is ready", "a graphic with no room in the cut is not a missing one")
+        cut.graphics = GraphicsSummary(planned: 2, placed: 2, rendered: 2, note: nil, pending: 2)
+        XCTAssertEqual(cut.headline, "Your rough cut is ready", "graphics in their earlier look are made")
+
+        cut.partial = true
+        XCTAssertEqual(cut.headline, "Written, but the graphics aren't made yet")
+        cut.fellBack = true
+        XCTAssertEqual(cut.headline, "Made without the AI")
+    }
+
     func testModelNames() {
         XCTAssertEqual(RunResult.modelName("claude-opus-5-5"), "Claude Opus 5.5")
         XCTAssertEqual(RunResult.modelName("claude-haiku-5-5"), "Claude Haiku 5.5")

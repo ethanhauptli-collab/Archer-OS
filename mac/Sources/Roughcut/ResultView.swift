@@ -29,9 +29,7 @@ struct ResultView: View {
     }
 
     private var headline: String {
-        if result.fellBack { return "Made without the AI" }
-        if result.partial == true { return "Written, but the graphics aren't made yet" }
-        return "Your rough cut is ready"
+        result.headline
     }
 
     private var subtitle: String {

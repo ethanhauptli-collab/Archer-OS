@@ -444,6 +444,7 @@ see "Ready to build" 30
 press "Build rough cut"
 see "Finish graphics" 300
 see "*Version 1 was written" 10
+see "Written, but the graphics aren't made yet" 10
 shot 28-ai-limit-stopped
 dump 28-ai-limit-stopped
 EOF
