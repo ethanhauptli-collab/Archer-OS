@@ -8,6 +8,7 @@
 //   gone "TEXT" [SECONDS]      nothing is called TEXT any more
 //   press "LABEL" [SECONDS]    a real mouse click in the middle of the enabled button called LABEL (same ways to match)
 //   press-ax "LABEL" [SECONDS] the same through Accessibility's press, for a control a click can't reach
+//   click "LABEL" [SECONDS]    a real click on anything in view called LABEL (a row in a list), not only a button
 //   scroll-to "LABEL"         roll the wheel over the page until something called LABEL is in view
 //   focus ROLE                 a click in the first enabled element of that role (AXTextArea, AXTextField), to type into it
 //   type "TEXT"                keys, one at a time, into whatever has the keyboard
@@ -519,6 +520,22 @@ for rawLine in script.split(separator: "\n") {
         if !arrived {
             failStep("could not scroll \u{201C}\(label)\u{201D} into view")
         }
+    case "click":
+        let label = parts[1]
+        var element: Node?
+        let seen = waitFor(timeout: seconds(parts, at: 2, default: 30)) {
+            element = nodes().first { node in
+                guard matches(node.labels, label), let box = node.frame, box.width > 2, box.height > 2 else { return false }
+                return node.viewport?.contains(CGPoint(x: box.midX, y: box.midY)) ?? true
+            }
+            return element != nil
+        }
+        guard seen, let found = element, let box = found.frame else {
+            failStep("nothing in view called \u{201C}\(label)\u{201D} to click")
+        }
+        bringToFront()
+        click(at: CGPoint(x: box.midX, y: box.midY))
+        Thread.sleep(forTimeInterval: 0.5)
     case "focus":
         let role = parts[1]
         var field: Node?

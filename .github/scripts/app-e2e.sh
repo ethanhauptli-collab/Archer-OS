@@ -285,6 +285,59 @@ shot 15-recent-opened
 EOF
 drive "$WORK/recent.txt"
 
+# --- 5. Venture Studio through the app: a made-up Studio folder (the tests' own fake), the footage handed over as the app starts,
+# a song chosen in the "From Venture Studio" sheet, the cut that uses it and the paper edit that credits it ---
+quit_app
+STUDIO_DIR="$("$PYTHON" .github/scripts/fake-studio.py "$WORK/studio-fake")"
+cp -R "$SHOOT" "$WORK/Studio shoot"
+open --env "ROUGHCUT_STUDIO_DIR=$STUDIO_DIR" -a "$APP" "$WORK/Studio shoot"
+cat > "$WORK/studio.txt" <<'EOF'
+wait-window 90
+see "Your footage" 60
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "Add"
+see "Add a song" 20
+press "From Venture Studio…" 60
+see "Music from Venture Studio" 30
+see "*Sunrise" 60
+shot 16-studio-sheet
+dump 16-studio-sheet
+click "*Sunrise"
+see "1 selected" 10
+press "Add to Music bed"
+see "Sunrise.m4a" 20
+shot 17-music-added
+press "^Next"
+see "Ready to build" 30
+shot 18-ready-with-music
+press "Build rough cut"
+see "Your rough cut is ready" 300
+shot 19-done-with-studio-music
+EOF
+drive "$WORK/studio.txt"
+SOUT="$WORK/Studio shoot_roughcut"
+SV1="$(ls "$SOUT"/*v1.fcpxml | head -1)"
+"$PYTHON" - "$SV1" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
+import sys
+from urllib.parse import unquote
+
+from lxml import etree
+
+name, dtd_path = sys.argv[1:]
+doc = etree.parse(name)
+assert etree.DTD(dtd_path).validate(doc), etree.DTD(dtd_path).error_log.filter_from_errors()
+sources = [unquote(a.get("src") or "") for a in doc.iter("asset", "media-rep")]
+print("sources:", sources)
+assert any(s.endswith("Studio Library/Music/Sunrise.m4a") for s in sources), "the Studio song isn't in the cut"
+print(f"{name.rsplit('/', 1)[-1]}: valid against Apple's DTD, with Studio's song as the music bed")
+PY
+grep -n "Venture Studio" "$SOUT/edit_report.md" | head
+grep -q "^## Venture Studio" "$SOUT/edit_report.md"
+grep -q "Sunrise" "$SOUT/edit_report.md"
+
 quit_app
 defaults delete "$BUNDLE" 2> /dev/null || true
 echo "The packaged app, driven end to end: passed"
