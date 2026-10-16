@@ -299,6 +299,8 @@ see "What is this video?" 30
 press "^Next"
 see "Add anything else to the line?" 30
 press "Add"
+see "Added" 10
+press "^Next"
 see "Add a song" 20
 press "From Venture Studio…" 60
 see "Music from Venture Studio" 30
