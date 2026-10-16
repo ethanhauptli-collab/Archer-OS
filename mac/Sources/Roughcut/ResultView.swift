@@ -35,12 +35,7 @@ struct ResultView: View {
     }
 
     private var subtitle: String {
-        if result.fellBack {
-            return "The AI step failed, so this is the stringout with dead air removed. The warnings say why."
-        }
-        let version = result.version.map { "Version \($0). " } ?? ""
-        let unfinished = result.partial == true ? "No graphics yet. " : ""
-        return version + unfinished + "Planned by \(result.plannerSentence)."
+        result.subtitle
     }
 
     var body: some View {

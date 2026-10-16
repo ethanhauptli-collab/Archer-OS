@@ -26,6 +26,26 @@ final class RunResultTextTests: XCTestCase {
         XCTAssertEqual(try result(plannedBy: "").plannerSentence, "no AI")
     }
 
+    func testTheLineUnderTheHeadline() throws {
+        var planned = try result(plannedBy: "claude-code:claude-opus-5-5")
+        planned.version = 2
+        planned.partial = nil
+        planned.fellBack = false
+        XCTAssertEqual(planned.subtitle, "Version 2. Planned by Claude Opus 5.5, through your Claude plan.")
+        planned.partial = true
+        XCTAssertEqual(planned.subtitle, "Version 2. No graphics yet. Planned by Claude Opus 5.5, through your Claude plan.")
+
+        var plain = try result(plannedBy: "heuristic")
+        plain.version = 1
+        plain.partial = nil
+        plain.fellBack = false
+        XCTAssertEqual(plain.subtitle, "Version 1. Made without AI: the dead air is cut and nothing is reordered.")
+        XCTAssertEqual(plain.plannerSentence, "no AI")
+
+        plain.fellBack = true
+        XCTAssertTrue(plain.subtitle.hasPrefix("The AI step failed"))
+    }
+
     func testModelNames() {
         XCTAssertEqual(RunResult.modelName("claude-opus-5-5"), "Claude Opus 5.5")
         XCTAssertEqual(RunResult.modelName("claude-haiku-5-5"), "Claude Haiku 5.5")

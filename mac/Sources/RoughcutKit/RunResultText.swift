@@ -1,11 +1,22 @@
 import Foundation
 
 public extension RunResult {
+    /// The line under the headline of a finished cut: its version, and who planned it (or that nobody did).
+    var subtitle: String {
+        if fellBack {
+            return "The AI step failed, so this is the stringout with dead air removed. The warnings say why."
+        }
+        let number = version.map { "Version \($0). " } ?? ""
+        let unfinished = partial == true ? "No graphics yet. " : ""
+        let planner = madeWithoutAI ? "Made without AI: the dead air is cut and nothing is reordered." : "Planned by \(plannerSentence)."
+        return number + unfinished + planner
+    }
+
     /// Who planned the cut, in words: `planned_by` ("claude-code:claude-opus-5-5") as "Claude Opus 5.5, through your Claude plan".
     /// A cut made without a model says what the engine said.
     var plannerSentence: String {
         guard let colon = plannedBy.firstIndex(of: ":") else {
-            return plannedBy.isEmpty ? "no AI" : plannedBy
+            return plannedBy.isEmpty || plannedBy == "heuristic" ? "no AI" : plannedBy
         }
         let provider = String(plannedBy[..<colon])
         let model = String(plannedBy[plannedBy.index(after: colon)...])

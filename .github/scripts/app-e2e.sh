@@ -21,9 +21,14 @@ SHOTS="$WORK/pictures"
 PYTHON="$ROOT/.venv/bin/python"
 mkdir -p "$SHOTS"
 
-# The Mac stays awake and the screen lit while the app is driven.
+# The Mac stays awake and the screen lit while the app is driven, and the Dock gets out of the way: on a runner's small screen
+# it covers the bottom of the window, where the footer's buttons are, and a click there would land on the Dock.
 caffeinate -d -i -t 3600 &
 trap 'kill %1 2>/dev/null || true' EXIT
+defaults write com.apple.dock autohide -bool true
+defaults write com.apple.dock autohide-delay -float 0
+killall Dock || true
+sleep 3
 
 DRIVE="$WORK/ui-drive"
 swiftc -O .github/scripts/ui-drive.swift -o "$DRIVE"
@@ -118,6 +123,7 @@ press "Build rough cut"
 pause 1
 shot 07-running
 see "Your rough cut is ready" 300
+see "*Made without AI" 10
 shot 08-done
 dump 08-done
 press "Not quite right? Adjust…"
