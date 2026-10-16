@@ -762,8 +762,26 @@ final class AppModel {
         Task { await refreshDoctor() }
     }
 
+    /// The setup check that is running now. Checks go one at a time on a task of their own: a call that comes while one is
+    /// running waits for that run and shows its answer, and a window that is rebuilt as the app opens (which cancels the task
+    /// that asked) can't stop the command-line tool half way and leave "didn't answer" over a check that was fine.
+    @ObservationIgnored private var doctorRun: Task<Void, Never>?
+
     /// Runs `roughcut doctor --json` with the same environment builds get.
     func refreshDoctor() async {
+        if let running = doctorRun {
+            await running.value
+            return
+        }
+        let run = Task {
+            await checkSetup()
+            doctorRun = nil
+        }
+        doctorRun = run
+        await run.value
+    }
+
+    private func checkSetup() async {
         checkingSetup = true
         defer { checkingSetup = false }
         cliURL = CLILocator.locate()

@@ -354,8 +354,24 @@ echo '{}' > "$CLAUDE_STATE"
 rm -f "$CLAUDE_STATE.log"
 cp -R "$SHOOT" "$WORK/AI shoot"
 open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP" "$WORK/AI shoot"
-cat > "$WORK/ai.txt" <<'EOF'
+# The first thing a person sees as the app opens with footage handed over: no banner about the setup check, now or after it
+# has had time to finish (the pictures and the accessibility dumps are in the artifact).
+cat > "$WORK/ai-0.txt" <<'EOF2'
 wait-window 90
+dump 20-ai-first-look
+shot 20-ai-first-look
+pause 4
+dump 20-ai-after-4s
+EOF2
+drive "$WORK/ai-0.txt"
+# What the command-line tool says on its own, for comparison with what the window showed (and how long it takes).
+"$HOME/.local/bin/claude" --version
+"$HOME/.local/bin/claude" auth status --json
+START=$SECONDS
+env -i PATH="$ROOT/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin" HOME="$HOME" "$ROOT/.venv/bin/roughcut" doctor --json > "$WORK/doctor.json" 2> "$WORK/doctor.err" || echo "doctor exit $?"
+echo "doctor took $((SECONDS - START)) s: $(wc -c < "$WORK/doctor.json") bytes of JSON, $(wc -c < "$WORK/doctor.err") bytes of messages"
+head -c 600 "$WORK/doctor.err" || true
+cat > "$WORK/ai.txt" <<'EOF'
 # No Get ready page: the first-run planner is Claude Code, which is signed in.
 see "Your footage" 90
 shot 20-ai-footage
