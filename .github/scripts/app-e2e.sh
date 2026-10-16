@@ -486,6 +486,66 @@ assert len(g2) == 2, g2
 PY
 rm -f "$HOME/.local/bin/claude"
 
+# --- 8. Venture Studio's sound effects through the app, with the AI path: a Studio collection typed into the Effects step, the
+# accents it puts on the cut's own frames (a pop on the lower third, a hit on the stat), on their own role, credited to Studio ---
+quit_app
+echo '{}' > "$CLAUDE_STATE"
+mkdir -p "$HOME/.local/bin"
+sed "1s|.*|#!$PYTHON|" .github/scripts/fake-claude.py > "$HOME/.local/bin/claude"
+chmod +x "$HOME/.local/bin/claude"
+rm -f "$CLAUDE_STATE.log"
+cp -R "$SHOOT" "$WORK/FX shoot"
+open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" --env "ROUGHCUT_STUDIO_DIR=$STUDIO_DIR" -a "$APP" "$WORK/FX shoot"
+cat > "$WORK/fx.txt" <<'EOF'
+wait-window 90
+see "Your footage" 90
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "Add#2"
+see "Added" 10
+shot 30-fx-add
+press "^Next"
+see "Where are your sound effects?" 20
+focus AXTextField
+type "UI Sounds"
+press "Add"
+see "Venture Studio: UI Sounds" 10
+shot 31-fx-collection
+press "^Next"
+see "^Claude designs lower thirds" 20
+press "^Next"
+see "Ready to build" 30
+shot 32-fx-ready
+press "Build rough cut"
+see "Your rough cut is ready" 300
+see "*2 of 2 on the timeline" 10
+shot 33-fx-done
+dump 33-fx-done
+EOF
+drive "$WORK/fx.txt"
+FOUT="$WORK/FX shoot_roughcut"
+"$PYTHON" - "$(ls "$FOUT"/*v1.fcpxml | head -1)" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
+import sys
+from urllib.parse import unquote
+
+from lxml import etree
+
+name, dtd_path = sys.argv[1:]
+doc = etree.parse(name)
+assert etree.DTD(dtd_path).validate(doc), etree.DTD(dtd_path).error_log.filter_from_errors()
+sources = {a.get("id"): unquote(r.get("src") or "") for a in doc.iter("asset") for r in a.iter("media-rep")}
+accents = [sources.get(el.get("ref"), "") for el in doc.iter() if el.get("audioRole") == "effects.SFX"]
+print("sound-effect accents:", accents)
+assert accents, "no sound effect on its own role"
+assert all("Studio Library/Sound Effects/" in a for a in accents), accents
+PY
+grep -n "^## Venture Studio\|^## Sound effects" "$FOUT/edit_report.md"
+grep -q "^## Sound effects" "$FOUT/edit_report.md"
+grep -q "^## Venture Studio" "$FOUT/edit_report.md"
+rm -f "$HOME/.local/bin/claude"
+
 quit_app
 defaults delete "$BUNDLE" 2> /dev/null || true
 echo "The packaged app, driven end to end: passed"

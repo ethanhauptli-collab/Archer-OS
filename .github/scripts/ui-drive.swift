@@ -6,7 +6,8 @@
 //   wait-window [SECONDS]      the app has a window
 //   see "TEXT" [SECONDS]       something on screen is called TEXT (exact; ^TEXT: begins with it; *TEXT: contains it)
 //   gone "TEXT" [SECONDS]      nothing is called TEXT any more
-//   press "LABEL" [SECONDS]    a real mouse click in the middle of the enabled button called LABEL (same ways to match)
+//   press "LABEL" [SECONDS]    a real mouse click in the middle of the enabled button called LABEL (same ways to match; "Add#2"
+//                              is the second button with that name)
 //   press-ax "LABEL" [SECONDS] the same through Accessibility's press, for a control a click can't reach
 //   click "LABEL" [SECONDS]    a real click on anything in view called LABEL (a row in a list), not only a button
 //   scroll-to "LABEL"         roll the wheel over the page until something called LABEL is in view
@@ -406,6 +407,14 @@ func tokens(_ line: String) -> [String] {
     return result
 }
 
+/// "Add#2": the label and which of the matches is meant (the first when there is no #N at the end).
+func splitIndex(_ text: String) -> (label: String, which: Int) {
+    if let hash = text.lastIndex(of: "#"), hash != text.startIndex, let which = Int(text[text.index(after: hash)...]), which >= 1 {
+        return (String(text[..<hash]), which)
+    }
+    return (text, 1)
+}
+
 func seconds(_ parts: [String], at index: Int, default fallback: Double) -> Double {
     parts.count > index ? (Double(parts[index]) ?? fallback) : fallback
 }
@@ -456,12 +465,12 @@ for rawLine in script.split(separator: "\n") {
             failStep("\u{201C}\(text)\u{201D} is still on screen")
         }
     case "press", "press-ax":
-        let label = parts[1]
+        let (label, which) = splitIndex(parts[1])
         var target: Node?
         let ok = waitFor(timeout: seconds(parts, at: 2, default: 30)) {
             let all = nodes()
             let window = all.first { $0.role == "AXWindow" }?.frame
-            target = all.first { node in
+            let found = all.filter { node in
                 guard buttonRoles.contains(node.role), node.enabled, matches(node.labels, label),
                       let box = node.frame, box.width > 2, box.height > 2 else { return false }
                 if node.role == "AXMenuItem" {
@@ -476,10 +485,11 @@ for rawLine in script.split(separator: "\n") {
                 }
                 return true
             }
+            target = found.count >= which ? found[which - 1] : nil
             return target != nil
         }
         guard ok, let node = target, let box = node.frame else {
-            failStep("no enabled button called \u{201C}\(label)\u{201D}")
+            failStep("no enabled button called \u{201C}\(parts[1])\u{201D}")
         }
         if parts[0] == "press-ax" {
             AXUIElementPerformAction(node.element, "AXPress" as CFString)
