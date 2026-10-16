@@ -160,13 +160,14 @@ private struct CommandChip: View {
                 .font(.system(size: 13, design: .monospaced))
                 .foregroundStyle(Color(white: 0.95))
                 .textSelection(.enabled)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(command, forType: .string)
                 copied = true
             } label: {
                 Text(copied ? "Copied" : "Copy")
+                    .fixedSize()
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color(white: 0.95))
                     .padding(.horizontal, 10)

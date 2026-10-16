@@ -150,6 +150,8 @@ struct FineTuneStep: View {
                         Toggle("Look at the footage", isOn: $model.options.vision)
                             .labelsHidden()
                             .toggleStyle(.switch)
+                        .tint(LineTheme.amber)
+                            .tint(LineTheme.amber)
                     }
                     if model.options.provider.usesClaudeModels && model.options.vision {
                         Divider()
@@ -175,6 +177,7 @@ struct FineTuneStep: View {
                     Toggle("Open in Final Cut Pro when it's done", isOn: $model.options.openInFinalCutWhenDone)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(LineTheme.amber)
                 }
             }
 
@@ -222,18 +225,21 @@ struct FineTuneStep: View {
                     Toggle("Short fades at audio edits", isOn: $model.options.fades)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(LineTheme.amber)
                 }
                 Divider()
                 SettingRow("Keep “um” and “uh”") {
                     Toggle("Keep um and uh", isOn: $model.options.keepFillers)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(LineTheme.amber)
                 }
                 Divider()
                 SettingRow("Also make a dialogue-only version", caption: "All dialogue, dead air removed.") {
                     Toggle("Also make a dialogue-only version", isOn: $model.options.stringout)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(LineTheme.amber)
                 }
             }
         }

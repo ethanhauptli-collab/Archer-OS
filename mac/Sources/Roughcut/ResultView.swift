@@ -34,7 +34,7 @@ struct ResultView: View {
         }
         let version = result.version.map { "Version \($0). " } ?? ""
         let unfinished = result.partial == true ? "No graphics yet. " : ""
-        return version + unfinished + "Planned by \(result.plannedBy)."
+        return version + unfinished + "Planned by \(result.plannerSentence)."
     }
 
     var body: some View {

@@ -139,8 +139,13 @@ struct FlowBar: View {
                 .buttonStyle(.borderless)
                 .controlSize(.large)
             }
-            note
+            if model.flow.step != .ready {
+                note
+            }
             Spacer()
+            if model.flow.step == .ready {
+                note
+            }
             primary
         }
         .padding(.horizontal, 24)

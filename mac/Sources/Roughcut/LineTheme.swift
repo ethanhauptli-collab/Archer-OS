@@ -12,7 +12,7 @@ enum LineTheme {
 
     static var card: Color { Color(nsColor: .controlBackgroundColor) }
     static var page: Color { Color(nsColor: .windowBackgroundColor) }
-    static var strip: Color { Color(nsColor: .underPageBackgroundColor) }
+    static var strip: Color { Color(nsColor: .controlBackgroundColor) }
     static var hairline: Color { Color(nsColor: .separatorColor) }
 }
 
