@@ -5,21 +5,29 @@ on:
 jobs:
   probe:
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - name: The machine
+      - name: Which way of clicking does an app on this runner answer
         run: |
-          sw_vers; whoami; id
-          csrutil status || true
-          echo "--- system TCC rows"
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select service, client, auth_value, auth_reason from access" 2>&1 | head -60 || true
-          echo "--- user TCC rows"
-          sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, client, auth_value, auth_reason from access" 2>&1 | head -60 || true
-      - name: Probe Accessibility and real clicks
-        run: |
-          swiftc -O .github/scripts/ax-probe.swift -o "$RUNNER_TEMP/ax-probe"
-          "$RUNNER_TEMP/ax-probe" 2>&1 | head -150
-      - name: System Events through osascript
-        run: |
-          osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 || echo "osascript exit $?"
+          swiftc -O .github/scripts/click-target.swift -o "$RUNNER_TEMP/click-target"
+          swiftc -O .github/scripts/ui-drive.swift -o "$RUNNER_TEMP/ui-drive"
+          rm -f /tmp/click-target.log
+          "$RUNNER_TEMP/click-target" > "$RUNNER_TEMP/target.out" 2>&1 &
+          PID=$!
+          sleep 5
+          cat /tmp/click-target.log || true
+          cat > "$RUNNER_TEMP/s.txt" <<'SCRIPT'
+          wait-window 20
+          dump probe
+          press "SwiftUI button"
+          press "Prominent"
+          press "Native button"
+          SCRIPT
+          for way in hid session annotated pid slow double combined; do
+              rm -f /tmp/click-target.log
+              echo "=== way: $way"
+              UI_DRIVE_NO_FALLBACK=1 UI_DRIVE_CLICK=$way "$RUNNER_TEMP/ui-drive" "$PID" "$RUNNER_TEMP/s.txt" "$RUNNER_TEMP/out-$way" 2>&1 | grep -v "^\[" || true
+              sort /tmp/click-target.log | uniq -c || true
+          done
+          kill $PID || true
