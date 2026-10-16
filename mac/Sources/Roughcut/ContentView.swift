@@ -6,19 +6,28 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SetupBanner()
+            if !model.needsGetReady {
+                SetupBanner()
+            }
             switch model.phase {
             case .running:
                 RunView()
             case .finished(let result):
                 ResultView(result: result)
             case .idle, .failed, .cancelled:
-                FlowView()
+                if model.needsGetReady {
+                    GetReadyView()
+                } else {
+                    FlowView()
+                }
             }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 RecentMenu()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                NewCutButton()
             }
         }
     }
@@ -54,5 +63,26 @@ struct SetupBanner: View {
             .padding(12)
             .background(Color.orange.opacity(0.12))
         }
+    }
+}
+
+/// "New Cut" in the toolbar while a finished cut is on screen: back to the line with the footage and brief kept.
+struct NewCutButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.startOver()
+        } label: {
+            Label("New Cut", systemImage: "plus")
+        }
+        .help("Back to the start. The footage and brief stay.")
+        .disabled(!isFinished)
+        .opacity(isFinished ? 1 : 0)
+    }
+
+    private var isFinished: Bool {
+        if case .finished = model.phase { return true }
+        return false
     }
 }

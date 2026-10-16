@@ -180,6 +180,21 @@ final class AppModel {
         }
     }
 
+    // MARK: Get ready
+
+    /// The Get ready page was set aside for this session ("Skip for now").
+    var getReadySetAside = false
+
+    /// The Get ready page's rows for the planner the build has chosen.
+    var setupRows: [SetupCheck] {
+        SetupChecks.rows(cliFound: cliURL != nil, doctor: doctor, doctorError: doctorError, options: options)
+    }
+
+    /// Something Roughcut needs is missing, and nothing has been dropped yet: the page that says what to do comes first.
+    var needsGetReady: Bool {
+        !getReadySetAside && options.sources.isEmpty && flow.step == .footage && SetupChecks.isBlocked(setupRows)
+    }
+
     // MARK: The line of steps
 
     func go(to step: FlowStep) {
