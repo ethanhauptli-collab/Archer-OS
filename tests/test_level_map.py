@@ -15,7 +15,7 @@ import pytest
 from conftest import make_clip
 
 from roughcut import ffmpeg_ops
-from roughcut.analyze import Analysis, Cache, analyze
+from roughcut.analyze import LEVELS_CACHE, LEVELS_WHOLE_CACHE, Analysis, Cache, analyze
 from roughcut.cli import main
 from roughcut.ffmpeg_ops import LEVEL_FLOOR_LIMIT, level_silences, level_threshold
 from roughcut.plan import heuristic_plan
@@ -184,7 +184,8 @@ def test_a_clean_recording_is_left_to_silencedetect(tmp_path_factory, tmp_path):
     )
     clip = analyze([root / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
     assert clip.silence_db == ffmpeg_ops.DEFAULT_NOISE_DB
-    assert not (tmp_path / "cache" / clip.media.fingerprint / "levels10-v2.json").exists()  # no extra pass over a clean clip
+    for name in (LEVELS_CACHE, LEVELS_WHOLE_CACHE):  # no extra pass over a clean clip, by either reading
+        assert not (tmp_path / "cache" / clip.media.fingerprint / name).exists()
 
 
 def test_a_map_that_finds_no_pauses_is_replaced_by_the_loudness_map(room, tmp_path, monkeypatch):

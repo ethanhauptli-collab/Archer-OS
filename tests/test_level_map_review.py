@@ -8,6 +8,8 @@ that is mostly rumble or hum, a quiet recording, and the clocks that disagree ab
 from __future__ import annotations
 
 import json
+import math
+import re
 import shutil
 import subprocess
 from fractions import Fraction
@@ -16,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from roughcut import ffmpeg_ops, pauses
-from roughcut.analyze import LEVEL_HIGHPASS, Analysis, Cache, analyze, level_maps, pick_by_words, pick_level_map, preferred_level_map
+from roughcut.analyze import LEVEL_HIGHPASS, WHOLE_BAND_MAX_RISE, Analysis, Cache, LevelMap, analyze, read_level_map, room_for_words, whole_band_map
 from roughcut.segments import speech_over_room, speech_stands_above_room, split_invented_words
 from roughcut.timeline import _join_close
 from roughcut.transcribe import Transcriber, Transcript, Word
@@ -224,30 +226,41 @@ def test_a_transcript_made_before_the_hole_fix_is_made_again(clip_file, tmp_path
     assert other.cache_key == "faster-whisper-small-auto-v"  # the other backend's transcripts were not made differently
 
 
-# ------------------------------------------------------------------ two ways of reading the room
+# ------------------------------------------------------------------ how a noisy clip's loudness is read
 
-def test_a_noisy_clip_is_read_two_ways_and_the_one_where_the_speech_stands_further_over_the_room_is_used(clip_file, tmp_path, monkeypatch):
+SPEECH = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
+GOOD_WORDS = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
+WORDS_WITH_A_MADE_UP_NUMBER = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
+
+
+def _kept(clip):
+    return [w.text for s in clip.segments for w in s.words]
+
+
+def test_a_noisy_clip_is_read_with_the_rumble_filtered_out_and_over_the_whole_band_where_that_finds_no_pauses(clip_file, tmp_path, monkeypatch):
     """A rumble hides the speech in the whole band and not in the speech band; broadband wind is the other way about (a high-pass
-    takes the voice's low end with it and leaves the wind)."""
-    words = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
-    _sidecar(clip_file, words)
-    speech = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
+    takes a deep voice's low end with it and leaves the wind)."""
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
     # Rumble: the whole band has the speech 6 dB over the room (rumble -54 dB, speech -48), the speech band 30 dB over.
-    whole = _readings(fill=-54.0, spans=[(a, b, -48.0) for a, b in speech])
-    speech_band = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in speech])
-    _rig(monkeypatch, whole, {}, high=speech_band)
+    whole = _readings(fill=-54.0, spans=[(a, b, -48.0) for a, b in SPEECH])
+    speech_band = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in SPEECH])
+    calls = _rig(monkeypatch, whole, {}, high=speech_band)
     clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "rumble")).clips[0]
-    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]  # the speech band tells the room from the speech
+    assert _kept(clip) == ["so", "this", "is", "arena"]  # the speech band tells the room from the speech: the made-up number goes
+    assert calls["window_rms"] == 1  # and the whole band was never read
     # Wind: the whole band separates the speech (30 dB), the high-passed one has lost the voice (3 dB over the wind).
-    whole = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in speech])
-    filtered = _readings(fill=-60.0, spans=[(a, b, -57.0) for a, b in speech])
-    _rig(monkeypatch, whole, {}, high=filtered)
+    whole = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in SPEECH])
+    filtered = _readings(fill=-60.0, spans=[(a, b, -57.0) for a, b in SPEECH])
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
     clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "wind")).clips[0]
-    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]
+    assert _kept(clip) == ["so", "this", "is", "arena"]
     assert clip.silences and any(s[0] < 1.0 for s in clip.silences)  # and its pauses are the whole band's
+    assert calls["window_rms"] == 2
+    stored = sorted(p.name for p in (tmp_path / "wind" / clip.media.fingerprint).glob("*levels*"))
+    assert stored == ["flatness-levels-whole-v1.json", "levels10-v3.json", "levels10-whole-v1.json"]  # judged on the whole band's pauses, under its own name
 
 
-def test_the_margin_the_speech_stands_over_the_room_is_what_the_two_readings_are_compared_by():
+def test_speech_over_room_is_the_loud_quarter_of_the_readings_under_the_words_over_the_floor():
     words = [Word(1.0, 1.5, "so"), Word(3.0, 3.5, "this")]
     levels = _readings(spans=[(1.0, 1.5, -30.0), (3.0, 3.5, -30.0)])
     assert speech_over_room(words, levels, FLOOR) == pytest.approx(30.0, abs=0.01)
@@ -255,98 +268,229 @@ def test_the_margin_the_speech_stands_over_the_room_is_what_the_two_readings_are
     assert speech_over_room(words, [], FLOOR) is None
 
 
-def _cough_rig(monkeypatch, tmp_path, whole_speech, filtered_speech, name):
-    """Speech at `filtered_speech` dB in the filtered reading and `whole_speech` in the whole band (the room at -60 dB in both). A
-    cough at 10.0-10.6 s is in the filtered reading only, so which reading made the map shows in where the pauses are."""
-    spans = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
-    whole = _readings(spans=[(a, b, whole_speech) for a, b in spans])
-    filtered = _readings(spans=[(a, b, filtered_speech) for a, b in spans] + [(10.0, 10.6, filtered_speech)])
-    return _rig(monkeypatch, whole, {}, high=filtered)
+def _scene(horn_in_filtered=True, filtered_speech=-52.0, filtered_floor=-60.0, whole_speech=-46.0, whole_floor=-60.0, truck_under_loud_words=False,
+           soft=None):
+    """Both readings of a clip: its four words (the last two softer by `soft` dB when given) and a loud event at 10.0-11.5 s in the
+    filtered readings (so that they find a map, whatever the words are), the whole band's room at `whole_floor`."""
+    filtered = _readings(fill=filtered_floor, spans=[(a, b, filtered_speech - (soft or 0.0) * (i >= 2)) for i, (a, b) in enumerate(SPEECH)] + ([(10.0, 11.5, filtered_floor + 18.0)] if horn_in_filtered else []))
+    whole = _readings(fill=whole_floor, spans=[(a, b, (-20.0 if truck_under_loud_words and i < 2 else whole_speech - (soft or 0.0) * (i >= 2))) for i, (a, b) in enumerate(SPEECH)])
+    return filtered, whole
 
 
-def _pause_through_the_cough(clip):
-    return [s for s in clip.silences if s[0] < 10.3 < s[1]]
-
-
-GOOD_WORDS = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
-
-
-def test_the_whole_band_is_used_where_both_ways_find_a_map_and_it_stands_the_speech_clearly_further_over_the_room(clip_file, tmp_path, monkeypatch):
-    _sidecar(clip_file, GOOD_WORDS)
-    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="far")  # 17 dB against 14
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "far")).clips[0]
-    assert calls["window_rms"] == 2  # the filtered reading was not comfortable, so the whole band was read as well
-    assert len(_pause_through_the_cough(clip)) == 1  # the whole band's map: no cough, one long pause
-
-
-def test_the_way_that_stands_the_words_further_over_the_room_is_used_and_the_filtered_reading_on_a_tie(clip_file, tmp_path, monkeypatch):
-    _sidecar(clip_file, GOOD_WORDS)
-    _cough_rig(monkeypatch, tmp_path, whole_speech=-44.0, filtered_speech=-46.0, name="near")  # 16 dB against 14: the words decide, however little
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "near")).clips[0]
-    assert len(_pause_through_the_cough(clip)) == 1  # the whole band's map
-    _cough_rig(monkeypatch, tmp_path, whole_speech=-46.0, filtered_speech=-46.0, name="tie")
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "tie")).clips[0]
-    assert _pause_through_the_cough(clip) == []  # the filtered map: the cough splits the pause
-
-
-def test_a_clip_with_no_words_takes_the_whole_band_only_where_it_is_clearly_better(clip_file, tmp_path, monkeypatch):
-    (clip_file / "talk.json").unlink(missing_ok=True)
-    _cough_rig(monkeypatch, tmp_path, whole_speech=-44.0, filtered_speech=-46.0, name="nowords")  # 16 dB against 14: not 3 dB further
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "nowords")).clips[0]
-    assert clip.transcript_source == "silence-map" and _pause_through_the_cough(clip) == []
-    _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="nowords-far")  # 17 against 14
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "nowords-far")).clips[0]
-    assert len(_pause_through_the_cough(clip)) == 1
-
-
-def test_the_whole_band_is_not_even_read_where_the_filtered_reading_stands_the_speech_comfortably_over_the_room(clip_file, tmp_path, monkeypatch):
-    _sidecar(clip_file, GOOD_WORDS)
-    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-20.0, filtered_speech=-30.0, name="easy")  # 30 dB: nothing to gain
+def test_the_whole_band_is_not_even_read_while_the_filtered_reading_can_tell_the_words_from_the_room(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(filtered_speech=-45.0, whole_speech=-20.0)  # the words 15 dB over the room in the filtered readings
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
     clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "easy")).clips[0]
-    assert calls["window_rms"] == 1 and _pause_through_the_cough(clip) == []
+    assert _kept(clip) == ["so", "this", "is", "arena"] and calls["window_rms"] == 1
 
 
-def test_each_reading_is_cached_under_its_own_name(clip_file, tmp_path, monkeypatch):
-    _sidecar(clip_file, GOOD_WORDS)
-    _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="names")
+def test_a_loud_low_sound_over_the_whole_band_does_not_make_it_the_better_reading(clip_file, tmp_path, monkeypatch):
+    """A steady rumble (the whole band's room at -48 dB, the filtered room at -60) and a truck going by under the loud words: over the
+    whole band the loud quarter of the words' readings is the truck, so by that alone the whole band stands the talker 28 dB over
+    the room, and its pause level (6 dB over the rumble) holds the talker's soft words, which stand 8 dB over the room that matters.
+    They are real words, and the filtered reading, where the talker stands 14 dB over the room, keeps them."""
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(horn_in_filtered=False, filtered_speech=-46.0, whole_floor=-48.0, whole_speech=-46.0, truck_under_loud_words=True, soft=None)
+    # the last two words are the soft ones: 6 dB under in the filtered readings; in the whole band the rumble covers them
+    filtered = _readings(fill=-60.0, spans=[(1.0, 1.5, -46.0), (2.0, 2.5, -46.0), (6.0, 6.5, -52.0), (7.5, 8.0, -52.0)])
+    whole = _readings(fill=-48.0, spans=[(1.0, 1.5, -20.0), (2.0, 2.5, -20.0), (6.0, 6.5, -46.0), (7.5, 8.0, -46.0)])
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "truck")).clips[0]
+    assert _kept(clip) == ["so", "this", "is", "arena"]  # the soft words stay; the made-up number is the filtered room's, and goes
+    assert calls["window_rms"] == 1
+
+
+def test_the_whole_band_stands_in_where_the_filtered_reading_cannot_tell_the_words_from_the_room(clip_file, tmp_path, monkeypatch):
+    """The words stand 8 dB over the room in the filtered readings (a loud event gives them a map) and 14 dB over it in the whole
+    band, whose room is as loud as the filtered one: wind, not rumble. The made-up number is the room's."""
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(filtered_speech=-52.0, whole_speech=-46.0)
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "wind")).clips[0]
+    assert _kept(clip) == ["so", "this", "is", "arena"] and calls["window_rms"] == 2
+
+
+def test_the_whole_band_is_no_fallback_where_the_filter_took_a_rumble_out_of_the_room(clip_file, tmp_path, monkeypatch):
+    """The same words, but the whole band's room is 12 dB louder than the filtered one: that is rumble, and over it the words only
+    look clear of the room because something low and loud goes by under them. Every word is kept, the made-up number included."""
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(filtered_speech=-52.0, whole_floor=-48.0, whole_speech=-20.0)
+    _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "rumble")).clips[0]
+    assert _kept(clip) == ["so", "this", "8.", "is", "arena"]
+
+
+def test_the_words_guard_is_twelve_dB_to_the_dot(clip_file, tmp_path, monkeypatch):
+    def used(speech_db, name):
+        """Is the clip's loudness map put to use? Its pauses stand in for silencedetect's (none here), and the made-up number goes."""
+        _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+        filtered, whole = _scene(filtered_speech=speech_db, whole_speech=speech_db)
+        _rig(monkeypatch, whole, {}, high=filtered)
+        clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / name)).clips[0]
+        assert ("8." not in _kept(clip)) == bool(clip.silences)
+        return bool(clip.silences)
+
+    assert used(-47.0, "thirteen")  # 13 dB over the room
+    assert used(-48.0, "twelve")  # exactly 12: enough
+    assert not used(-49.0, "eleven")  # 11: the loudness can't tell the talker from the room, and none of it is used
+
+
+def test_a_clip_with_no_words_takes_the_filtered_map_when_there_is_one(clip_file, tmp_path, monkeypatch):
+    (clip_file / "talk.json").unlink(missing_ok=True)
+    filtered, whole = _scene(filtered_speech=-52.0, whole_speech=-46.0)
+    filtered = _readings(spans=[(a, b, -46.0) for a, b in SPEECH] + [(10.0, 10.6, -46.0)])
+    whole = _readings(spans=[(a, b, -46.0) for a, b in SPEECH])
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "nowords")).clips[0]
+    assert clip.transcript_source == "silence-map" and not [s for s in clip.silences if s[0] < 10.3 < s[1]]  # the cough splits the pause: the filtered map
+    assert calls["window_rms"] == 1
+
+
+def test_read_level_map_takes_the_filtered_reading_and_the_whole_band_only_where_that_finds_no_pauses():
+    read = lambda filtered, whole: (lambda hp: filtered if hp else whole)  # noqa: E731
+    clear = _readings(spans=[(a, b, -40.0) for a, b in SPEECH])
+    blurred = _readings(spans=[(a, b, -57.0) for a, b in SPEECH])
+    first = read_level_map(read(clear, blurred), 12.0)
+    assert first.highpass == LEVEL_HIGHPASS and first.found["silences"]
+    first = read_level_map(read(blurred, clear), 12.0)  # the filter lost the voice, the room is as loud either way
+    assert first.highpass is None and first.found["silences"]
+    loud_rumble = _readings(fill=-60.0 + WHOLE_BAND_MAX_RISE + 3.0, spans=[(a, b, -20.0) for a, b in SPEECH])
+    assert read_level_map(read(blurred, loud_rumble), 12.0) is None  # the whole band's room is rumble: no way of reading this one
+    assert read_level_map(read([-50.0] * 100, [-50.0] * 100), 1.0) is None  # under two seconds
+    assert read_level_map(read(blurred, blurred), 12.0) is None
+
+
+def test_a_map_that_finds_no_pauses_is_no_map():
+    """Speech that never leaves a quiet stretch of 0.35 s: the loudness can tell speech from room, and there is no pause to cut."""
+    always = _readings(spans=[(0.0, 12.0, -40.0)])
+    always = [v if (i % 100) else -60.0 for i, v in enumerate(always)]  # a 10 ms dip every second
+    assert read_level_map(lambda hp: always, 12.0) is None
+    assert whole_band_map(lambda hp: always, 12.0, None) is None
+
+
+def test_the_whole_band_needs_the_filter_to_have_taken_little_of_the_room_out():
+    clear = _readings(fill=-60.0, spans=[(a, b, -30.0) for a, b in SPEECH])
+    louder = _readings(fill=-60.0 + WHOLE_BAND_MAX_RISE, spans=[(a, b, -30.0) for a, b in SPEECH])
+    assert whole_band_map(lambda hp: clear, 12.0, -60.0) is not None
+    assert whole_band_map(lambda hp: louder, 12.0, -60.0) is not None  # up to the line
+    assert whole_band_map(lambda hp: _readings(fill=-60.0 + WHOLE_BAND_MAX_RISE + 1.0, spans=[(a, b, -30.0) for a, b in SPEECH]), 12.0, -60.0) is None
+    assert whole_band_map(lambda hp: clear, 12.0, None) is not None  # no filtered room to compare with
+
+
+def test_room_for_words_keeps_the_first_reading_unless_it_cannot_tell_the_words_from_the_room():
+    words = [Word(a, b, "w") for a, b in SPEECH]
+    filtered, whole = _scene(filtered_speech=-52.0, whole_speech=-46.0)  # 8 dB over the room filtered, 14 whole
+    read = lambda hp: filtered if hp else whole  # noqa: E731
+    first = read_level_map(read, 12.0)
+    assert first.highpass == LEVEL_HIGHPASS
+    lm, over, levels = room_for_words(first, words, read, 12.0)
+    assert lm.highpass is None and over == pytest.approx(14.0, abs=0.6) and levels is whole
+    strong, _ = _scene(filtered_speech=-45.0, whole_speech=-20.0)  # 15 dB over the room filtered: the whole band, however loud, is not asked
+    lm, over, levels = room_for_words(read_level_map(lambda hp: strong, 12.0), words, lambda hp: strong if hp else whole, 12.0)
+    assert lm.highpass == LEVEL_HIGHPASS and over == pytest.approx(15.0, abs=0.6) and levels is strong
+    lm, over, _ = room_for_words(first, [], read, 12.0)  # no words: nothing to ask, the first reading stands, with no margin to show
+    assert lm is first and over is None
+    lm, over, _ = room_for_words(first, words, lambda hp: filtered if hp else _readings(fill=-48.0, spans=[(a, b, -20.0) for a, b in SPEECH]), 12.0)
+    assert lm is first and over == pytest.approx(8.0, abs=0.6)  # a rumble over the whole band is not a way out
+
+
+def test_room_for_words_reads_the_words_where_the_audio_is_when_it_starts_late():
+    """A file whose audio starts 0.5 s after the picture: the readings count from the audio's first sample, the words from the file's."""
+    words = [Word(a + 0.5, b + 0.5, "w") for a, b in SPEECH]
+    clear = _readings(spans=[(a, b, -45.0) for a, b in SPEECH])
+    first = read_level_map(lambda hp: clear, 11.5)
+    lm, over, _ = room_for_words(first, words, lambda hp: clear, 11.5, offset=0.5)
+    assert lm is first and over == pytest.approx(15.0, abs=0.6)  # the first reading tells them from the room
+    assert room_for_words(first, words, lambda hp: clear, 11.5, offset=0.0)[1] < ffmpeg_ops.LEVEL_MIN_SEPARATION  # without it they are read in the room
+
+
+def test_each_reading_is_cached_under_its_own_name_and_an_empty_one_is_read_again(clip_file, tmp_path, monkeypatch):
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(filtered_speech=-52.0, whole_speech=-46.0)  # the whole band is asked for
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
     cache = Cache(tmp_path / "names")
     clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=cache).clips[0]
-    stored = sorted(p.name for p in (tmp_path / "names" / clip.media.fingerprint).glob("*levels*"))
-    assert stored == ["flatness-levels-v2.json", "levels10-v1.json", "levels10-v2.json"]  # the pauses are judged once, on the first reading's
-    first = json.loads((tmp_path / "names" / clip.media.fingerprint / "levels10-v2.json").read_text())["db"]
-    assert any(v != round(v) for v in first)  # in tenths of a dB: a whole dB moved a map across the line it is judged by
-    calls = _cough_rig(monkeypatch, tmp_path, whole_speech=-43.0, filtered_speech=-46.0, name="names")
+    folder = tmp_path / "names" / clip.media.fingerprint
+    assert sorted(p.name for p in folder.glob("*levels*")) == ["flatness-levels-v2.json", "levels10-v3.json", "levels10-whole-v1.json"]
+    stored = json.loads((folder / "levels10-v3.json").read_text())["db"]
+    assert any(v != round(v) for v in stored)  # in tenths of a dB: a whole dB moved a map across the line it is judged by
     analyze([clip_file / "talk.mov"], transcriber=None, cache=cache)
-    assert calls["window_rms"] == 0  # both readings come from the cache the second time
+    assert calls["window_rms"] == 2  # the second run read nothing
+    (folder / "levels10-whole-v1.json").write_text(json.dumps({"window": 0.01, "highpass": None, "db": []}))  # a read that failed, remembered
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=cache).clips[0]
+    assert calls["window_rms"] == 3 and json.loads((folder / "levels10-whole-v1.json").read_text())["db"]  # asked for again, and kept
+    assert "8." not in _kept(clip)
 
 
-def test_a_level_room_is_the_floor_and_how_far_the_speech_stands_over_it():
-    assert ffmpeg_ops.level_room(_readings(spans=[(1.0, 2.0, -30.0)] * 1)) == (pytest.approx(-60.0, abs=0.6), pytest.approx(30.0, abs=0.6))
-    assert ffmpeg_ops.level_room([-50.0] * 100) is None  # under two seconds
-    quiet = _readings(spans=[(1.0, 2.0, -30.0)])
-    assert ffmpeg_ops.level_threshold(quiet) is not None
-    assert ffmpeg_ops.level_threshold(_readings(spans=[(1.0, 2.0, -52.0)])) is None  # 8 dB over the room: the two can't be told apart
+def test_readings_an_earlier_release_cached_are_not_trusted(clip_file, tmp_path, monkeypatch):
+    """Whole-dB readings (levels10-v2.json) and a failed whole-band read (levels10-v1.json with no readings) are under names this
+    release does not read."""
+    from roughcut.media import fingerprint
+
+    _sidecar(clip_file, WORDS_WITH_A_MADE_UP_NUMBER)
+    filtered, whole = _scene(filtered_speech=-52.0, whole_speech=-46.0)
+    cache = Cache(tmp_path / "old")
+    fp = fingerprint(clip_file / "talk.mov")
+    cache.put(fp, "levels10-v2.json", {"window": 0.01, "highpass": 250.0, "db": [-30] * 1200})
+    cache.put(fp, "levels10-v1.json", {"window": 0.01, "db": []})
+    calls = _rig(monkeypatch, whole, {}, high=filtered)
+    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=cache).clips[0]
+    assert "8." not in _kept(clip) and calls["window_rms"] == 2
 
 
-def test_the_way_of_reading_a_noisy_clip_is_picked_by_how_far_each_stands_the_speech_over_the_room():
-    def clip(speech):  # three seconds of speech in 12 s, the room at -60 dB
-        return _readings(spans=[(1.0, 2.0, speech), (4.0, 5.0, speech), (7.0, 8.0, speech)])
+def test_the_choice_through_real_audio_a_truck_over_a_rumble_does_not_cost_a_soft_word(tmp_path):
+    """The case an independent review found, in sound: a steady rumble under 90 Hz, a talker whose last words of each sentence are
+    6 dB softer, and a truck going by (more low sound, much louder) under most of the talking. Over the whole band the truck makes
+    the talker look 33 dB over the room and the rumble's pause level holds his soft words; the filtered reading has them 12 dB over
+    a room 14 dB quieter."""
+    words, t = [], 1.0
+    for sentence in range(8):
+        for k in range(5):
+            d = 0.30 + 0.05 * ((sentence + k) % 5)
+            words.append((round(t, 3), round(t + d, 3), f"w{sentence}{k}"))
+            t += d + 0.08
+        t += 1.3
+    seconds = 45
+    gate = "+".join(f"between(t,{a},{b})" for a, b, _ in words)
+    soft_gate = "+".join(f"between(t,{a},{b})" for i, (a, b, _) in enumerate(words) if i % 5 >= 3)
+    voice = f"0.3*(sin(2*PI*700*t)+0.5*sin(2*PI*1400*t+1))*(0.7+0.3*sin(2*PI*5*t))*({gate})*(1-{1 - 10 ** (-6 / 20):.4f}*({soft_gate}))"
 
-    def pick(filtered, whole):
-        asked = []
+    def ffmpeg(*args):
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], check=True, capture_output=True)
 
-        def read(highpass):
-            asked.append(highpass)
-            return clip(filtered if highpass else whole)
+    def rms_db(path):
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-af", "astats=measure_perchannel=none", "-f", "null", "-"],
+                             capture_output=True, text=True).stderr
+        return float(re.findall(r"RMS level dB:\s*(-?[\d.]+)", out)[-1])
 
-        picked = pick_level_map(read, 12.0)
-        return ("no map" if picked is None else "whole band" if picked[0] is None else "filtered"), asked
+    def gain_to(name, source, filt, target_db):
+        path = tmp_path / f"{name}.wav"
+        ffmpeg("-f", "lavfi", "-i", source, "-af", filt, "-c:a", "pcm_s16le", str(path))
+        return target_db - rms_db(path)
 
-    assert pick(-30.0, -10.0) == ("filtered", [LEVEL_HIGHPASS])  # 30 dB over the room: comfortable, the whole band is not even read
-    assert pick(-52.0, -30.0) == ("whole band", [LEVEL_HIGHPASS, None])  # the filter lost the voice (8 dB over): the whole band has it
-    assert pick(-46.0, -43.0) == ("whole band", [LEVEL_HIGHPASS, None])  # 14 against 17 dB: clearly further over
-    assert pick(-46.0, -44.0) == ("filtered", [LEVEL_HIGHPASS, None])  # 14 against 16 dB: not clearly
-    assert pick(-52.0, -53.0) == ("no map", [LEVEL_HIGHPASS, None])  # neither tells the speech from the room
+    duty = sum(b - a for a, b, _ in words) / seconds
+    ffmpeg("-f", "lavfi", "-i", f"aevalsrc=exprs='{voice}':s=48000:d={seconds}", "-c:a", "pcm_s16le", str(tmp_path / "voice.wav"))
+    g_voice = -44.0 - (rms_db(tmp_path / "voice.wav") - 10 * math.log10(duty))
+    g_rumble = gain_to("rumble", f"anoisesrc=c=brown:a=1:d={seconds}:r=48000:s=1", "lowpass=f=90,lowpass=f=90", -45.0)
+    g_hiss = gain_to("hiss", f"anoisesrc=c=white:a=1:d={seconds}:r=48000:s=2", "anull", -57.0)
+    g_truck = gain_to("truck", f"anoisesrc=c=brown:a=1:d={seconds}:r=48000:s=3", "lowpass=f=120,lowpass=f=120", -16.0) - 20 * math.log10(math.sqrt(0.375))
+    ffmpeg("-f", "lavfi", "-i", f"aevalsrc=exprs='{voice}':s=48000:d={seconds}",
+           "-f", "lavfi", "-i", f"anoisesrc=c=brown:a=1:d={seconds}:r=48000:s=1",
+           "-f", "lavfi", "-i", f"anoisesrc=c=white:a=1:d={seconds}:r=48000:s=2",
+           "-f", "lavfi", "-i", f"anoisesrc=c=brown:a=1:d={seconds}:r=48000:s=3",
+           "-filter_complex",
+           f"[0:a]volume={g_voice}dB[v];[1:a]lowpass=f=90,lowpass=f=90,volume={g_rumble}dB[rum];[2:a]volume={g_hiss}dB[hiss];"
+           f"[3:a]lowpass=f=120,lowpass=f=120,volume={g_truck}dB,volume='between(t,6,30)*(0.5-0.5*cos(2*PI*(t-6)/24))':eval=frame[truck];"
+           "[v][rum][hiss][truck]amix=inputs=4:normalize=0[a]", "-map", "[a]", "-c:a", "pcm_s16le", str(tmp_path / "mix.wav"))
+    folder = tmp_path / "truck"
+    folder.mkdir()
+    ffmpeg("-f", "lavfi", "-i", f"color=c=gray:size=320x180:rate=30:duration={seconds}", "-i", str(tmp_path / "mix.wav"), "-map", "0:v", "-map", "1:a",
+           "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(folder / "talk.mov"))
+    _sidecar(folder, words)
+    clip = analyze([folder / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
+    assert clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB  # a noisy room
+    assert _kept(clip) == [w for _, _, w in words]  # not one word of the talker's is left out
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
@@ -369,38 +513,7 @@ def test_a_deep_voice_in_wind_keeps_the_loudness_map_the_filter_would_have_lost(
     )
     assert ffmpeg_ops.level_silences(ffmpeg_ops.window_rms(path, 0.01, highpass=250.0), float(SECONDS)) is None  # the filter lost the voice
     assert ffmpeg_ops.level_silences(ffmpeg_ops.window_rms(path, 0.01), float(SECONDS)) is not None  # the whole band has it
-    _sidecar(tmp_path, [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")])
+    _sidecar(tmp_path, WORDS_WITH_A_MADE_UP_NUMBER)
     clip = analyze([path], transcriber=None, cache=Cache(tmp_path / "cache")).clips[0]
     assert clip.silence_db > ffmpeg_ops.DEFAULT_NOISE_DB  # a noisy room
-    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]  # the made-up number is the room's, and gone
-
-
-def test_the_words_decide_which_reading_stands_the_talker_over_the_room_not_the_loudest_twentieth():
-    """A horn the filter leaves in (1.5 s at 18 dB over the room) is the loudest twentieth of the filtered readings, so by that
-    alone they look the better of the two; the talker stands 8 dB over the room in them and 14 dB in the whole band."""
-    speech = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
-    words = [Word(a, b, "w") for a, b in speech]
-    filtered = _readings(spans=[(a, b, -52.0) for a, b in speech] + [(10.0, 11.5, -42.0)])
-    whole = _readings(spans=[(a, b, -46.0) for a, b in speech])
-    read = lambda hp: filtered if hp else whole  # noqa: E731
-    maps = level_maps(read, 12.0)
-    assert [m.highpass for m in maps] == [LEVEL_HIGHPASS, None]
-    assert maps[0].over > maps[1].over  # by the loudest twentieth the filtered readings win
-    assert preferred_level_map(maps).highpass == LEVEL_HIGHPASS
-    lm, over, levels = pick_by_words(maps, words, read)
-    assert lm.highpass is None and over == pytest.approx(14.0, abs=0.6) and levels is whole  # by the words the whole band does
-    assert pick_by_words(maps, [], read)[0].highpass == LEVEL_HIGHPASS  # nothing to ask: the first
-    assert pick_by_words([], words, read) is None
-
-
-def test_the_words_pick_the_reading_that_lets_the_made_up_number_go(clip_file, tmp_path, monkeypatch):
-    """The same horn through the whole run: the filtered readings would have the talker 8 dB over the room (no map is used and
-    every word kept, '8.' included); the whole band has him 14 dB over it, and the number is the room's."""
-    words = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (3.5, 4.0, "8."), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
-    _sidecar(clip_file, words)
-    speech = [(1.0, 1.5), (2.0, 2.5), (6.0, 6.5), (7.5, 8.0)]
-    filtered = _readings(spans=[(a, b, -52.0) for a, b in speech] + [(10.0, 11.5, -42.0)])
-    whole = _readings(spans=[(a, b, -46.0) for a, b in speech])
-    _rig(monkeypatch, whole, {}, high=filtered)
-    clip = analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "horn")).clips[0]
-    assert [w.text for s in clip.segments for w in s.words] == ["so", "this", "is", "arena"]
+    assert _kept(clip) == ["so", "this", "is", "arena"]  # the made-up number is the room's, and gone

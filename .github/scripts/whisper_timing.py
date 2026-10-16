@@ -442,12 +442,12 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
             readings_by_band[hp] = [round(v, 1) for v in ffmpeg_ops.window_rms(media, 0.01, highpass=hp)]
         return readings_by_band[hp]
 
-    maps = analyze.level_maps(read, len(read(None)) * 0.01)
-    picked = analyze.pick_by_words(maps, [Word(w["start"], w["end"], w["text"]) for w in words], read) if maps else None
-    if picked is None:
+    duration = len(read(None)) * 0.01
+    first = analyze.read_level_map(read, duration)
+    if first is None:
         print("        the loudness map: none (speech within 12 dB of the room, or too little to go by)")
         return
-    lm, _, levels = picked
+    lm, _, levels = analyze.room_for_words(first, [Word(w["start"], w["end"], w["text"]) for w in words], read, duration)
     highpass, found = lm.highpass, lm.found
 
     def readings(w: dict) -> list[float]:
@@ -456,7 +456,7 @@ def room_report(media: Path, words: list[dict], lo: float, hi: float) -> None:
 
     inside = sorted(v for w in words for v in readings(w))
     stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
-    print(f"        the loudness map ({'whole band' if highpass is None else f'high-passed at {highpass:g} Hz'}): room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}")
+    print(f"        the loudness map ({'whole band' if highpass is None else f'high-passed at {highpass:g} Hz'}): room {found['floor']:.1f} dB, pause level {found['db']:.1f} dB (+{found['db'] - found['floor']:.1f}), {len(found['silences'])} pauses; the words stand {stand:.1f} dB over the room at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}, quietest quarter {inside[len(inside) // 4] - found['floor']:.1f}")
     for w in words:
         if w["end"] < lo or w["start"] > hi or w["end"] - w["start"] < 0.2:
             continue
@@ -483,12 +483,20 @@ def room_overview(media: Path, words: list[dict]) -> None:
         inside = sorted(v for w in words for v in levels[int(w["start"] / 0.01) : max(int(w["start"] / 0.01) + 1, int(w["end"] / 0.01))])
         stand = inside[(len(inside) * 3) // 4] - found["floor"] if inside else float("nan")
         print(
-            f"    loudness map, {name}: room {found['floor']:.0f} dB, pause level {found['db']:.1f} dB, {len(found['silences'])} pauses; "
-            f"the loud twentieth stands {ffmpeg_ops.level_room(levels)[1]:.1f} dB over it, the words {stand:.1f} dB at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}"
+            f"    loudness map, {name}: room {found['floor']:.1f} dB, pause level {found['db']:.1f} dB (+{found['db'] - found['floor']:.1f}), {len(found['silences'])} pauses; "
+            f"the loud twentieth stands {ffmpeg_ops.level_room(levels)[1]:.1f} dB over it, the words {stand:.1f} dB at their loud quarter (12 needed), median {inside[len(inside) // 2] - found['floor']:.1f}, quietest quarter {inside[len(inside) // 4] - found['floor']:.1f}"
         )
-    maps = analyze.level_maps(lambda hp: readings_by_band[hp], len(readings_by_band[None]) * 0.01)
-    picked = analyze.pick_by_words(maps, [Word(w["start"], w["end"], w["text"]) for w in words], lambda hp: readings_by_band[hp]) if maps else None
-    print("    the cut reads it: " + ("with no loudness map" if picked is None else f"{'whole band' if picked[0].highpass is None else f'high-passed at {picked[0].highpass:g} Hz'} (the words stand {picked[1]:.1f} dB over the room)"))
+    read = lambda hp: readings_by_band[hp]  # noqa: E731
+    duration = len(readings_by_band[None]) * 0.01
+    first = analyze.read_level_map(read, duration)
+    if first is None:
+        print("    the cut reads it: with no loudness map")
+        return
+    lm, over, _ = analyze.room_for_words(first, [Word(w["start"], w["end"], w["text"]) for w in words], read, duration)
+    way = "whole band" if lm.highpass is None else f"high-passed at {lm.highpass:g} Hz"
+    used = over is not None and over >= ffmpeg_ops.LEVEL_MIN_SEPARATION
+    margin = "no readings under the words" if over is None else f"the words stand {over:.1f} dB over its room"
+    print(f"    the cut reads it: {way}, {margin}" + ("" if used else f" (under {ffmpeg_ops.LEVEL_MIN_SEPARATION:g}: the map is not used and every word is kept)"))
 
 
 def checked(out: Path, label: str, detail: bool = False, edits: bool = False):
