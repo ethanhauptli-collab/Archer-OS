@@ -225,12 +225,29 @@ func failStep(_ message: String) -> Never {
 
 // MARK: Events
 
+/// An app started from a script is not the active one on a runner (its window stays in the inactive look, and the first click
+/// on such a window may only wake it): Accessibility is asked to put it in front, and the window is raised.
+func bringToFront() {
+    guard let app = runningApp() else { return }
+    let element = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetAttributeValue(element, "AXFrontmost" as CFString, kCFBooleanTrue)
+    if let window = (attribute(element, "AXWindows") as? [AXUIElement])?.first {
+        AXUIElementPerformAction(window, "AXRaise" as CFString)
+    }
+    app.activate()
+    let front = waitFor(timeout: 5) { (attribute(element, "AXFrontmost") as? NSNumber)?.boolValue == true }
+    say("  frontmost: \(front)")
+}
+
 func click(at point: CGPoint) {
     func post(_ type: CGEventType) {
         CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
     }
     post(.mouseMoved)
     Thread.sleep(forTimeInterval: 0.15)
+    if let here = CGEvent(source: nil)?.location {
+        say("  cursor at (\(Int(here.x)), \(Int(here.y)))")
+    }
     post(.leftMouseDown)
     Thread.sleep(forTimeInterval: 0.06)
     post(.leftMouseUp)
@@ -384,8 +401,8 @@ for rawLine in script.split(separator: "\n") {
         if parts[0] == "press-ax" {
             AXUIElementPerformAction(node.element, "AXPress" as CFString)
         } else {
-            runningApp()?.activate()
-            Thread.sleep(forTimeInterval: 0.2)
+            bringToFront()
+            Thread.sleep(forTimeInterval: 0.3)
             say("  clicking at (\(Int(box.midX)), \(Int(box.midY)))")
             click(at: CGPoint(x: box.midX, y: box.midY))
         }
