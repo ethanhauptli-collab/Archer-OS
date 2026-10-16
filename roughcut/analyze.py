@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from typing import NamedTuple
 from . import ffmpeg_ops, progress
 from .media import MediaError, MediaInfo, probe
 from .textio import Stalled, bounded
-from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, speech_over_room, split_invented_words
+from .segments import Segment, build_segments, drop_words_in_silence, segments_from_regions, speech_levels, speech_over_room, split_invented_words
 from .transcribe import Transcriber, TranscriptionError, Transcript, Word, find_sidecar, load_sidecar
 
 ROLE_LABELS = {
@@ -79,9 +80,15 @@ class Cache:
     def put(self, fingerprint: str, name: str, value) -> None:
         p = self.path(fingerprint, name)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(value))
-        tmp.replace(p)
+        # A temp file of its own for every write: two threads, or two runs, putting the same key must not share one (the second
+        # would truncate the first's file, and the first's rename would take it away from under the second).
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(value))
+            tmp.replace(p)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 @dataclass
@@ -727,7 +734,11 @@ def analyze(
                 how = "whole band" if room.highpass is None else f"rumble below {room.highpass:g} Hz filtered out"
                 # Within LEVEL_MIN_SEPARATION of the room, loudness can't tell the talker from the room and proves nothing.
                 if over is not None and over >= ffmpeg_ops.LEVEL_MIN_SEPARATION:
-                    log(f"{m.name}: its own loudness tells its speech from the room ({how}; {len(room.silences)} pauses)")
+                    quiet, median, loud = speech_levels(words, levels, room.floor, ffmpeg_ops.LEVEL_WINDOW, room.offset)  # over is not None: there are readings
+                    log(
+                        f"{m.name}: its own loudness tells its speech from the room ({how}; {len(room.silences)} pauses; the words stand {loud:.1f} dB over it "
+                        f"at their loud quarter, {median:.1f} at their median, {quiet:.1f} at their quietest quarter)"
+                    )
                     words, invented = split_invented_words(
                         words, room.silences, levels, room.floor, room.db, ffmpeg_ops.LEVEL_WINDOW,
                         min_separation=ffmpeg_ops.LEVEL_MIN_SEPARATION, offset=room.offset,

@@ -468,3 +468,46 @@ def test_a_range_with_an_endless_time_is_skipped_not_kept(ref):
     if ref.startswith("I01"):
         assert [i.ref for i in plan.sections[0].items] == ["V01.S001"]
         assert any("can't read the times" in w for w in plan.warnings)
+
+
+def test_writers_of_one_cache_entry_do_not_trip_over_each_other(tmp_path):
+    """Two threads (or two runs of Roughcut) putting the same key at once: every write lands whole and none raises. A temp file named
+    after the key let one writer move the other's half-written file out from under it (about half of 4,000 writes failed)."""
+    import threading
+
+    from roughcut.analyze import Cache
+
+    cache = Cache(tmp_path)
+    errors: list[BaseException] = []
+
+    def write(tag: int) -> None:
+        for i in range(300):
+            try:
+                cache.put("fp", "x.json", {"tag": tag, "i": i, "pad": "x" * 2000})
+            except BaseException as e:  # noqa: BLE001 - what the test is about
+                errors.append(e)
+
+    threads = [threading.Thread(target=write, args=(tag,)) for tag in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[:3]
+    value = cache.get("fp", "x.json")
+    assert value is not None and len(value["pad"]) == 2000  # whole, from one of the writers
+    assert [p.name for p in (tmp_path / "fp").iterdir()] == ["x.json"]  # and no temp file left behind
+
+
+def test_a_cache_write_that_fails_leaves_no_temp_file(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from roughcut.analyze import Cache
+
+    def refuse(self, target):
+        raise OSError("disk full")
+
+    cache = Cache(tmp_path)
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(OSError):
+        cache.put("fp", "x.json", {"a": 1})
+    assert list((tmp_path / "fp").iterdir()) == []

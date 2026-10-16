@@ -19,7 +19,7 @@ import pytest
 
 from roughcut import ffmpeg_ops, pauses
 from roughcut.analyze import LEVEL_HIGHPASS, WHOLE_BAND_MAX_RISE, Analysis, Cache, LevelMap, analyze, read_level_map, room_for_words, whole_band_map
-from roughcut.segments import speech_over_room, speech_stands_above_room, split_invented_words
+from roughcut.segments import speech_levels, speech_over_room, speech_stands_above_room, split_invented_words
 from roughcut.timeline import _join_close
 from roughcut.transcribe import Transcriber, Transcript, Word
 
@@ -171,6 +171,20 @@ def test_a_real_invention_over_the_room_is_still_dropped_when_the_talker_is_clea
     assert clip.silence_db == -20.0  # the level silencedetect was run at stays what it was
 
 
+def test_the_log_says_how_far_over_the_room_the_words_stand_at_the_loud_quarter_the_median_and_the_quietest_quarter(clip_file, tmp_path, monkeypatch, capsys):
+    """What a real run's roughcut.log needs to say when a cut clips words in a noisy room: where the words stood against the room."""
+    words = [(1.0, 1.5, "so"), (2.0, 2.5, "this"), (6.0, 6.5, "is"), (7.5, 8.0, "arena")]
+    _sidecar(clip_file, words)
+    levels = _readings(spans=[(1.0, 1.5, -30.0), (2.0, 2.5, -30.0), (6.0, 6.5, -40.0), (7.5, 8.0, -40.0)])
+    _rig(monkeypatch, levels, {})
+    analyze([clip_file / "talk.mov"], transcriber=None, cache=Cache(tmp_path / "cache"))
+    err = capsys.readouterr().err
+    seen = re.search(r"its own loudness tells its speech from the room \([^;]+; \d+ pauses?; the words stand ([\d.]+) dB over it at their loud quarter, ([\d.]+) at their median, ([\d.]+) at their quietest quarter\)", err)
+    assert seen, err
+    loud, median, quiet = (float(x) for x in seen.groups())
+    assert (quiet, loud) == pytest.approx((-40.0 - FLOOR, -30.0 - FLOOR), abs=1.5) and quiet <= median <= loud
+
+
 def test_a_quiet_recording_is_not_read_by_the_standard_map_or_the_loudness_map(clip_file, tmp_path, monkeypatch):
     """Level below -35 dB: the recording is quiet. The -35 dB map would call its speech silence and drop it; the loudness pass is
     only for a raised level."""
@@ -266,6 +280,15 @@ def test_speech_over_room_is_the_loud_quarter_of_the_readings_under_the_words_ov
     assert speech_over_room(words, levels, FLOOR) == pytest.approx(30.0, abs=0.01)
     assert speech_over_room([], levels, FLOOR) is None
     assert speech_over_room(words, [], FLOOR) is None
+
+
+def test_speech_levels_are_the_quietest_quarter_the_median_and_the_loud_quarter_over_the_floor():
+    words = [Word(1.0, 2.0, "so")]
+    levels = _readings(spans=[(1.0, 1.2, -50.0), (1.2, 1.4, -45.0), (1.4, 1.6, -40.0), (1.6, 1.8, -35.0), (1.8, 2.0, -30.0)])
+    quiet, median, loud = speech_levels(words, levels, FLOOR)
+    assert (quiet, median, loud) == pytest.approx((-45.0 - FLOOR, -40.0 - FLOOR, -35.0 - FLOOR), abs=0.01)
+    assert speech_over_room(words, levels, FLOOR) == loud  # the loud quarter is what the guard judges by
+    assert speech_levels([], levels, FLOOR) is None and speech_levels(words, [], FLOOR) is None
 
 
 def _scene(horn_in_filtered=True, filtered_speech=-52.0, filtered_floor=-60.0, whole_speech=-46.0, whole_floor=-60.0, truck_under_loud_words=False,

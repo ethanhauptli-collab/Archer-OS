@@ -74,12 +74,24 @@ def _word_readings(levels: list[float], w: Word, window: float, offset: float = 
     return levels[i : max(i + 1, int((w.end - offset) / window))]
 
 
-def speech_over_room(words: list[Word], levels: list[float], floor: float, window: float = 0.01, offset: float = 0.0) -> float | None:
-    """How far the transcript's own speech stands over the room, in dB: the loud quarter of the readings inside the words (the voiced
-    part of a word is far over the room, its consonants and the gaps between its sounds are not), against the room's floor. None
-    where there are no readings under the words."""
+def speech_levels(
+    words: list[Word], levels: list[float], floor: float, window: float = 0.01, offset: float = 0.0
+) -> tuple[float, float, float] | None:
+    """(the quietest quarter, the median, the loud quarter) of the readings inside the words, each in dB over the room's floor. None
+    where there are no readings under the words. The voiced part of a word is far over the room, its consonants and the gaps between
+    its sounds are not, so the loud quarter is where the talker is and the rest says how much of him is near the room."""
     inside = sorted(v for w in words for v in _word_readings(levels, w, window, offset))
-    return inside[(len(inside) * 3) // 4] - floor if inside else None
+    if not inside:
+        return None
+    n = len(inside)
+    return inside[n // 4] - floor, inside[n // 2] - floor, inside[(n * 3) // 4] - floor
+
+
+def speech_over_room(words: list[Word], levels: list[float], floor: float, window: float = 0.01, offset: float = 0.0) -> float | None:
+    """How far the transcript's own speech stands over the room, in dB: the loud quarter of the readings inside the words, against
+    the room's floor (speech_levels). None where there are no readings under the words."""
+    spread = speech_levels(words, levels, floor, window, offset)
+    return None if spread is None else spread[2]
 
 
 def speech_stands_above_room(
