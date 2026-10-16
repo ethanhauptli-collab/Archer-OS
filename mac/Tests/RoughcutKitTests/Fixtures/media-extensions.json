@@ -1,0 +1,7 @@
+{
+ "about": "The file types the engine takes as footage (roughcut/media.py) and the folders its scan skips. Read by tests/test_media_extensions_fixture.py and FootageTests, so the Mac app's footage count agrees with what a build reads.",
+ "video": ["3gp", "avi", "insv", "m2ts", "m4v", "mov", "mp4", "mts", "mxf"],
+ "audio": ["aac", "aif", "aiff", "bwf", "caf", "m4a", "mp3", "wav"],
+ "still": ["bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "psd", "tif", "tiff"],
+ "skipFolderSuffixes": [".fcpbundle", ".photoslibrary", ".imovielibrary", ".app", ".fcpxmld"]
+}

@@ -13,10 +13,6 @@ struct RecentRun: Codable, Identifiable, Equatable {
     var id: String { result.fcpxml }
 }
 
-enum StageStatus: Equatable {
-    case pending, active, done, skipped
-}
-
 @MainActor
 @Observable
 final class AppModel {
