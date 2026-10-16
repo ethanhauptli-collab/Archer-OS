@@ -106,6 +106,13 @@ public enum SetupChecks {
         }
     }
 
+    /// A Mac with no saved settings starts on the Claude API key, which someone who only has a plan hasn't got. When Claude Code is
+    /// signed in with a plan and no API key works, the build plans through it; nil leaves the form as it is.
+    public static func firstRunPlanner(doctor: DoctorReport) -> ModelProvider? {
+        guard doctor.claudeCode != nil, doctor.claudeCodeUsesSubscription, !doctor.anthropicKeyWorks else { return nil }
+        return .claudeCode
+    }
+
     /// Something is missing that stops a build.
     public static func isBlocked(_ rows: [SetupCheck]) -> Bool {
         rows.contains { !$0.ok }

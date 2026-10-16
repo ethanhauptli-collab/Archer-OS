@@ -15,6 +15,8 @@ on:
       - "roughcut/**"
       - ".github/scripts/app-e2e.sh"
       - ".github/scripts/ui-drive.swift"
+      - ".github/scripts/fake-studio.py"
+      - ".github/scripts/fake-claude.py"
       - ".github/workflows/mac-app-e2e.yml"
 
 permissions:
@@ -38,7 +40,7 @@ jobs:
       - name: The engine, where the app looks for it (.venv/bin/roughcut)
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install -e '.[mac,dev]'
+          .venv/bin/python -m pip install -e '.[mac,dev,graphics]'
       - name: Package Roughcut.app
         run: mac/scripts/build-app.sh
       - name: Drive the app

@@ -340,6 +340,151 @@ grep -n "Venture Studio" "$SOUT/edit_report.md" | head
 grep -q "^## Venture Studio" "$SOUT/edit_report.md"
 grep -q "Sunrise" "$SOUT/edit_report.md"
 
+# --- 6. The AI path, with a stand-in for Claude Code (.github/scripts/fake-claude.py, installed where the engine looks for
+# `claude`): a Mac with no saved settings and Claude Code signed in plans through it, the Venture OC preset brings the motion
+# graphics, the build asks for a visual log, a plan and the designs (rendered in Chrome), the cut has the graphics attached, and
+# Adjust > Ask Claude revises it ---
+quit_app
+defaults delete "$BUNDLE" 2> /dev/null || true
+mkdir -p "$HOME/.local/bin"
+sed "1s|.*|#!$PYTHON|" .github/scripts/fake-claude.py > "$HOME/.local/bin/claude"
+chmod +x "$HOME/.local/bin/claude"
+CLAUDE_STATE="$WORK/claude-state.json"
+echo '{}' > "$CLAUDE_STATE"
+rm -f "$CLAUDE_STATE.log"
+cp -R "$SHOOT" "$WORK/AI shoot"
+open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP" "$WORK/AI shoot"
+cat > "$WORK/ai.txt" <<'EOF'
+wait-window 90
+# No Get ready page: the first-run planner is Claude Code, which is signed in.
+see "Your footage" 90
+shot 20-ai-footage
+press "^Next"
+see "What is this video?" 30
+press "Venture OC"
+see "*Pauses trimmed hard" 10
+shot 21-ai-brief
+press "^Next"
+see "Add anything else to the line?" 30
+press "^Next"
+see "^Claude designs lower thirds" 20
+shot 22-ai-graphics
+press "^Next"
+see "Ready to build" 30
+shot 23-ai-ready
+dump 23-ai-ready
+press "Build rough cut"
+pause 6
+shot 24-ai-running
+see "Your rough cut is ready" 300
+see "*Planned by Claude Opus 5.5, through your Claude plan" 10
+see "*2 of 2 on the timeline" 10
+shot 25-ai-done
+dump 25-ai-done
+press "Not quite right? Adjust…"
+see "What should change?" 30
+press "^Ask Claude"
+focus AXTextArea
+type "Drop the last line."
+shot 26-ai-revise
+press "Revise with Claude"
+see "^Version 2" 300
+see "*Removed V01.S003" 10
+shot 27-ai-revised
+dump 27-ai-revised
+EOF
+drive "$WORK/ai.txt"
+AOUT="$WORK/AI shoot_roughcut"
+"$PYTHON" - "$AOUT" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" "$CLAUDE_STATE.log" <<'PY'
+import glob
+import json
+import sys
+
+from lxml import etree
+
+out, dtd_path, log_path = sys.argv[1:]
+dtd = etree.DTD(dtd_path)
+
+
+def graphics_in(path):
+    doc = etree.parse(path)
+    assert dtd.validate(doc), (path, dtd.error_log.filter_from_errors())
+    names = {a.get("id"): a.get("name") for a in doc.iter("asset")}
+    return [names.get(c.get("ref")) for c in doc.iter("asset-clip") if c.get("lane") and (names.get(c.get("ref")) or "").startswith("G0")]
+
+
+v1 = glob.glob(out + "/history/*/*v1.fcpxml")[0]
+v2 = glob.glob(out + "/*v2.fcpxml")[0]
+g1, g2 = graphics_in(v1), graphics_in(v2)
+print("graphics attached in v1:", g1, "in v2:", g2)
+assert len(g1) == 2, g1
+assert len(g2) == 1, g2
+kinds = [json.loads(line)["kind"] for line in open(log_path)]
+print("what Claude was asked:", kinds)
+assert kinds.count("plan") == 2 and "vision" in kinds and "design" in kinds, kinds
+PY
+
+# --- 7. A usage limit while the graphics are designed, through the real engine: the cut is written without them, the window
+# says so and offers Finish graphics, and after the limit lifts Finish graphics makes them ---
+quit_app
+echo '{"limit": "design"}' > "$CLAUDE_STATE"
+cp -R "$SHOOT" "$WORK/AI shoot 2"
+open --env "FAKE_CLAUDE_STATE=$CLAUDE_STATE" -a "$APP" "$WORK/AI shoot 2"
+cat > "$WORK/limit-1.txt" <<'EOF'
+wait-window 90
+see "Your footage" 90
+press "^Next"
+see "What is this video?" 30
+press "^Next"
+see "Add anything else to the line?" 30
+press "^Next"
+see "^Claude designs lower thirds" 20
+press "^Next"
+see "Ready to build" 30
+press "Build rough cut"
+see "Finish graphics" 300
+see "*Version 1 was written" 10
+shot 28-ai-limit-stopped
+dump 28-ai-limit-stopped
+EOF
+drive "$WORK/limit-1.txt"
+LOUT="$WORK/AI shoot 2_roughcut"
+test -f "$LOUT/AI shoot 2 v1.fcpxml"
+echo '{}' > "$CLAUDE_STATE"
+cat > "$WORK/limit-2.txt" <<'EOF'
+press "Finish graphics"
+see "^Version 2" 300
+see "*2 of 2 on the timeline" 10
+shot 29-ai-graphics-finished
+dump 29-ai-graphics-finished
+EOF
+drive "$WORK/limit-2.txt"
+"$PYTHON" - "$LOUT" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" <<'PY'
+import glob
+import sys
+
+from lxml import etree
+
+out, dtd_path = sys.argv[1:]
+dtd = etree.DTD(dtd_path)
+
+
+def graphics_in(path):
+    doc = etree.parse(path)
+    assert dtd.validate(doc), (path, dtd.error_log.filter_from_errors())
+    names = {a.get("id"): a.get("name") for a in doc.iter("asset")}
+    return [names.get(c.get("ref")) for c in doc.iter("asset-clip") if c.get("lane") and (names.get(c.get("ref")) or "").startswith("G0")]
+
+
+v1 = glob.glob(out + "/history/*/*v1.fcpxml")[0]
+v2 = glob.glob(out + "/*v2.fcpxml")[0]
+g1, g2 = graphics_in(v1), graphics_in(v2)
+print("graphics attached after the limit:", g1, "and after Finish graphics:", g2)
+assert g1 == [], g1
+assert len(g2) == 2, g2
+PY
+rm -f "$HOME/.local/bin/claude"
+
 quit_app
 defaults delete "$BUNDLE" 2> /dev/null || true
 echo "The packaged app, driven end to end: passed"

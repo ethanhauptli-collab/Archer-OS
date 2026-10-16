@@ -51,6 +51,27 @@ final class SetupChecksTests: XCTestCase {
         XCTAssertEqual(planner.fix, .terminal("curl -fsSL https://claude.ai/install.sh | bash"))
     }
 
+    func testAFirstRunPlansThroughClaudeCodeWhenOnlyThePlanIsThere() throws {
+        var doctor = try sample()
+        XCTAssertEqual(SetupChecks.firstRunPlanner(doctor: doctor), .claudeCode, "signed in with a plan, no API key")
+
+        doctor.anthropicKey = true
+        doctor.anthropicKeyStatus = "ok"
+        XCTAssertNil(SetupChecks.firstRunPlanner(doctor: doctor), "a key that works is a choice already made")
+
+        doctor.anthropicKey = false
+        doctor.anthropicKeyStatus = "missing"
+        doctor.claudeCodeAuth = "api_key"
+        XCTAssertNil(SetupChecks.firstRunPlanner(doctor: doctor), "Claude Code signed in with an API key is not the plan")
+
+        doctor.claudeCodeAuth = nil
+        XCTAssertNil(SetupChecks.firstRunPlanner(doctor: doctor), "signed out")
+
+        doctor.claudeCode = nil
+        doctor.claudeCodeAuth = "claude.ai"
+        XCTAssertNil(SetupChecks.firstRunPlanner(doctor: doctor), "not installed")
+    }
+
     func testMissingVideoToolsBlockEveryPlannerAndGetTheirCommand() throws {
         var doctor = try sample()
         doctor.ffmpeg = nil

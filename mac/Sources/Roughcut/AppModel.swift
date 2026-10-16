@@ -112,6 +112,8 @@ final class AppModel {
     @ObservationIgnored private var draftFolder: String?
     /// The remembered preset is filled in again the first time the list is read.
     @ObservationIgnored private var presetsLoaded = false
+    /// This launch began with no saved settings: nobody has chosen a planner yet. The first doctor answer settles it, once.
+    @ObservationIgnored private var firstRunPlannerOpen = UserDefaults.standard.data(forKey: preferencesKey) == nil
     /// Keeps the Mac from idle-sleeping while a run is going.
     @ObservationIgnored private var activity: NSObjectProtocol?
 
@@ -791,7 +793,18 @@ final class AppModel {
         }
         doctor = report
         doctorError = report == nil ? (lastLine.isEmpty ? "`roughcut doctor` didn't answer." : lastLine) : nil
+        settleFirstRunPlanner()
         await refreshPresets()
+    }
+
+    /// A Mac with no saved settings and Claude Code signed in with a plan: the build plans through it, not through an API key
+    /// nobody has set (see `SetupChecks.firstRunPlanner`). Once per launch, and never when settings were saved before.
+    private func settleFirstRunPlanner() {
+        guard firstRunPlannerOpen, let doctor else { return }
+        firstRunPlannerOpen = false
+        guard options.provider == .anthropic, let provider = SetupChecks.firstRunPlanner(doctor: doctor) else { return }
+        options.choose(provider: provider)
+        repairFlow()
     }
 
     // MARK: Presets
