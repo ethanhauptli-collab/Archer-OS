@@ -58,9 +58,8 @@ jobs:
           echo "The packaged Mac app driven end to end at $sha. Made-up footage only." > "$RUNNER_TEMP/publish/README.txt"
           git config user.name "github-actions"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --orphan ui-e2e
-          git rm -rf --quiet . || true
-          cp "$RUNNER_TEMP"/publish/* .
-          git add .
+          git checkout --orphan ui-e2e
+          git rm -rf --cached --quiet . || true
+          git --work-tree="$RUNNER_TEMP/publish" add -A
           git commit --quiet -m "The packaged Mac app driven end to end at $sha"
           git push --force origin HEAD:refs/heads/ui-e2e

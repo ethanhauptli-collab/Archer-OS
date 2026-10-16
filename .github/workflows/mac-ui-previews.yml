@@ -37,15 +37,16 @@ jobs:
         run: |
           set -euo pipefail
           sha="$(git rev-parse --short HEAD)"
+          mkdir -p "$RUNNER_TEMP/publish"
+          cp "$RUNNER_TEMP"/pictures/*.png "$RUNNER_TEMP/publish/"
+          if [ -d "$RUNNER_TEMP/pictures/ax" ]; then
+              cp -R "$RUNNER_TEMP/pictures/ax" "$RUNNER_TEMP/publish/ax"
+          fi
+          echo "Pictures of the Mac app at $sha. Made-up content only." > "$RUNNER_TEMP/publish/README.txt"
           git config user.name "github-actions"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --orphan ui-previews
-          git rm -rf --quiet . || true
-          cp "$RUNNER_TEMP"/pictures/*.png .
-          if [ -d "$RUNNER_TEMP/pictures/ax" ]; then
-              cp -R "$RUNNER_TEMP/pictures/ax" ax
-          fi
-          echo "Pictures of the Mac app at $sha. Made-up content only." > README.txt
-          git add .
+          git checkout --orphan ui-previews
+          git rm -rf --cached --quiet . || true
+          git --work-tree="$RUNNER_TEMP/publish" add -A
           git commit --quiet -m "Pictures of the Mac app at $sha"
           git push --force origin HEAD:refs/heads/ui-previews

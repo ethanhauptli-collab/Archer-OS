@@ -190,8 +190,34 @@ func saveTree(_ name: String) {
     try? lines.joined(separator: "\n").write(toFile: outputFolder + "/" + name + ".ax.txt", atomically: true, encoding: .utf8)
 }
 
+func treeLines(limit: Int) -> [String] {
+    var lines: [String] = []
+    for node in nodes() {
+        if lines.count >= limit {
+            break
+        }
+        if node.labels.isEmpty && !buttonRoles.contains(node.role) {
+            continue
+        }
+        var box = ""
+        if let rect = node.frame {
+            box = String(format: "(%.0f,%.0f %.0fx%.0f)", Double(rect.origin.x), Double(rect.origin.y), Double(rect.width), Double(rect.height))
+        }
+        let words = node.labels.map { "\u{201C}" + $0.replacingOccurrences(of: "\n", with: " ") + "\u{201D}" }.joined(separator: " ")
+        lines.append("    " + node.role + (node.enabled ? "" : " disabled") + " " + box + " " + words)
+    }
+    return lines
+}
+
 func failStep(_ message: String) -> Never {
     write("ui-drive: step \(stepNumber) failed: \(message)", to: FileHandle.standardError)
+    if let screen = NSScreen.main {
+        write("  screen \(Int(screen.frame.width))x\(Int(screen.frame.height))", to: FileHandle.standardError)
+    }
+    write("  on screen:", to: FileHandle.standardError)
+    for line in treeLines(limit: 70) {
+        write(line, to: FileHandle.standardError)
+    }
     savePicture("failure")
     saveTree("failure")
     exit(1)
@@ -360,6 +386,7 @@ for rawLine in script.split(separator: "\n") {
         } else {
             runningApp()?.activate()
             Thread.sleep(forTimeInterval: 0.2)
+            say("  clicking at (\(Int(box.midX)), \(Int(box.midY)))")
             click(at: CGPoint(x: box.midX, y: box.midY))
         }
         Thread.sleep(forTimeInterval: 0.5)
