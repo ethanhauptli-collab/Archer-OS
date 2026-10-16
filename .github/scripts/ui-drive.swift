@@ -239,9 +239,16 @@ func bringToFront() {
     say("  frontmost: \(front)")
 }
 
+/// A click as the mouse makes it: the pointer moves there, then down and up, each saying it is click number one (SwiftUI's
+/// buttons count clicks, and a press that says zero is not a tap).
 func click(at point: CGPoint) {
+    let source = CGEventSource(stateID: .hidSystemState)
     func post(_ type: CGEventType) {
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        if type == .leftMouseDown || type == .leftMouseUp {
+            event.setIntegerValueField(.mouseEventClickState, value: 1)
+        }
+        event.post(tap: .cghidEventTap)
     }
     post(.mouseMoved)
     Thread.sleep(forTimeInterval: 0.15)
@@ -252,6 +259,14 @@ func click(at point: CGPoint) {
     Thread.sleep(forTimeInterval: 0.06)
     post(.leftMouseUp)
 }
+
+/// Everything on screen as one text, to tell whether a click did anything.
+func screenSignature() -> String {
+    nodes().map { $0.labels.joined(separator: "|") }.joined(separator: "\n")
+}
+
+var realClicks = 0
+var pressedWithAccessibility = 0
 
 func typeText(_ text: String) {
     for character in text {
@@ -403,8 +418,18 @@ for rawLine in script.split(separator: "\n") {
         } else {
             bringToFront()
             Thread.sleep(forTimeInterval: 0.3)
+            let before = screenSignature()
             say("  clicking at (\(Int(box.midX)), \(Int(box.midY)))")
             click(at: CGPoint(x: box.midX, y: box.midY))
+            Thread.sleep(forTimeInterval: 1.0)
+            if screenSignature() == before {
+                // Nothing on screen changed: say so, and press the button the way a screen reader does.
+                say("  the click changed nothing; pressing with Accessibility")
+                AXUIElementPerformAction(node.element, "AXPress" as CFString)
+                pressedWithAccessibility += 1
+            } else {
+                realClicks += 1
+            }
         }
         Thread.sleep(forTimeInterval: 0.5)
     case "type":
@@ -421,4 +446,4 @@ for rawLine in script.split(separator: "\n") {
         failStep("no step called \(parts[0])")
     }
 }
-say("ui-drive: \(stepNumber) steps done")
+say("ui-drive: \(stepNumber) steps done (\(realClicks) real clicks, \(pressedWithAccessibility) presses through Accessibility)")
