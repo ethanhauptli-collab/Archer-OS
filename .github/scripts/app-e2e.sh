@@ -673,6 +673,8 @@ press "Add"
 pause 1
 press "Add"
 pause 1
+press "Add"
+pause 1
 shot 42-panels-add
 press "^Next"
 see "Add a song" 20
@@ -793,8 +795,8 @@ EOF
     grep -q "drag ended: taken" "$WORK/drag-source-2.log"
 }
 
-# 11. A revision stopped by a usage limit while a reworded graphic is designed: the new version is written with the plan saved,
-# and Finish without AI cuts again from that plan with no model.
+# 11. A revision stopped (Cancel) while its reworded graphic is designed: the new version is written without that graphic and the
+# plan is saved, so the banner offers Finish without AI (cut again from the saved plan, no model) beside Finish graphics.
 scenario_stopped_revision() {
     quit_app
     defaults delete "$BUNDLE" 2> /dev/null || true
@@ -821,7 +823,8 @@ see "Your rough cut is ready" 300
 see "*2 of 2 on the timeline" 10
 EOF
     drive "$WORK/rev-1.txt"
-    echo '{"limit": "design"}' > "$CLAUDE_STATE"
+    echo '{"slow": "design", "slow_seconds": 45}' > "$CLAUDE_STATE"
+    : > "$CLAUDE_STATE.log"
     cat > "$WORK/rev-2.txt" <<'EOF'
 press "Not quite right? Adjust…"
 see "What should change?" 30
@@ -829,21 +832,35 @@ press "^Ask Claude"
 focus AXTextArea
 type "Use a bolder lower third."
 press "Revise with Claude"
-see "Finish without AI" 300
-see "*Version 2 was written" 10
-shot 34-revision-stopped
-dump 34-revision-stopped
+see "Cancel" 60
 EOF
     drive "$WORK/rev-2.txt"
-    echo '{}' > "$CLAUDE_STATE"
-    : > "$CLAUDE_STATE.log"
+    # The plan is saved and the cut written without graphics once the designer is asked: wait for that, then Cancel.
+    for _ in $(seq 1 120); do
+        grep -q '"kind": "design"' "$CLAUDE_STATE.log" 2> /dev/null && break
+        sleep 2
+    done
+    grep -q '"kind": "design"' "$CLAUDE_STATE.log"
+    sleep 3
     cat > "$WORK/rev-3.txt" <<'EOF'
-press "Finish without AI"
-see "^Version 3" 300
-shot 35-finished-without-ai
-dump 35-finished-without-ai
+shot 34-revision-designing
+press "Cancel"
+see "Finish without AI" 60
+see "*Version 2 was written" 10
+shot 35-revision-stopped
+dump 35-revision-stopped
 EOF
     drive "$WORK/rev-3.txt"
+    echo '{}' > "$CLAUDE_STATE"
+    : > "$CLAUDE_STATE.log"
+    cat > "$WORK/rev-4.txt" <<'EOF'
+press "Finish without AI"
+see "^Version 3" 300
+shot 36-finished-without-ai
+dump 36-finished-without-ai
+EOF
+    drive "$WORK/rev-4.txt"
+    pkill -f '\.local/bin/claude' || true
     "$PYTHON" - "$WORK/Revise shoot_roughcut" "$ROOT/tests/fixtures/FCPXMLv1_10.dtd" "$CLAUDE_STATE.log" <<'PY'
 import glob
 import json

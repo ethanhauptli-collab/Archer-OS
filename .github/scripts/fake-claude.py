@@ -9,7 +9,8 @@ This program tells the requests apart by the schema, reads the clip and segment 
   * the graphics designs: a small plate in the renderer's contract (CSS animation plus a seek hook) for each id asked for;
   * a revision (the plan asked for again): the same plan without its last spoken line.
 FAKE_CLAUDE_STATE names a JSON file the run can change between steps; {"limit": "design"} (or "plan", "vision") makes that kind of
-request answer as Claude Code does when a plan is used up. Every call is logged to FAKE_CLAUDE_STATE + ".log".
+request answer as Claude Code does when a plan is used up, and {"slow": "design"} makes it wait a minute ("slow_seconds") before it
+answers. Every call is logged to FAKE_CLAUDE_STATE + ".log".
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 STATE = Path(os.environ.get("FAKE_CLAUDE_STATE") or Path.home() / ".fake-claude-state.json")
@@ -76,6 +78,8 @@ def main() -> None:
     log({"kind": kind, "argv": args[:6], "bytes": len(prompt), "limit": state().get("limit")})
     if state().get("limit") == kind:
         reply(error="You've hit your limit · resets 5pm")
+    if state().get("slow") == kind:  # a request that takes a minute: Cancel can be pressed while it runs
+        time.sleep(float(state().get("slow_seconds", 60)))
 
     if kind == "vision":
         asked = re.findall(r'^Clip (\w+) "([^"]*)"', prompt, re.M)
