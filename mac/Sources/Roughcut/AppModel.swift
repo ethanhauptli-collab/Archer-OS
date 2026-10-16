@@ -911,3 +911,106 @@ final class AppModel {
         }
     }
 }
+
+// MARK: - At a screen, for pictures (see UIPreview)
+
+extension AppModel {
+    /// Fills the model with made-up content and puts it at `screen` (see `UIPreview`). Reads no file of the person's and calls no tool.
+    func applyPreview(_ screen: String) {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("roughcut-ui-preview", isDirectory: true)
+        try? manager.removeItem(at: root)
+        let shoot = root.appendingPathComponent("OC Food Fest", isDirectory: true)
+        func fill(_ folder: String, _ names: [String]) {
+            let directory = shoot.appendingPathComponent(folder, isDirectory: true)
+            try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            for name in names {
+                manager.createFile(atPath: directory.appendingPathComponent(name).path, contents: Data())
+            }
+        }
+        fill("Pier day", (1...9).map { "PIER_00\($0).mov" })
+        fill("Interviews", (1...5).map { "Interview_\($0).mov" } + ["Voiceover take 3.wav"])
+        fill("Stills", ["menu-board-1.jpg", "menu-board-2.jpg"])
+        let sources = ["Pier day", "Interviews", "Stills"].map { shoot.appendingPathComponent($0, isDirectory: true) }
+
+        // What the app learned from the CLI at launch.
+        cliURL = URL(fileURLWithPath: "/usr/local/bin/roughcut")
+        doctor = JSONLines.doctor(from: UIPreview.doctorLine.trimmingCharacters(in: .whitespacesAndNewlines))
+        if screen == "getready" {
+            doctor?.claudeCodeAuth = nil  // Claude Code installed, not signed in
+        }
+        doctorError = nil
+        presets = JSONLines.presets(from: UIPreview.presetsJSON) ?? []
+        presetsLoaded = true
+        getReadySetAside = screen != "getready"
+
+        // The form: a Venture OC promo for a shoot of three folders.
+        var form = BuildOptions()
+        form.choose(provider: .claudeCode)
+        if let preset = presets.first(where: { $0.name == "venture-oc" }) {
+            preset.apply(to: &form)
+        }
+        form.brief = form.brief + "\n\nOpen on Maria's line about the pier. Keep the numbers."
+        if screen != "footage-empty" && screen != "getready" {
+            form.sources = sources
+        }
+        var next = BuildFlow()
+        let song = URL(fileURLWithPath: "/Volumes/Music/upbeat_bed.m4a")
+        switch screen {
+        case "music", "ready", "finetune", "effects":
+            form.music = [song]
+        default:
+            break
+        }
+        if screen == "effects" {
+            form.sfx = [URL(fileURLWithPath: "/Volumes/Sounds/Whooshes")]
+        }
+        switch screen {
+        case "brief": next.go(to: .brief)
+        case "add": next.go(to: .add)
+        case "music": next.go(to: .part(.music))
+        case "effects": next.go(to: .part(.effects))
+        case "graphics": next.go(to: .part(.graphics))
+        case "ready": next.go(to: .ready)
+        case "finetune": next.go(to: .fineTune)
+        default: break
+        }
+        options = form
+        flow = next
+        if screen != "footage-empty" && screen != "getready" {
+            for source in sources {
+                footageCounts[source] = FootageCount.count(source: source, deadline: .distantFuture)
+            }
+        }
+
+        // A run in progress, or a finished cut.
+        switch screen {
+        case "running-listen", "running":
+            phase = .running
+            runKind = .build
+            var statuses: [Stage: StageStatus] = [.scan: .done, .probe: .done, .silence: .done]
+            if screen == "running-listen" {
+                statuses[.transcribe] = .active
+                activeStage = .transcribe
+                stageDetail = "Transcribing Interview_3.mov"
+                progressCurrent = 6
+                progressTotal = 14
+            } else {
+                statuses[.transcribe] = .done
+                statuses[.vision] = .done
+                statuses[.plan] = .active
+                activeStage = .plan
+                stageDetail = "Waiting for Claude · 1 min 12 s so far"
+            }
+            stageStatus = statuses
+            log = ["$ roughcut build …", "Reading 16 files", "Planning the edit with claude-code:claude-opus-5-5"]
+        case "done", "adjust":
+            if let result = JSONLines.event(from: UIPreview.doneLine.trimmingCharacters(in: .whitespacesAndNewlines))?.result {
+                recentRuns = [RecentRun(result: result, finishedAt: Date().addingTimeInterval(-3600))]
+                phase = .finished(result)
+            }
+        default:
+            break
+        }
+    }
+}

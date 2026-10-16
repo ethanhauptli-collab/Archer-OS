@@ -10,9 +10,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app gets a Dock icon, a menu bar and keyboard focus.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        if UIPreview.screen != nil {
+            openPreviewWindow()
+        }
+    }
+
+    /// For the pictures of each screen (see `UIPreview`): the dark look when asked, and a window of a size that shows a whole screen.
+    private func openPreviewWindow() {
+        if UIPreview.dark {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let window = NSApp.windows.first(where: { $0.canBecomeMain }) else { return }
+            window.setContentSize(NSSize(width: 860, height: 760))
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard UIPreview.screen == nil else { return }  // made-up content: nothing to look at again
         // A drive may have been unplugged or mounted while the app was behind: look again at the recent cuts' files.
         guard let model else { return }
         Task { await model.refreshRecents() }
@@ -53,6 +72,10 @@ struct RoughcutApp: App {
                 }
                 .onAppear { appDelegate.model = model }
                 .task {
+                    if let screen = UIPreview.screen {
+                        model.applyPreview(screen)
+                        return
+                    }
                     model.tidyReferences()
                     async let recents: Void = model.refreshRecents()
                     await model.refreshDoctor()

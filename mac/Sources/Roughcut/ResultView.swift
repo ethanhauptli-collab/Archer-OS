@@ -60,6 +60,9 @@ struct ResultView: View {
             footer
         }
         .onAppear {
+            if UIPreview.screen == "adjust" {
+                adjusting = true  // for the picture of this screen
+            }
             recutStyle = RecutOptions.suggestedStyle(for: result.cut, otherwise: model.options.style)
             recutFormat = nil
             recutPunchIn = nil
