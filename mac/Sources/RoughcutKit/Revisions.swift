@@ -21,9 +21,14 @@ public struct Preset: Decodable, Equatable, Identifiable, Sendable {
     public var id: String { name }
 
     public var title: String {
-        let words = name.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }
-        let pretty = words.joined(separator: " ").replacingOccurrences(of: "Oc", with: "OC")
+        let pretty = Preset.displayName(for: name)
         return (description?.isEmpty == false) ? "\(pretty): \(description!)" : pretty
+    }
+
+    /// "venture-oc" as a person says it: "Venture OC".
+    public static func displayName(for name: String) -> String {
+        let words = name.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        return words.joined(separator: " ").replacingOccurrences(of: "Oc", with: "OC")
     }
 
     /// The form filled from this preset. A brief already typed is kept after the preset's

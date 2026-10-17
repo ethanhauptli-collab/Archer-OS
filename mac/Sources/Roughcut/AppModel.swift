@@ -13,10 +13,6 @@ struct RecentRun: Codable, Identifiable, Equatable {
     var id: String { result.fcpxml }
 }
 
-enum StageStatus: Equatable {
-    case pending, active, done, skipped
-}
-
 @MainActor
 @Observable
 final class AppModel {
@@ -30,6 +26,11 @@ final class AppModel {
 
     // Form
     var options: BuildOptions = AppModel.loadPreferences()
+
+    // The build as a line of steps (see BuildFlow): where the person is, and what is in each footage source.
+    var flow = BuildFlow()
+    private(set) var footageCounts: [URL: FootageCount] = [:]
+    @ObservationIgnored private var footageTasks: [URL: Task<Void, Never>] = [:]
 
     // Run state
     private(set) var phase: Phase = .idle
@@ -111,6 +112,8 @@ final class AppModel {
     @ObservationIgnored private var draftFolder: String?
     /// The remembered preset is filled in again the first time the list is read.
     @ObservationIgnored private var presetsLoaded = false
+    /// This launch began with no saved settings: nobody has chosen a planner yet. The first doctor answer settles it, once.
+    @ObservationIgnored private var firstRunPlannerOpen = UserDefaults.standard.data(forKey: preferencesKey) == nil
     /// Keeps the Mac from idle-sleeping while a run is going.
     @ObservationIgnored private var activity: NSObjectProtocol?
 
@@ -142,12 +145,102 @@ final class AppModel {
             let clean = url.standardizedFileURL
             if !options.sources.contains(clean) {
                 options.sources.append(clean)
+                countFootage(in: clean)
             }
         }
     }
 
+    /// Footage handed to the app from outside (`open -a Roughcut FOLDER`, Open With): added to the build and shown at the first
+    /// step. A run that is going is left alone; a cut on screen gives way to the line (its footage and brief stay for another pass).
+    func openFootage(_ urls: [URL]) {
+        guard !isRunning else { return }
+        startOver()
+        addSources(urls)
+        flow.go(to: .footage)
+    }
+
     func removeSource(_ url: URL) {
         options.sources.removeAll { $0 == url }
+        footageTasks[url]?.cancel()
+        footageTasks[url] = nil
+        footageCounts[url] = nil
+    }
+
+    /// What the dropped sources hold, once every one has been counted (nil while any is still being read, or when there are none).
+    var footageSummary: FootageCount? {
+        guard !options.sources.isEmpty else { return nil }
+        var total = FootageCount()
+        for source in options.sources {
+            guard let counted = footageCounts[source] else { return nil }
+            total = total + counted
+        }
+        return total
+    }
+
+    /// Counts a source's files from their names, off the main thread and for a few seconds at most: a folder on a share that
+    /// has stopped answering never holds up the window (its count just doesn't appear).
+    private func countFootage(in source: URL) {
+        footageTasks[source]?.cancel()
+        footageTasks[source] = Task { [weak self] in
+            let counted = await Task.detached(priority: .utility) {
+                FootageCount.count(source: source, deadline: Date().addingTimeInterval(4))
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.footageCounts[source] = counted
+            self.footageTasks[source] = nil
+        }
+    }
+
+    // MARK: Get ready
+
+    /// The Get ready page was set aside for this session ("Skip for now").
+    var getReadySetAside = false
+
+    /// The Get ready page's rows for the planner the build has chosen.
+    var setupRows: [SetupCheck] {
+        SetupChecks.rows(cliFound: cliURL != nil, doctor: doctor, doctorError: doctorError, options: options)
+    }
+
+    /// Something Roughcut needs is missing, and nothing has been dropped yet: the page that says what to do comes first.
+    var needsGetReady: Bool {
+        !getReadySetAside && options.sources.isEmpty && flow.step == .footage && SetupChecks.isBlocked(setupRows)
+    }
+
+    // MARK: The line of steps
+
+    func go(to step: FlowStep) {
+        flow.go(to: step)
+    }
+
+    func goNext() {
+        guard flow.canAdvance(for: options) else { return }
+        flow.goNext(for: options)
+    }
+
+    func goBack() {
+        flow.goBack(for: options)
+    }
+
+    /// A click on a station of the strip. Without footage only the first step makes sense.
+    func jump(toStation id: String) {
+        guard !isRunning else { return }
+        guard let step = flow.steps(for: options).first(where: { flow.station(of: $0).id == id }) else { return }
+        if options.sources.isEmpty && step != .footage { return }
+        flow.go(to: step)
+    }
+
+    /// Puts a part on the line (Music and Effects wait for their files in their own step; Graphics need a model).
+    func addPart(_ part: LinePart) {
+        flow.add(part, to: &options)
+    }
+
+    func removePart(_ part: LinePart) {
+        flow.remove(part, from: &options)
+    }
+
+    /// After anything that can change the line (a preset, the provider): a step whose part is gone becomes the Add step.
+    func repairFlow() {
+        flow.repair(for: options)
     }
 
     // MARK: Music bed
@@ -279,12 +372,13 @@ final class AppModel {
         process?.cancel()
     }
 
-    /// Back to the form, keeping the footage and brief for another pass.
+    /// Back to the line, keeping the footage and brief for another pass (at Ready; at the first step when there is no footage).
     func startOver() {
         guard !isRunning else { return }
         clearProblem()
         finishGraphicsTriedInVain = false
         phase = .idle
+        flow.go(to: options.sources.isEmpty ? .footage : .ready)
     }
 
     private func clearProblem() {
@@ -668,8 +762,26 @@ final class AppModel {
         Task { await refreshDoctor() }
     }
 
+    /// The setup check that is running now. Checks go one at a time on a task of their own: a call that comes while one is
+    /// running waits for that run and shows its answer, and a window that is rebuilt as the app opens (which cancels the task
+    /// that asked) can't stop the command-line tool half way and leave "didn't answer" over a check that was fine.
+    @ObservationIgnored private var doctorRun: Task<Void, Never>?
+
     /// Runs `roughcut doctor --json` with the same environment builds get.
     func refreshDoctor() async {
+        if let running = doctorRun {
+            await running.value
+            return
+        }
+        let run = Task {
+            await checkSetup()
+            doctorRun = nil
+        }
+        doctorRun = run
+        await run.value
+    }
+
+    private func checkSetup() async {
         checkingSetup = true
         defer { checkingSetup = false }
         cliURL = CLILocator.locate()
@@ -699,7 +811,18 @@ final class AppModel {
         }
         doctor = report
         doctorError = report == nil ? (lastLine.isEmpty ? "`roughcut doctor` didn't answer." : lastLine) : nil
+        settleFirstRunPlanner()
         await refreshPresets()
+    }
+
+    /// A Mac with no saved settings and Claude Code signed in with a plan: the build plans through it, not through an API key
+    /// nobody has set (see `SetupChecks.firstRunPlanner`). Once per launch, and never when settings were saved before.
+    private func settleFirstRunPlanner() {
+        guard firstRunPlannerOpen, let doctor else { return }
+        firstRunPlannerOpen = false
+        guard options.provider == .anthropic, let provider = SetupChecks.firstRunPlanner(doctor: doctor) else { return }
+        options.choose(provider: provider)
+        repairFlow()
     }
 
     // MARK: Presets
@@ -825,6 +948,129 @@ final class AppModel {
     func savePreferences() {
         if let data = try? JSONEncoder().encode(options.preferencesOnly) {
             UserDefaults.standard.set(data, forKey: preferencesKey)
+        }
+    }
+}
+
+// MARK: - At a screen, for pictures (see UIPreview)
+
+extension AppModel {
+    /// Fills the model with made-up content and puts it at `screen` (see `UIPreview`). Reads no file of the person's and calls no tool.
+    func applyPreview(_ screen: String) {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("roughcut-ui-preview", isDirectory: true)
+        try? manager.removeItem(at: root)
+        let shoot = root.appendingPathComponent("OC Food Fest", isDirectory: true)
+        func fill(_ folder: String, _ names: [String]) {
+            let directory = shoot.appendingPathComponent(folder, isDirectory: true)
+            try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            for name in names {
+                manager.createFile(atPath: directory.appendingPathComponent(name).path, contents: Data())
+            }
+        }
+        fill("Pier day", (1...9).map { "PIER_00\($0).mov" })
+        fill("Interviews", (1...5).map { "Interview_\($0).mov" } + ["Voiceover take 3.wav"])
+        fill("Stills", ["menu-board-1.jpg", "menu-board-2.jpg"])
+        let sources = ["Pier day", "Interviews", "Stills"].map { shoot.appendingPathComponent($0, isDirectory: true) }
+
+        // What the app learned from the CLI at launch.
+        cliURL = URL(fileURLWithPath: "/usr/local/bin/roughcut")
+        doctor = JSONLines.doctor(from: UIPreview.doctorLine.trimmingCharacters(in: .whitespacesAndNewlines))
+        if screen == "getready" {
+            doctor?.claudeCodeAuth = nil  // Claude Code installed, not signed in
+        }
+        doctorError = nil
+        presets = JSONLines.presets(from: UIPreview.presetsJSON) ?? []
+        presetsLoaded = true
+        getReadySetAside = screen != "getready"
+
+        // The form: a Venture OC promo for a shoot of three folders.
+        var form = BuildOptions()
+        form.choose(provider: .claudeCode)
+        if let preset = presets.first(where: { $0.name == "venture-oc" }) {
+            preset.apply(to: &form)
+        }
+        form.brief = form.brief + "\n\nOpen on Maria's line about the pier. Keep the numbers."
+        if screen != "footage-empty" && screen != "getready" {
+            form.sources = sources
+        }
+        var next = BuildFlow()
+        let song = URL(fileURLWithPath: "/Volumes/Music/upbeat_bed.m4a")
+        switch screen {
+        case "music", "ready", "finetune", "effects":
+            form.music = [song]
+        default:
+            break
+        }
+        if screen == "effects" {
+            form.sfx = [URL(fileURLWithPath: "/Volumes/Sounds/Whooshes")]
+        }
+        if screen == "ready-problem" || screen == "failed" {
+            form.music = [song]
+        }
+        if screen == "ready-problem" {
+            form.targetLength = "soon"
+        }
+        switch screen {
+        case "brief": next.go(to: .brief)
+        case "add": next.go(to: .add)
+        case "music": next.go(to: .part(.music))
+        case "effects": next.go(to: .part(.effects))
+        case "graphics": next.go(to: .part(.graphics))
+        case "ready", "ready-problem", "failed": next.go(to: .ready)
+        case "finetune": next.go(to: .fineTune)
+        default: break
+        }
+        options = form
+        flow = next
+        if screen != "footage-empty" && screen != "getready" {
+            for source in sources {
+                footageCounts[source] = FootageCount.count(source: source, deadline: .distantFuture)
+            }
+        }
+
+        // A run in progress, or a finished cut.
+        switch screen {
+        case "running-listen", "running":
+            phase = .running
+            runKind = .build
+            var statuses: [Stage: StageStatus] = [.scan: .done, .probe: .done, .silence: .done]
+            if screen == "running-listen" {
+                statuses[.transcribe] = .active
+                activeStage = .transcribe
+                stageDetail = "Transcribing Interview_3.mov"
+                progressCurrent = 6
+                progressTotal = 14
+            } else {
+                statuses[.transcribe] = .done
+                statuses[.vision] = .done
+                statuses[.plan] = .active
+                activeStage = .plan
+                stageDetail = "Waiting for Claude · 1 min 12 s so far"
+            }
+            stageStatus = statuses
+            log = ["$ roughcut build …", "Reading 16 files", "Planning the edit with claude-code:claude-opus-5-5"]
+        case "failed":
+            runKind = .build
+            failureKind = "usage_limit"
+            resumeFolder = URL(fileURLWithPath: "/Users/you/Movies/OC Food Fest_roughcut")
+            phase = .failed("Your Claude plan's usage limit was reached while the edit was planned.")
+        case "done-stopped":
+            let line = UIPreview.doneStoppedLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let result = JSONLines.event(from: line)?.result {
+                runKind = .build
+                runProblem = "Version 1 was written, but its graphics weren't finished: your Claude plan's usage limit was reached."
+                runAdvice = "Nothing is lost: the plan and every design that came back are saved. After your plan resets, click Finish graphics: it makes the rest without planning the cut again."
+                resumeFolder = URL(fileURLWithPath: "/Users/you/Movies/OC Food Fest_roughcut")
+                phase = .finished(result)
+            }
+        case "done", "adjust":
+            if let result = JSONLines.event(from: UIPreview.doneLine.trimmingCharacters(in: .whitespacesAndNewlines))?.result {
+                recentRuns = [RecentRun(result: result, finishedAt: Date().addingTimeInterval(-3600))]
+                phase = .finished(result)
+            }
+        default:
+            break
         }
     }
 }

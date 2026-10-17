@@ -1,0 +1,52 @@
+name: Mac UI pictures
+
+# A picture of every screen of the Mac app, light and dark, taken on an Apple Silicon runner and put on the ui-previews
+# branch (replaced each time), so the design can be checked against the real thing without a Mac at hand. The app opens
+# itself at each screen with made-up content: no footage, key or account of anyone's is in them.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, ui/assembly-line]
+    paths:
+      - "mac/Sources/**"
+      - "mac/Package.swift"
+      - ".github/scripts/ui-previews.sh"
+      - ".github/scripts/window-id.swift"
+      - ".github/scripts/ui-drive.swift"
+      - ".github/workflows/mac-ui-previews.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ui-previews
+  cancel-in-progress: true
+
+jobs:
+  pictures:
+    name: Pictures of each screen
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Package Roughcut.app
+        run: mac/scripts/build-app.sh
+      - name: Take the pictures
+        run: .github/scripts/ui-previews.sh "$RUNNER_TEMP/pictures"
+      - name: Put them on the ui-previews branch
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --short HEAD)"
+          mkdir -p "$RUNNER_TEMP/publish"
+          cp "$RUNNER_TEMP"/pictures/*.png "$RUNNER_TEMP/publish/"
+          if [ -d "$RUNNER_TEMP/pictures/ax" ]; then
+              cp -R "$RUNNER_TEMP/pictures/ax" "$RUNNER_TEMP/publish/ax"
+          fi
+          echo "Pictures of the Mac app at $sha. Made-up content only." > "$RUNNER_TEMP/publish/README.txt"
+          git config user.name "github-actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan ui-previews
+          git rm -rf --cached --quiet . || true
+          git --work-tree="$RUNNER_TEMP/publish" add -A
+          git commit --quiet -m "Pictures of the Mac app at $sha"
+          git push --force origin HEAD:refs/heads/ui-previews

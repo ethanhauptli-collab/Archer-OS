@@ -356,7 +356,7 @@ public struct BuildOptions: Codable, Equatable, Sendable {
     public var problems: [String] {
         var list: [String] = []
         if sources.isEmpty {
-            list.append("Add footage: drop folders or clips above.")
+            list.append("Add footage: drop folders or clips on the first step.")
         }
         let target = targetLength.trimmed
         if !target.isEmpty && TimeText.seconds(from: target) == nil {
