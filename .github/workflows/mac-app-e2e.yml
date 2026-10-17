@@ -10,7 +10,7 @@ name: Mac app end to end
 on:
   workflow_dispatch:
   push:
-    branches: [ui/assembly-line]
+    branches: [main, ui/assembly-line]
     paths:
       - "mac/Sources/**"
       - "mac/Package.swift"
