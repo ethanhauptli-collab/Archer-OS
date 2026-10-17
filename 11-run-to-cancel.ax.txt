@@ -1,0 +1,26 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXUnknown (167,99 52x81) “Listen, Working, current step”
+      AXUnknown (385,99 42x81) “Plan, not reached yet”
+      AXUnknown (598,99 42x81) “Cut, not reached yet”
+      AXUnknown (811,99 42x81) “Export, not reached yet”
+      AXScrollArea (62,189 900x517) 
+        AXStaticText (152,217 68x16) “Step 1 of 4”
+        AXStaticText (152,241 315x33) “Listening to your footage”
+        AXStaticText (152,280 534x19) “Roughcut reads every clip, finds the pauses and writes down what people say.”
+        AXBusyIndicator (152,323 16x16) “0”
+        AXStaticText (178,321 122x17) “Finding the pauses”
+        AXDisclosureTriangle (130,365 76x16) “Details” “0”
+      AXStaticText (86,728 507x15) “Transcripts and clip notes are saved, so a second run on the same footage is much faster.”
+      AXButton (880,721 58x28) “Cancel”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

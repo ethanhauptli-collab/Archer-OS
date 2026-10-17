@@ -1,0 +1,43 @@
+{
+ "title": "Walk and talk (dead air removed)",
+ "out_dir": "/Users/runner/work/_temp/e2e/Walk and talk_roughcut",
+ "fcpxml": "/Users/runner/work/_temp/e2e/Walk and talk_roughcut/Walk and talk v2.fcpxml",
+ "report": "/Users/runner/work/_temp/e2e/Walk and talk_roughcut/edit_report.md",
+ "captions": "/Users/runner/work/_temp/e2e/Walk and talk_roughcut/Walk and talk v2.srt",
+ "rough_seconds": 8.542,
+ "stringout_seconds": 8.542,
+ "edits": 2,
+ "broll": 0,
+ "sections": [
+  "talk"
+ ],
+ "planned_by": "heuristic",
+ "fell_back": false,
+ "warnings": [],
+ "version": 2,
+ "project": "Walk and talk - Rough Cut v2 (loose, no AI)",
+ "event": "Walk and talk (2026-10-17)",
+ "graphics": null,
+ "visual_log": null,
+ "skipped": {
+  "files": [],
+  "plan_refs": 0
+ },
+ "usage": null,
+ "report_html": "/Users/runner/work/_temp/e2e/Walk and talk_roughcut/edit_report.html",
+ "cut": {
+  "style": "loose",
+  "format": null,
+  "keep_fillers": true,
+  "stringout": true,
+  "punch_in": false
+ },
+ "changes": {
+  "from_version": 1,
+  "items": [
+   "Pacing: tight \u2192 loose",
+   "Length: 0:08.1 \u2192 0:08.5 (+0:00.4)"
+  ],
+  "unchanged": false
+ }
+}

@@ -1,0 +1,57 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x603) 
+        AXImage (148,113 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (198,111 290x33) “Your rough cut is ready”
+        AXStaticText (198,150 451x19) “Version 2. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (161,214 106x20) “Walk and talk”
+        AXStaticText (786,203 63x33) “0:04”
+        AXStaticText (160,261 30x16) “Edits”
+        AXStaticText (240,261 86x16) “1 cuts, 1 B-roll”
+        AXStaticText (160,285 55x16) “Graphics”
+        AXStaticText (240,285 127x16) “1 of 2 on the timeline”
+        AXStaticText (160,309 53x16) “Sections”
+        AXStaticText (240,309 81x16) “Walk and talk”
+        AXDisclosureTriangle (138,341 145x15) “More about this cut” “0”
+        AXImage (158,408 13x13) “Info” “info.circle.fill”
+        AXStaticText (182,406 660x30) “In Final Cut Pro choose a library; then open the project “AI shoot - Rough Cut v2 (tight, Opus)” in the event “AI shoot (2026-10-17)”. If Final Cut asks about items with the same names, choose Keep Both: each version is its own project.”
+        AXStaticText (182,443 482x15) “Captions: AI shoot v2.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (672,442 97x17) “Show Captions”
+        AXButton (145,489 106x28) “Show in Finder”
+        AXButton (261,489 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXGroup (145,535 720x171) 
+          AXHeading (154,535 279x14) “What changed in this version, Compared with version 1”
+          AXStaticText (154,561 7x16) “•”
+          AXStaticText (167,561 175x16) “Length: 0:08 → 0:04 (−0:03)”
+          AXStaticText (154,585 7x16) “•”
+          AXStaticText (167,585 520x16) “Removed V02.S003 "Over forty chefs are cooking, and tickets start at twenty dollars."”
+          AXStaticText (154,609 7x16) “•”
+          AXStaticText (167,609 110x16) “B-roll shots: 2 → 1”
+          AXStaticText (154,633 7x16) “•”
+          AXStaticText (167,633 498x16) “Graphics: 1 kept as they were, 1 had no room in this cut, 1 removed (see Warnings)”
+          AXStaticText (154,657 7x16) “•”
+          AXStaticText (167,657 329x16) “Graphic "$20": had no room in this cut (see Warnings)”
+          AXStaticText (154,681 7x16) “•”
+          AXStaticText (167,681 149x16) “Removed graphic: "$20"”
+        AXDisclosureTriangle (122,728 92x16) “1 warning” “0”
+        AXScrollBar (946,82 17x605) “0”
+          AXValueIndicator (947,85 15x532) “0”
+          AXButton (947,83 0x0) 
+          AXButton (947,83 0x0) 
+          AXButton (947,618 15x68) 
+          AXButton (947,83 15x2) 
+      AXButton (86,717 147x16) “Not quite right? Adjust…”
+      AXButton (704,701 234x48) “Open in Final Cut Pro”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+      AXButton (918,31 36x52) “New Cut”
+        AXButton (922,43 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

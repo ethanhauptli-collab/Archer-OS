@@ -1,0 +1,30 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x607) 
+        AXStaticText (234,118 378x33) “One thing before your first cut”
+        AXStaticText (234,157 504x19) “Roughcut needs a few tools. Here is what's ready and what's still missing.”
+        AXImage (172,220 22x22) “Selected” “checkmark.circle.fill”
+        AXStaticText (210,217 81x19) “Video tools”
+        AXStaticText (210,238 116x16) “ffmpeg is installed.”
+        AXImage (172,286 22x22) “Selected” “checkmark.circle.fill”
+        AXStaticText (210,283 95x19) “Transcription”
+        AXStaticText (210,304 169x16) “The speech engine is ready.”
+        AXImage (172,352 22x22) “exclamationmark.circle.fill”
+        AXStaticText (210,349 50x19) “Claude”
+        AXStaticText (210,370 624x32) “No Claude API key is set. Create one at console.anthropic.com → API Keys. To save one, run `roughcut key set` in Terminal (or use Settings → API Keys in the Mac app); both share it.”
+        AXStaticText (210,412 205x17) “Add it under Settings, API Keys.”
+        AXButton (427,410 113x20) “Open Settings…”
+      AXButton (86,719 76x16) “Skip for now”
+      AXButton (663,713 135x28) “Continue without AI” “Roughcut can still cut the dead air. It won't plan the edit, place B-roll or make graphics.”
+      AXButton (810,705 128x44) “Check again”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

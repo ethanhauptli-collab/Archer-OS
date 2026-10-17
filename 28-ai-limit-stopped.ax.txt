@@ -1,0 +1,50 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x603) 
+        AXStaticText (159,123 692x32) “Version 1 was written, but its graphics weren't finished: Your Claude plan's usage limit was reached during the graphics design request (it resets 5pm).”
+        AXStaticText (156,163 690x30) “Nothing is lost: the plan and every design that came back are saved. After your plan resets, click Finish graphics: it makes the rest without planning the cut again.”
+        AXImage (148,225 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (198,223 514x33) “Written, but the graphics aren't made yet”
+        AXStaticText (198,262 448x19) “Version 1. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (161,326 106x20) “Walk and talk”
+        AXStaticText (786,315 63x33) “0:08”
+        AXStaticText (160,373 83x16) “Dialogue only”
+        AXStaticText (268,373 29x16) “0:08”
+        AXStaticText (160,397 30x16) “Edits”
+        AXStaticText (268,397 90x16) “2 cuts, 2 B-roll”
+        AXStaticText (160,421 55x16) “Graphics”
+        AXStaticText (268,421 129x16) “0 of 2 on the timeline”
+        AXStaticText (268,443 249x15) “2 not designed: the usage limit was reached”
+        AXButton (268,464 132x20) “Finish graphics” “Tries again to design and render the graphics that didn't come back. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (410,468 438x26) “Tries again to design and render the graphics that didn't come back. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (160,502 53x16) “Sections”
+        AXStaticText (268,502 81x16) “Walk and talk”
+        AXDisclosureTriangle (138,534 145x15) “More about this cut” “0”
+        AXImage (158,601 13x13) “Info” “info.circle.fill”
+        AXStaticText (182,599 669x30) “In Final Cut Pro choose a library; then open the project “AI shoot 2 - Rough Cut v1 (tight, Opus)” in the event “AI shoot 2 (2026-10-17)”.”
+        AXStaticText (182,636 491x15) “Captions: AI shoot 2 v1.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (681,635 97x17) “Show Captions”
+        AXButton (145,682 106x28) “Show in Finder”
+        AXButton (261,682 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXDisclosureTriangle (122,732 100x16) “2 warnings” “0”
+        AXScrollBar (946,82 17x605) “0”
+          AXValueIndicator (947,85 15x529) “0”
+          AXButton (947,83 0x0) 
+          AXButton (947,83 0x0) 
+          AXButton (947,615 15x71) 
+          AXButton (947,83 15x2) 
+      AXButton (86,717 147x16) “Not quite right? Adjust…”
+      AXButton (704,701 234x48) “Open in Final Cut Pro”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+      AXButton (918,31 36x52) “New Cut”
+        AXButton (922,43 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

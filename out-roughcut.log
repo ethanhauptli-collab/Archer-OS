@@ -1,0 +1,9 @@
+2026-10-17 06:57:36  === roughcut build started (output: /Users/runner/work/_temp/e2e/Walk and talk_roughcut)
+2026-10-17 06:57:36  found 3 media files
+2026-10-17 06:57:38  transcriber: mlx (mlx-community/whisper-large-v3-turbo)
+2026-10-17 06:57:38  probed 3 files in 0.1s
+2026-10-17 06:57:39  mapped silence and loudness in 0.2s
+2026-10-17 06:57:39  transcripts ready in 0.0s
+2026-10-17 06:57:39  FINISHED: Walk and talk v1.fcpxml and edit_report.md written
+2026-10-17 06:57:46  === roughcut render started (output: /Users/runner/work/_temp/e2e/Walk and talk_roughcut)
+2026-10-17 06:57:46  FINISHED: Walk and talk v2.fcpxml and edit_report.md written

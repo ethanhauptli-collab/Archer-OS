@@ -1,0 +1,54 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (169,99 48x81) “Footage, 3 files, done”
+      AXButton (372,99 68x81) “Brief, Tight · 1:30, done”
+      AXButton (591,99 56x81) “Add, None yet, done”
+      AXButton (811,99 42x81) “Build, Ready, current step”
+      AXScrollArea (62,189 900x501) 
+        AXStaticText (144,53 124x33) “Fine-tune”
+        AXStaticText (144,92 388x19) “The defaults suit most cuts. Change only what you need.”
+        AXStaticText (144,129 55x16) “Planning”
+        AXStaticText (160,166 126x17) “Who plans the edit”
+        AXPopUpButton (549,165 300x20) “Who plans the edit” “None: just cut the silence”
+        AXStaticText (160,212 89x17) “Project name”
+        AXTextField (549,210 300x21) 
+        AXStaticText (160,258 243x17) “Open in Final Cut Pro when it's done”
+        AXCheckBox (811,256 38x22) “Open in Final Cut Pro when it's done” “0”
+        AXStaticText (144,308 116x16) “Sound and picture”
+        AXStaticText (160,346 94x17) “Dialogue level”
+        AXPopUpButton (549,344 300x20) “Dialogue level” “Matched at -16 LUFS (YouTube, most web)”
+        AXStaticText (160,390 49x17) “Format”
+        AXPopUpButton (649,389 200x20) “Format” “Match footage”
+        AXStaticText (160,434 159x17) “Punch-ins on jump cuts”
+        AXStaticText (160,453 464x48) “A 112% zoom alternating at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Auto: when Claude reads the brief asking for them (without AI, when it says so).”
+        AXRadioGroup (679,457 170x22) “Punch-ins”
+          AXRadioButton (677,456 59x24) “Auto” “1”
+          AXRadioButton (736,456 57x24) “On” “0”
+          AXRadioButton (793,456 58x24) “Off” “0”
+        AXStaticText (160,526 173x17) “Short fades at audio edits”
+        AXStaticText (160,545 127x16) “No clicks at the cuts.”
+        AXCheckBox (811,533 38x22) “Short fades at audio edits” “1”
+        AXStaticText (160,588 136x17) “Keep “um” and “uh””
+        AXCheckBox (811,586 38x22) “Keep um and uh” “0”
+        AXStaticText (160,633 230x17) “Also make a dialogue-only version”
+        AXStaticText (160,652 187x16) “All dialogue, dead air removed.”
+        AXCheckBox (811,640 38x22) “Also make a dialogue-only version” “1”
+        AXScrollBar (946,188 17x503) “0.9411764705882353”
+          AXValueIndicator (947,309 15x371) “0.9411764705882353”
+          AXButton (947,189 0x0) 
+          AXButton (947,189 0x0) 
+          AXButton (947,681 15x9) 
+          AXButton (947,189 15x120) 
+      AXButton (87,719 47x16) “Back”
+      AXButton (860,705 78x44) “Done”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

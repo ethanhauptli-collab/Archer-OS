@@ -1,0 +1,33 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x603) 
+        AXStaticText (152,111 276x33) “What should change?”
+        AXStaticText (152,150 380x19) “Version 1 stays as it is. Your changes become version 2.”
+        AXButton (152,187 354x65) “Quick change, Pacing or format. Instant, no AI.”
+        AXButton (518,187 354x65) “Ask Claude, Describe it. Claude re-plans the edit.”
+        AXStaticText (152,270 27x16) “Feel”
+        AXRadioGroup (152,294 720x22) “Pacing”
+          AXRadioButton (150,293 242x24) “Tight” “0”
+          AXRadioButton (392,293 240x24) “Medium” “1”
+          AXRadioButton (632,293 241x24) “Loose” “0”
+        AXStaticText (152,324 236x15) “Natural pauses up to about half a second.”
+        AXStaticText (152,353 46x16) “Format”
+        AXStaticText (520,353 149x16) “Punch-ins on jump cuts”
+        AXPopUpButton (152,377 352x20) “Format” “Same as this cut (Match footage)”
+        AXPopUpButton (520,377 352x20) “Punch-ins” “Same as this cut (Off)” “A 112% zoom alternating at each jump cut no B-roll covers.”
+      AXButton (87,717 116x16) “Back to your cut”
+      AXStaticText (716,718 110x15) “Instant. Uses no AI.”
+      AXButton (838,701 100x48) “Re-cut”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+      AXButton (918,31 36x52) “New Cut”
+        AXButton (922,43 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

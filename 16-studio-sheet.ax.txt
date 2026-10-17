@@ -1,0 +1,55 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (147,99 48x81) “Footage, 3 files, done”
+      AXButton (308,99 68x81) “Brief, Tight · 1:30, done”
+      AXButton (484,99 56x81) “Add, None yet, done”
+      AXButton (647,99 71x81) “Music, No song yet, current step”
+      AXButton (832,99 42x81) “Build, not reached yet”
+      AXScrollArea (62,189 900x501) 
+        AXStaticText (152,213 142x33) “Add a song”
+        AXStaticText (152,252 559x19) “It plays under the edit, ducks under speech, and is timed to end on the last frame.”
+        AXStaticText (451,333 122x19) “Drop a song here”
+        AXButton (331,364 117x28) “Choose a song…”
+        AXButton (458,364 151x28) “From Venture Studio…” “Songs from Venture Studio's catalog snapshot, added here as plain files”
+        AXButton disabled (619,368 75x20) “Paste” “Paste a song copied in Finder or Studio, or its full path”
+        AXStaticText (301,404 422x15) “Without a song, Claude uses music from your footage folder if there is any.”
+      AXButton (87,719 47x16) “Back”
+      AXButton (839,705 99x44) “Next”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton disabled (80,49 16x16) 
+    AXButton (120,49 16x16) 
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+    AXSheet (192,167 640x460) 
+      AXGroup (192,167 640x460) 
+        AXStaticText (208,183 172x16) “Music from Venture Studio”
+        AXStaticText (208,209 583x26) “From the catalog snapshot from 17 Oct 05:58 (1 h old). Songs added or tagged in Studio since then appear after its next catalog snapshot (in Studio: Back up catalog now).”
+        AXTextField (208,245 360x22) 
+        AXStaticText (576,248 61x16) “Collection”
+        AXPopUpButton (645,246 171x20) “All collections”
+        AXCheckBox (208,277 103x16) “Favorites only” “0”
+        AXCheckBox (327,277 134x16) “Hide sound effects” “1” “Leaves out files shorter than 8 seconds, and unmeasured ones whose names say whoosh, hit, riser…”
+        AXScrollArea (208,303 608x278) 
+          AXOutline (208,303 608x278) 
+            AXRow (208,313 608x39) 
+              AXCell (218,313 588x39) 
+                AXImage (226,326 8x13) “Song” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Calm Piano.m4a” “music.note”
+                AXStaticText (244,317 99x16) “Calm Piano.m4a” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Calm Piano.m4a”
+                AXStaticText (771,324 29x16) “0:30” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Calm Piano.m4a”
+                AXStaticText (244,335 129x13) “Vendor A · Standard · calm” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Calm Piano.m4a”
+            AXRow (208,352 608x39) 
+              AXCell (218,352 588x39) 
+                AXStaticText (249,356 76x16) “Sunrise.m4a” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Sunrise.m4a”
+                AXImage (225,365 15x14) “Favorite” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Sunrise.m4a” “star.fill”
+                AXStaticText (771,364 29x16) “0:30” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Sunrise.m4a”
+                AXStaticText (249,374 172x13) “Vendor A · Standard · upbeat, warm” “/Users/runner/work/_temp/e2e/studio-fake/Studio Library/Music/Sunrise.m4a”
+            AXColumn (218,303 588x278) “ListColumn”
+        AXStaticText (208,594 60x15) “0 selected”
+        AXButton (627,591 58x20) “Cancel”
+        AXButton disabled (693,591 123x20) “Add to Music bed”
+  AXMenuBar (0,0 1024x24) 

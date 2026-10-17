@@ -1,0 +1,49 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x603) 
+        AXImage (148,113 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (198,111 514x33) “Written, but the graphics aren't made yet”
+        AXStaticText (198,150 451x19) “Version 3. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (161,214 106x20) “Walk and talk”
+        AXStaticText (786,203 63x33) “0:04”
+        AXStaticText (160,261 30x16) “Edits”
+        AXStaticText (240,261 86x16) “1 cuts, 1 B-roll”
+        AXStaticText (160,285 55x16) “Graphics”
+        AXStaticText (240,285 129x16) “0 of 2 on the timeline”
+        AXStaticText (240,307 104x15) “1 not designed yet”
+        AXButton (240,328 132x20) “Finish graphics” “Tries again to design and render the graphics that didn't come back. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (382,332 467x26) “Tries again to design and render the graphics that didn't come back. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (160,366 53x16) “Sections”
+        AXStaticText (240,366 81x16) “Walk and talk”
+        AXDisclosureTriangle (138,398 145x15) “More about this cut” “0”
+        AXImage (158,465 13x13) “Info” “info.circle.fill”
+        AXStaticText (182,463 671x45) “In Final Cut Pro choose a library; then open the project “Revise shoot - Rough Cut v3 (tight, Opus)” in the event “Revise shoot (2026-10-17)”. If Final Cut asks about items with the same names, choose Keep Both: each version is its own project.”
+        AXStaticText (182,515 508x15) “Captions: Revise shoot v3.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (698,514 97x17) “Show Captions”
+        AXButton (145,561 106x28) “Show in Finder”
+        AXButton (261,561 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXGroup (145,607 720x83) 
+          AXHeading (154,607 280x14) “What changed in this version, Compared with version 2”
+          AXStaticText (163,641 685x32) “This is the same cut as v2: its settings are the same, so it plays exactly as v2 does. To change it, pick another pacing, format or punch-in setting, or revise it with notes.”
+        AXDisclosureTriangle (122,712 100x16) “2 warnings” “0”
+        AXScrollBar (946,82 17x605) “0”
+          AXValueIndicator (947,85 15x544) “0”
+          AXButton (947,83 0x0) 
+          AXButton (947,83 0x0) 
+          AXButton (947,630 15x56) 
+          AXButton (947,83 15x2) 
+      AXButton (86,717 147x16) “Not quite right? Adjust…”
+      AXButton (704,701 234x48) “Open in Final Cut Pro”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+      AXButton (918,31 36x52) “New Cut”
+        AXButton (922,43 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

@@ -1,0 +1,391 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (162,99 61x81) “Footage, Start here, current step”
+      AXButton (385,99 42x81) “Brief, not reached yet”
+      AXButton (592,99 53x81) “Add, Optional, not reached yet”
+      AXButton (811,99 42x81) “Build, not reached yet”
+      AXScrollArea (62,189 900x501) 
+        AXStaticText (152,213 291x33) “Start with your footage”
+        AXStaticText (152,252 453x19) “Drop the folders or clips from your shoot. Subfolders are included.”
+        AXImage (500,365 25x32) “Download” “square.and.arrow.down”
+        AXStaticText (406,418 212x21) “Drop folders or clips here”
+        AXStaticText (446,450 133x16) “Video, audio and stills”
+        AXButton (476,482 73x28) “Choose…”
+      AXStaticText (86,720 137x15) “Add footage to continue”
+      AXButton disabled (839,705 99x44) “Next”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton disabled (80,49 16x16) 
+    AXButton (120,49 16x16) 
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+    AXSheet (112,173 800x448) “open” “open-panel”
+      AXSplitGroup (112,173 800x448) 
+        AXScrollArea (112,173 143x448) “_NS:61”
+          AXOutline (111,172 130x616) “sidebar” “_NS:8”
+            AXRow (112,186 128x19) 
+              AXCell (122,186 108x19) 
+                AXStaticText (127,185 110x21) “Favorites” “xSidebarHeader”
+            AXRow (112,205 128x28) 
+              AXCell (122,205 108x28) 
+                AXStaticText (151,210 72x18) “Recents”
+                AXImage (130,214 17x11) “clock”
+            AXRow (112,233 128x28) 
+              AXCell (122,233 108x28) 
+                AXStaticText (151,238 72x18) “Applications”
+                AXImage (129,242 18x11) 
+            AXRow (112,261 128x28) 
+              AXCell (122,261 108x28) 
+                AXStaticText (151,266 72x18) “Desktop”
+                AXImage (128,270 21x11) 
+            AXRow (112,289 128x28) 
+              AXCell (122,289 108x28) 
+                AXStaticText (151,294 72x18) “Documents”
+                AXImage (130,298 17x11) “document”
+            AXRow (112,317 128x28) 
+              AXCell (122,317 108x28) 
+                AXStaticText (151,322 72x18) “Downloads”
+                AXImage (130,326 17x11) “Arrow Down Circle”
+            AXRow (112,358 128x19) 
+              AXCell (122,358 108x19) 
+                AXStaticText (127,357 110x21) “Locations” “xSidebarHeader”
+            AXRow (112,377 128x28) 
+              AXCell (122,377 108x28) 
+                AXStaticText (151,382 72x18) “iCloud Drive”
+                AXImage (128,386 20x11) “iCloud”
+            AXRow (112,418 128x19) 
+              AXCell (122,418 108x19) 
+                AXStaticText (127,417 110x21) “Tags” “xSidebarHeader”
+            AXRow (112,437 128x28) 
+              AXCell (122,437 108x28) 
+                AXStaticText (151,442 72x18) “Red”
+                AXImage (131,446 14x11) 
+            AXRow (112,465 128x28) 
+              AXCell (122,465 108x28) 
+                AXStaticText (151,470 72x18) “Orange”
+                AXImage (131,474 14x11) 
+            AXRow (112,493 128x28) 
+              AXCell (122,493 108x28) 
+                AXStaticText (151,498 72x18) “Yellow”
+                AXImage (131,502 14x11) 
+            AXRow (112,521 128x28) 
+              AXCell (122,521 108x28) 
+                AXStaticText (151,526 72x18) “Green”
+                AXImage (131,530 14x11) 
+            AXRow (112,549 128x28) 
+              AXCell (122,549 108x28) 
+                AXStaticText (151,554 72x18) “Blue”
+                AXImage (131,558 14x11) 
+            AXRow (112,577 128x28) 
+              AXCell (122,577 108x28) 
+                AXStaticText (151,582 72x18) “Purple”
+                AXImage (131,586 14x11) 
+            AXRow (112,605 128x28) 
+              AXCell (122,605 108x28) 
+                AXStaticText (151,610 72x18) “Gray”
+                AXImage (131,614 14x11) 
+            AXRow (112,633 128x28) 
+              AXCell (122,633 108x28) 
+                AXStaticText (151,638 72x18) “All Tags…”
+                AXImage (129,642 18x11) 
+            AXRow (112,674 128x19) 
+              AXCell (122,674 108x19) 
+                AXStaticText (127,673 110x21) “Media” “xSidebarHeader”
+            AXRow (112,693 128x28) 
+              AXCell (122,693 108x28) 
+                AXStaticText (151,698 72x18) “Music”
+                AXImage (129,704 18x7) 
+            AXRow (112,721 128x28) 
+              AXCell (122,721 108x28) 
+                AXStaticText (151,726 72x18) “Photos”
+                AXImage (127,730 22x11) “camera”
+            AXRow (112,749 128x28) 
+              AXCell (122,749 108x28) 
+                AXStaticText (151,754 72x18) “Movies”
+                AXImage (127,757 22x12) “movie”
+            AXColumn (122,173 108x614) “AutomaticTableColumnIdentifier.0”
+          AXScrollBar (239,172 17x450) “0” “_NS:70”
+            AXValueIndicator (240,175 15x323) “0”
+            AXButton (240,173 0x0) 
+            AXButton (240,173 0x0) 
+            AXButton (240,499 15x122) 
+            AXButton (240,173 15x2) 
+        AXSplitter disabled (255,173 1x448) “143”
+        AXSplitGroup (256,173 656x448) 
+          AXBrowser (255,172 658x450) “column view” “ColumnView”
+            AXScrollArea (256,173 656x448) 
+              AXScrollArea (-803,236 245x309) 
+                AXList (-804,235 232x311) 
+                  AXGroup (-787,241 192x23) 
+                    AXImage (-787,244 16x16) 
+                    AXTextField (-767,243 81x18) “Applications”
+                  AXGroup (-787,263 192x23) 
+                    AXImage (-787,266 16x16) 
+                    AXTextField (-767,265 81x18) “Library”
+                  AXGroup (-787,285 192x23) 
+                    AXImage (-787,288 16x16) 
+                    AXTextField (-767,287 51x18) “System”
+                  AXGroup (-787,307 192x23) 
+                    AXImage (-787,310 16x16) 
+                    AXTextField (-767,309 42x18) “Users”
+                AXScrollBar disabled (-574,235 17x296) “0”
+              AXScrollArea (-558,236 245x309) 
+                AXList (-559,235 232x311) 
+                  AXGroup (-542,241 192x23) 
+                    AXImage (-542,244 16x16) 
+                    AXTextField (-522,243 46x18) “runner”
+                  AXGroup (-542,263 192x23) 
+                    AXImage (-542,266 16x16) 
+                    AXTextField (-522,265 49x18) “Shared”
+                AXScrollBar disabled (-329,235 17x296) “0”
+              AXScrollArea (-313,236 245x309) 
+                AXList (-314,177 232x369) 
+                  AXGroup (-297,183 192x23) 
+                    AXImage (-297,186 16x16) 
+                    AXTextField (-277,185 124x18) “actionarchivecache”
+                  AXGroup (-297,205 192x23) 
+                    AXImage (-297,208 16x16) 
+                    AXTextField (-277,207 124x18) “actions-runner”
+                  AXGroup (-297,227 192x23) 
+                    AXImage (-297,230 16x16) 
+                    AXTextField (-277,229 65x18) “bootstrap”
+                  AXGroup (-297,249 192x23) 
+                    AXImage (-297,252 16x16) 
+                    AXTextField (-277,251 57x18) “Desktop”
+                  AXGroup (-297,271 192x23) 
+                    AXImage (-297,274 16x16) 
+                    AXTextField (-277,273 76x18) “Documents”
+                  AXGroup (-297,293 192x23) 
+                    AXImage (-297,296 16x16) 
+                    AXTextField (-277,295 73x18) “Downloads”
+                  AXGroup (-297,315 192x23) 
+                    AXImage (-297,318 16x16) 
+                    AXTextField (-277,317 108x18) “hostedtoolcache”
+                  AXGroup (-297,337 192x23) 
+                    AXImage (-297,340 16x16) 
+                    AXTextField (-277,339 114x18) “image-generation”
+                  AXGroup (-297,359 192x23) 
+                    AXImage (-297,362 16x16) 
+                    AXTextField (-277,361 114x18) “imagedata.json”
+                  AXGroup (-297,381 192x23) 
+                    AXImage (-297,384 16x16) 
+                    AXTextField (-277,383 49x18) “Movies”
+                  AXGroup (-297,403 192x23) 
+                    AXImage (-297,406 16x16) 
+                    AXTextField (-277,405 42x18) “Music”
+                  AXGroup (-297,425 192x23) 
+                    AXImage (-297,428 16x16) 
+                    AXTextField (-277,427 56x18) “Pictures”
+                  AXGroup (-297,447 192x23) 
+                    AXImage (-297,450 16x16) 
+                    AXTextField (-277,449 44x18) “Public”
+                  AXGroup (-297,469 192x23) 
+                    AXImage (-297,472 16x16) 
+                    AXTextField (-277,471 44x18) “software-report.json”
+                  AXGroup (-297,491 192x23) 
+                    AXImage (-297,494 16x16) 
+                    AXTextField (-277,493 125x18) “software-report.md”
+                  AXGroup (-297,513 192x23) 
+                    AXImage (-297,516 16x16) 
+                    AXTextField (-277,515 36x18) “work”
+                AXScrollBar (-84,235 17x296) “1”
+                  AXValueIndicator (-83,278 15x250) “1”
+                  AXButton (-83,236 0x0) 
+                  AXButton (-83,236 0x0) 
+                  AXButton (-83,528 15x2) 
+                  AXButton (-83,236 15x41) 
+              AXScrollArea (-68,236 245x309) 
+                AXList (-69,235 232x311) 
+                  AXGroup (-52,241 192x23) 
+                    AXImage (-52,244 16x16) 
+                    AXTextField (-32,243 71x18) “_actions”
+                  AXGroup (-52,263 192x23) 
+                    AXImage (-52,266 16x16) 
+                    AXTextField (-32,265 114x18) “_PipelineMapping”
+                  AXGroup (-52,285 192x23) 
+                    AXImage (-52,288 16x16) 
+                    AXTextField (-32,287 45x18) “_temp”
+                  AXGroup (-52,307 192x23) 
+                    AXImage (-52,310 16x16) 
+                    AXTextField (-32,309 71x18) “Archer-OS”
+                AXScrollBar disabled (161,235 17x296) “0”
+              AXScrollArea (177,236 245x309) 
+                AXList (176,235 232x311) 
+                  AXGroup (193,241 192x23) 
+                    AXImage (193,244 16x16) 
+                    AXTextField (213,243 113x18) “_github_workflow”
+                  AXGroup (193,263 192x23) 
+                    AXImage (193,266 16x16) 
+                    AXTextField (213,265 152x18) “_runner_file_commands”
+                  AXGroup (193,285 192x23) 
+                    AXImage (193,288 16x16) 
+                    AXTextField (213,287 169x18) “0a6f378c-27cb-426a-97b7-d50a682141b6.sh”
+                  AXGroup (193,307 192x23) 
+                    AXImage (193,310 16x16) 
+                    AXTextField (213,309 169x18) “8c740494-d4be-473f-a454-aa6f77c4fea3.sh”
+                  AXGroup (193,329 192x23) 
+                    AXImage (193,332 16x16) 
+                    AXTextField (213,331 169x18) “625aaa34-9888-421b-83ba-8d0b51826ded.sh”
+                  AXGroup (193,351 192x23) 
+                    AXImage (193,354 16x16) 
+                    AXTextField (213,353 169x18) “831f0c41-f17c-4c44-9a39-6284b5860564.sh”
+                  AXGroup (193,373 192x23) 
+                    AXImage (193,376 16x16) 
+                    AXTextField (213,375 169x18) “861cb630-85c9-48e6-a477-dd2d05f86493.sh”
+                  AXGroup (193,395 192x23) 
+                    AXImage (193,398 16x16) 
+                    AXTextField (213,397 29x18) “e2e”
+                  AXGroup (193,417 192x23) 
+                    AXImage (193,420 16x16) 
+                    AXTextField (213,419 73x18) “e2e-log.txt”
+                  AXGroup (193,439 192x23) 
+                    AXImage (193,442 16x16) 
+                    AXTextField (213,441 98x18) “ui-drag-source”
+                  AXGroup (193,461 192x23) 
+                    AXImage (193,464 16x16) 
+                    AXTextField (213,463 53x18) “ui-drive”
+                AXScrollBar disabled (406,235 17x296) “0”
+              AXScrollArea (422,236 245x309) 
+                AXList (421,76 232x765) 
+                  AXGroup (438,82 192x23) 
+                    AXImage (438,85 16x16) 
+                    AXTextField (458,84 149x18) “AI shoot”
+                  AXGroup (438,104 192x23) 
+                    AXImage (438,107 16x16) 
+                    AXTextField (458,106 68x18) “AI shoot 2”
+                  AXGroup (438,126 192x23) 
+                    AXImage (438,129 16x16) 
+                    AXTextField (458,128 68x18) “AI shoot 2_roughcut”
+                  AXGroup (438,148 192x23) 
+                    AXImage (438,151 16x16) 
+                    AXTextField (458,150 118x18) “AI shoot_roughcut”
+                  AXGroup (438,170 192x23) 
+                    AXImage (438,173 16x16) 
+                    AXTextField (458,172 50x18) “ai-0.txt”
+                  AXGroup (438,192 192x23) 
+                    AXImage (438,195 16x16) 
+                    AXTextField (458,194 36x18) “ai.txt”
+                  AXGroup (438,214 192x23) 
+                    AXImage (438,217 16x16) 
+                    AXTextField (458,216 56x18) “build.txt”
+                  AXGroup (438,236 192x23) 
+                    AXImage (438,239 16x16) 
+                    AXTextField (458,238 66x18) “cancel.txt”
+                  AXGroup (438,258 192x23) 
+                    AXImage (438,261 16x16) 
+                    AXTextField (458,260 112x18) “claude-state.json”
+                  AXGroup (438,280 192x23) 
+                    AXImage (438,283 16x16) 
+                    AXTextField (458,282 66x18) “doctor.err”
+                  AXGroup (438,302 192x23) 
+                    AXImage (438,305 16x16) 
+                    AXTextField (458,304 74x18) “doctor.json”
+                  AXGroup (438,324 192x23) 
+                    AXImage (438,327 16x16) 
+                    AXTextField (458,326 93x18) “fake-roughcut”
+                  AXGroup (438,346 192x23) 
+                    AXImage (438,349 16x16) 
+                    AXTextField (458,348 76x18) “first-run.txt”
+                  AXGroup (438,368 192x23) 
+                    AXImage (438,371 16x16) 
+                    AXTextField (458,370 60x18) “FX shoot”
+                  AXGroup (438,390 192x23) 
+                    AXImage (438,393 16x16) 
+                    AXTextField (458,392 122x18) “FX shoot_roughcut”
+                  AXGroup (438,412 192x23) 
+                    AXImage (438,415 16x16) 
+                    AXTextField (458,414 37x18) “fx.txt”
+                  AXGroup (438,434 192x23) 
+                    AXImage (438,437 16x16) 
+                    AXTextField (458,436 63x18) “limit-1.txt”
+                  AXGroup (438,456 192x23) 
+                    AXImage (438,459 16x16) 
+                    AXTextField (458,458 65x18) “limit-2.txt”
+                  AXGroup (438,478 192x23) 
+                    AXImage (438,481 16x16) 
+                    AXTextField (458,480 87x18) “limit-build.txt”
+                  AXGroup (438,500 192x23) 
+                    AXImage (438,503 16x16) 
+                    AXTextField (458,502 51x18) “limit.txt”
+                  AXGroup (438,522 192x23) 
+                    AXImage (438,525 16x16) 
+                    AXTextField (458,524 70x18) “panel-files”
+                  AXGroup (438,544 192x23) 
+                    AXImage (438,547 16x16) 
+                    AXTextField (458,546 111x18) “panel-notes-1.txt”
+                  AXGroup (438,566 192x23) 
+                    AXImage (438,569 16x16) 
+                    AXTextField (458,568 113x18) “panel-notes-2.txt”
+                  AXGroup (438,588 192x23) 
+                    AXImage (438,591 16x16) 
+                    AXTextField (458,590 56x18) “pictures”
+                  AXGroup (438,610 192x23) 
+                    AXImage (438,613 16x16) 
+                    AXTextField (458,612 65x18) “recent.txt”
+                  AXGroup (438,632 192x23) 
+                    AXImage (438,635 16x16) 
+                    AXTextField (458,634 89x18) “slow-build.txt”
+                  AXGroup (438,654 192x23) 
+                    AXImage (438,657 16x16) 
+                    AXTextField (458,656 83x18) “Studio shoot”
+                  AXGroup (438,676 192x23) 
+                    AXImage (438,679 16x16) 
+                    AXTextField (458,678 145x18) “Studio shoot_roughcut”
+                  AXGroup (438,698 192x23) 
+                    AXImage (438,701 16x16) 
+                    AXTextField (458,700 75x18) “studio-fake”
+                  AXGroup (438,720 192x23) 
+                    AXImage (438,723 16x16) 
+                    AXTextField (458,722 63x18) “studio.txt”
+                  AXGroup (438,742 192x23) 
+                    AXImage (438,745 16x16) 
+                    AXTextField (458,744 98x18) “ui-drag-source”
+                  AXGroup (438,764 192x23) 
+                    AXImage (438,767 16x16) 
+                    AXTextField (458,766 53x18) “ui-drive”
+                  AXGroup (438,786 192x23) 
+                    AXImage (438,789 16x16) 
+                    AXTextField (458,788 87x18) “Walk and talk”
+                  AXGroup (438,808 192x23) 
+                    AXImage (438,811 16x16) 
+                    AXTextField (458,810 149x18) “Walk and talk_roughcut”
+                AXScrollBar (651,235 17x296) “0.3502202643171806”
+                  AXValueIndicator (652,294 15x130) “0.3502202643171806”
+                  AXButton (652,236 0x0) 
+                  AXButton (652,236 0x0) 
+                  AXButton (652,425 15x105) 
+                  AXButton (652,236 15x57) 
+              AXScrollArea (667,236 245x309) 
+                AXList (666,235 232x311) 
+                  AXGroup (683,241 192x23) 
+                    AXImage (683,244 16x16) 
+                    AXTextField (703,243 72x18) “My sounds”
+                  AXGroup (683,263 192x23) 
+                    AXImage (683,266 16x16) 
+                    AXTextField (703,265 77x18) “Panel shoot”
+                  AXGroup (683,285 192x23) 
+                    AXImage (683,288 16x16) 
+                    AXTextField (703,287 105x18) “Panel Song.m4a”
+                AXScrollBar disabled (896,235 17x296) “0”
+              AXScrollBar (255,544 658x17) “1”
+                AXValueIndicator (661,545 249x15) “1”
+                AXButton (256,545 0x0) 
+                AXButton (256,545 0x0) 
+                AXButton (910,545 2x15) 
+                AXButton (256,545 404x15) 
+      AXGroup (275,193 49x22) “_NS:49”
+        AXButton disabled (273,192 27x24) “back”
+        AXButton disabled (300,192 26x24) “forward”
+      AXMenuButton (330,193 49x22) “column view” “Show as Icons, List, or Columns, and hide/show the sidebar” “View Options”
+      AXMenuButton (385,193 48x22) “Change the item grouping (hold down Option to change the sort)” “Group or Sort By”
+      AXPopUpButton (480,193 209x22) “Where:” “panel-files” “where popup”
+      AXTextField (735,192 158x24) “Search”
+        AXButton (737,193 25x22) “search”
+      AXButton (275,580 91x22) “New Folder” “NewFolderButton”
+      AXButton (739,580 74x22) “Cancel” “CancelButton”
+      AXButton (819,580 74x22) “Open” “OKButton”
+  AXMenuBar (0,0 1024x24) 

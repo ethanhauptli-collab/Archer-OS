@@ -1,0 +1,60 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXScrollArea (62,83 900x603) 
+        AXStaticText (159,123 694x32) “Version 2 was written, but its graphics weren't finished: the revision was cancelled. Your earlier version, Revise shoot v1.fcpxml, is still there.”
+        AXStaticText (156,163 473x15) “Click Finish graphics to make them from the saved plan; the cut isn't planned again.”
+        AXStaticText (156,186 572x30) “The new plan was saved. Finish without AI adds the graphics whose designs were saved and calls no model; Finish graphics, below, also designs the rest.”
+        AXButton (737,191 116x20) “Finish without AI” “Cuts from the saved plan with its own settings and no model call (roughcut render)”
+        AXImage (148,248 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (198,246 514x33) “Written, but the graphics aren't made yet”
+        AXStaticText (198,285 567x19) “Version 2. No graphics yet. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (161,349 106x20) “Walk and talk”
+        AXStaticText (786,338 63x33) “0:04”
+        AXStaticText (160,396 30x16) “Edits”
+        AXStaticText (240,396 86x16) “1 cuts, 1 B-roll”
+        AXStaticText (160,420 55x16) “Graphics”
+        AXStaticText (240,420 129x16) “0 of 2 on the timeline”
+        AXStaticText (240,442 301x15) “not made yet: this cut was written before its graphics”
+        AXButton (240,463 132x20) “Finish graphics” “Designs the graphics this version was written without, then renders them. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (382,467 463x26) “Designs the graphics this version was written without, then renders them. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (160,501 53x16) “Sections”
+        AXStaticText (240,501 81x16) “Walk and talk”
+        AXDisclosureTriangle (138,533 145x15) “More about this cut” “0”
+        AXImage (158,600 13x13) “Info” “info.circle.fill”
+        AXStaticText (182,598 671x45) “In Final Cut Pro choose a library; then open the project “Revise shoot - Rough Cut v2 (tight, Opus)” in the event “Revise shoot (2026-10-17)”. If Final Cut asks about items with the same names, choose Keep Both: each version is its own project.”
+        AXStaticText (182,650 508x15) “Captions: Revise shoot v2.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (698,649 97x17) “Show Captions”
+        AXButton (145,696 106x28) “Show in Finder”
+        AXButton (261,696 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXGroup (145,742 720x123) 
+          AXHeading (154,742 279x14) “What changed in this version, Compared with version 1”
+          AXStaticText (154,768 7x16) “•”
+          AXStaticText (167,768 175x16) “Length: 0:08 → 0:04 (−0:03)”
+          AXStaticText (154,792 7x16) “•”
+          AXStaticText (167,792 520x16) “Removed V02.S003 "Over forty chefs are cooking, and tickets start at twenty dollars."”
+          AXStaticText (154,816 7x16) “•”
+          AXStaticText (167,816 110x16) “B-roll shots: 2 → 1”
+          AXStaticText (154,840 7x16) “•”
+          AXStaticText (167,840 412x16) “Graphics: none in this cut yet; it was written before they were made.”
+        AXDisclosureTriangle (122,887 92x16) “1 warning” “0”
+        AXScrollBar (946,82 17x605) “0”
+          AXValueIndicator (947,85 15x437) “0”
+          AXButton (947,83 0x0) 
+          AXButton (947,83 0x0) 
+          AXButton (947,523 15x163) 
+          AXButton (947,83 15x2) 
+      AXButton (86,717 147x16) “Not quite right? Adjust…”
+      AXButton (704,701 234x48) “Open in Final Cut Pro”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+      AXButton (918,31 36x52) “New Cut”
+        AXButton (922,43 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

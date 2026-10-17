@@ -1,0 +1,39 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (147,99 48x81) “Footage, 3 files, done”
+      AXButton (308,99 68x81) “Brief, Tight · 1:30, done”
+      AXButton (487,99 50x81) “Add, 1 added, done”
+      AXButton (635,99 94x81) “Graphics, Venture OC look, done”
+      AXButton (832,99 42x81) “Build, Ready, current step”
+      AXScrollArea (62,189 900x497) 
+        AXStaticText (152,213 181x33) “Ready to build”
+        AXStaticText (152,252 329x19) “This is your line. Change a part, or send it down.”
+        AXImage (176,311 21x17) “Movie” “film”
+        AXStaticText (218,301 59x19) “Footage”
+        AXButton (832,311 24x16) “Edit”
+        AXStaticText (218,321 112x16) “2 videos and 1 still”
+        AXImage (177,372 18x16) “Align Left” “text.alignleft”
+        AXStaticText (218,362 35x19) “Brief”
+        AXButton (832,372 24x16) “Edit”
+        AXStaticText (218,382 215x16) “Venture OC. About 1:30, tight pace.”
+        AXImage (177,432 18x18) “wand.and.stars”
+        AXStaticText (218,423 116x19) “Motion graphics”
+        AXButton (832,433 24x16) “Edit”
+        AXStaticText (218,443 230x16) “Venture OC look, designed by Claude.”
+        AXStaticText (168,484 581x15) “Plans with Claude Code. YouTube loudness. Matches your footage. Also builds a dialogue-only version.”
+        AXButton (787,484 69x16) “Fine-tune…”
+        AXStaticText (152,530 531x15) “Later runs on the same footage are much faster, because transcripts and clip notes are saved.”
+      AXButton (87,717 47x16) “Back”
+      AXStaticText (612,718 127x15) “Uses your Claude plan”
+      AXButton (751,701 187x48) “Build rough cut”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

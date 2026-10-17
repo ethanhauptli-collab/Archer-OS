@@ -1,0 +1,43 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (169,99 48x81) “Footage, 3 files, done”
+      AXButton (372,99 68x81) “Brief, Tight · 1:30, current step”
+      AXButton (592,99 53x81) “Add, Optional, not reached yet”
+      AXButton (811,99 42x81) “Build, not reached yet”
+      AXScrollArea (62,189 900x501) 
+        AXStaticText (152,213 239x33) “What is this video?”
+        AXStaticText (152,252 466x19) “A sentence or two is enough: who it's for, the tone, what has to stay.”
+        AXStaticText (152,298 65x16) “Start from”
+        AXButton (229,289 119x34) “Venture OC” “Venture Orange County promos: energetic and short”
+        AXButton (356,289 109x34) “Save The Kid” “Save the Kid, a personal YouTube channel about fatherhood and adventure: intimate and reflective, minimal graphics”
+        AXButton (473,289 59x34) “None”
+        AXScrollArea (160,349 704x108) 
+          AXTextArea (160,349 704x108) “Open on the line about the pier. Keep the numbers.”
+          AXScrollBar disabled (848,348 17x110) “0”
+        AXStaticText (152,483 66x16) “How long?”
+        AXStaticText (524,483 27x16) “Feel”
+        AXButton (152,507 54x34) “Auto”
+        AXButton (212,507 49x34) “45s”
+        AXButton (267,507 50x34) “90s”
+        AXButton (323,507 45x34) “3m”
+        AXButton (374,507 52x34) “10m”
+        AXRadioGroup (524,507 348x22) “Pacing”
+          AXRadioButton (522,506 89x24) “Auto” “0”
+          AXRadioButton (611,506 87x24) “Tight” “1”
+          AXRadioButton (698,506 87x24) “Medium” “0”
+          AXRadioButton (785,506 88x24) “Loose” “0”
+        AXStaticText (524,537 255x15) “Pauses trimmed hard. Punchy YouTube pace.”
+        AXTextField (152,549 170x22) “90s”
+      AXButton (87,719 47x16) “Back”
+      AXButton (839,705 99x44) “Next”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton disabled (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

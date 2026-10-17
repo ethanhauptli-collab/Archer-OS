@@ -1,0 +1,35 @@
+AXApplication  “Roughcut”
+  AXWindow (62,31 900x732) “Roughcut” “main”
+    AXGroup (62,31 900x732) 
+      AXButton (169,99 48x81) “Footage, 3 files, done”
+      AXButton (372,99 68x81) “Brief, Tight · 1:30, done”
+      AXButton (591,99 56x81) “Add, None yet, done”
+      AXButton (811,99 42x81) “Build, Ready, current step”
+      AXScrollArea (62,189 900x497) 
+        AXStaticText (165,225 118x16) “Build cancelled.”
+        AXStaticText (152,273 181x33) “Ready to build”
+        AXStaticText (152,312 329x19) “This is your line. Change a part, or send it down.”
+        AXImage (176,371 21x17) “Movie” “film”
+        AXStaticText (218,361 59x19) “Footage”
+        AXButton (832,371 24x16) “Edit”
+        AXStaticText (218,381 112x16) “2 videos and 1 still”
+        AXImage (177,432 18x16) “Align Left” “text.alignleft”
+        AXStaticText (218,422 35x19) “Brief”
+        AXButton (832,432 24x16) “Edit”
+        AXStaticText (218,442 215x16) “Venture OC. About 1:30, tight pace.”
+        AXStaticText (168,483 571x30) “No AI planning. YouTube loudness. Matches your footage. Also builds a dialogue-only version. Keeps um and uh.”
+        AXButton (787,490 69x16) “Fine-tune…”
+        AXStaticText (152,543 531x15) “Later runs on the same footage are much faster, because transcripts and clip notes are saved.”
+      AXButton (87,717 47x16) “Back”
+      AXStaticText (572,718 167x15) “No AI: only the dead air is cut”
+      AXButton (751,701 187x48) “Build rough cut”
+    AXToolbar (62,31 900x52) 
+      AXGroup (861,31 57x52) 
+        AXPopUpButton (865,43 49x28) “Clock” “Rough cuts you made before” “clock”
+    AXButton (80,49 16x16) 
+    AXButton (120,49 16x16) “this button also has an action to zoom the window”
+      AXGroup (121,49 14x16) 
+        AXGroup (121,49 14x16) 
+    AXButton (100,49 16x16) 
+    AXStaticText (149,31 712x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

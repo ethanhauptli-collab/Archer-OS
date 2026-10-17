@@ -1,0 +1,45 @@
+{
+ "versions": [
+  {
+   "created": "2026-10-17T06:57:39",
+   "n": 1,
+   "command": "build",
+   "fcpxml": "Walk and talk v1.fcpxml",
+   "captions": "Walk and talk v1.srt",
+   "files": [
+    "Walk and talk v1.fcpxml",
+    "Walk and talk v1.srt"
+   ],
+   "project": "Walk and talk - Rough Cut v1 (tight, no AI)",
+   "stringout_project": "Walk and talk - Stringout v1",
+   "event": "Walk and talk (2026-10-17)",
+   "rough_seconds": 8.125,
+   "accents": 0,
+   "planned_by": "heuristic",
+   "style": "tight",
+   "planner": "no AI",
+   "graphics": [],
+   "snapshot": "history/v1 2026-10-17 06.57"
+  },
+  {
+   "created": "2026-10-17T06:57:46",
+   "n": 2,
+   "command": "render",
+   "fcpxml": "Walk and talk v2.fcpxml",
+   "captions": "Walk and talk v2.srt",
+   "files": [
+    "Walk and talk v2.fcpxml",
+    "Walk and talk v2.srt"
+   ],
+   "project": "Walk and talk - Rough Cut v2 (loose, no AI)",
+   "stringout_project": "Walk and talk - Stringout v2",
+   "event": "Walk and talk (2026-10-17)",
+   "rough_seconds": 8.542,
+   "accents": 0,
+   "planned_by": "heuristic",
+   "style": "loose",
+   "planner": "no AI",
+   "graphics": []
+  }
+ ]
+}
