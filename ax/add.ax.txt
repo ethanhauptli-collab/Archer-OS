@@ -1,0 +1,36 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (163,93 48x81) “Footage, 17 files, done”
+      AXButton (316,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (487,93 50x81) “Add, 1 added, current step”
+      AXButton (648,93 53x81) “Graphics, not reached yet”
+      AXButton (816,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 372x33) “Add anything else to the line?”
+        AXStaticText (152,246 441x19) “Each part adds one step. Skip them all and you still get a full cut.”
+        AXImage (183,308 14x22) “Song” “music.note”
+        AXStaticText (228,300 45x19) “Music”
+        AXStaticText (228,322 473x16) “A song under the edit. It ducks under speech and ends right on the last frame.”
+        AXButton (792,305 64x28) “Add”
+        AXImage (180,392 20x23) “waveform”
+        AXStaticText (228,384 106x19) “Sound effects”
+        AXStaticText (228,406 323x16) “Whooshes and hits on section changes and graphics.”
+        AXButton (792,389 64x28) “Add”
+        AXStaticText (228,465 123x19) “Motion graphics”
+        AXImage (178,481 22x22) “wand.and.stars”
+        AXStaticText (228,486 389x32) “Lower thirds, stats and captions, designed by Claude from what people say.”
+        AXImage (720,487 11x10) “Selected” “checkmark”
+        AXStaticText (737,484 42x16) “Added”
+        AXButton (807,484 49x16) “Remove”
+      AXButton (107,713 47x16) “Back”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

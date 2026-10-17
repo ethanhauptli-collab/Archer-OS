@@ -1,0 +1,51 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXScrollArea (82,77 860x603) 
+        AXStaticText (159,117 626x16) “Version 1 was written, but its graphics weren't finished: your Claude plan's usage limit was reached.”
+        AXStaticText (156,141 690x30) “Nothing is lost: the plan and every design that came back are saved. After your plan resets, click Finish graphics: it makes the rest without planning the cut again.”
+        AXStaticText (156,179 572x30) “The new plan was saved. Finish without AI adds the graphics whose designs were saved and calls no model; Finish graphics, below, also designs the rest.”
+        AXButton (737,184 116x20) “Finish without AI” “Cuts from the saved plan with its own settings and no model call (roughcut render)”
+        AXImage (148,241 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (198,239 514x33) “Written, but the graphics aren't made yet”
+        AXStaticText (198,278 564x19) “Version 1. No graphics yet. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (161,342 108x20) “OC Food Fest”
+        AXStaticText (786,331 63x33) “0:33”
+        AXStaticText (160,389 83x16) “Dialogue only”
+        AXStaticText (268,389 29x16) “0:35”
+        AXStaticText (160,413 30x16) “Edits”
+        AXStaticText (268,413 96x16) “10 cuts, 6 B-roll”
+        AXStaticText (160,437 55x16) “Graphics”
+        AXStaticText (268,437 129x16) “0 of 4 on the timeline”
+        AXStaticText (268,459 440x15) “none of the 4 were made yet: the run stopped before their designs came back”
+        AXButton (268,480 132x20) “Finish graphics” “Designs the graphics this version was written without, then renders them. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (410,484 422x26) “Designs the graphics this version was written without, then renders them. The cut isn't planned again, and this version stays as an earlier one.”
+        AXStaticText (160,518 53x16) “Sections”
+        AXStaticText (268,518 250x16) “Cold open  ·  Maria  ·  On the pier  ·  Wrap”
+        AXDisclosureTriangle (138,550 145x15) “More about this cut” “0”
+        AXImage (158,617 13x13) “Info” “info.circle.fill”
+        AXStaticText (182,615 660x30) “In Final Cut Pro choose a library; then open the project “OC Food Fest - Rough Cut v1 (tight, opus-5-5)” in the event “OC Food Fest (2026-10-16)”.”
+        AXStaticText (182,652 511x15) “Captions: OC Food Fest v1.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (701,651 97x17) “Show Captions”
+        AXButton (145,698 106x28) “Show in Finder”
+        AXButton (261,698 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXDisclosureTriangle (122,748 100x16) “2 warnings” “0”
+        AXScrollBar (926,76 17x605) “0”
+          AXValueIndicator (927,79 15x514) “0”
+          AXButton (927,77 0x0) 
+          AXButton (927,77 0x0) 
+          AXButton (927,594 15x86) 
+          AXButton (927,77 15x2) 
+      AXButton (106,711 147x16) “Not quite right? Adjust…”
+      AXButton (684,695 234x48) “Open in Final Cut Pro”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+      AXButton (898,25 36x52) “New Cut”
+        AXButton (902,37 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

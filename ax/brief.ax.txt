@@ -1,0 +1,48 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (163,93 48x81) “Footage, 17 files, done”
+      AXButton (316,93 68x81) “Brief, Tight · 1:30, current step”
+      AXButton (486,93 53x81) “Add, Optional, not reached yet”
+      AXButton (648,93 53x81) “Graphics, not reached yet”
+      AXButton (816,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 239x33) “What is this video?”
+        AXStaticText (152,246 466x19) “A sentence or two is enough: who it's for, the tone, what has to stay.”
+        AXStaticText (152,292 65x16) “Start from”
+        AXButton (229,283 119x34) “Venture OC” “Venture Orange County promos”
+        AXButton (356,283 109x34) “Save The Kid” “Save the Kid episodes”
+        AXButton (473,283 59x34) “None”
+        AXScrollArea (160,343 704x108) 
+          AXTextArea (160,343 704x108) “What it is: a Venture Orange County promo about local business, food, culture and the people behind them. Tone: energetic, confident and upbeat. Short and punchy: every line earns its place. Structure: open cold on the strongest, most quotable line or moment, not on an introduction. Keep it moving with quick B-roll changes and no logistics talk. End on a clear, upbeat closing line or call to action if one is said. Must keep: names, places and numbers people will remember.  Open on Maria's line about the pier. Keep the numbers.”
+          AXScrollBar (848,342 17x110) “1”
+            AXValueIndicator (849,355 15x94) “1”
+            AXButton (849,343 0x0) 
+            AXButton (849,343 0x0) 
+            AXButton (849,449 15x2) 
+            AXButton (849,343 15x11) 
+        AXStaticText (152,477 66x16) “How long?”
+        AXStaticText (524,477 27x16) “Feel”
+        AXButton (152,501 54x34) “Auto”
+        AXButton (212,501 49x34) “45s”
+        AXButton (267,501 50x34) “90s”
+        AXButton (323,501 45x34) “3m”
+        AXButton (374,501 52x34) “10m”
+        AXRadioGroup (524,501 348x22) “Pacing”
+          AXRadioButton (522,500 89x24) “Auto” “0”
+          AXRadioButton (611,500 87x24) “Tight” “1”
+          AXRadioButton (698,500 87x24) “Medium” “0”
+          AXRadioButton (785,500 88x24) “Loose” “0”
+        AXStaticText (524,531 255x15) “Pauses trimmed hard. Punchy YouTube pace.”
+        AXTextField (152,543 170x22) “90s”
+      AXButton (107,713 47x16) “Back”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

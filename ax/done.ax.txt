@@ -1,0 +1,38 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXScrollArea (82,77 860x603) 
+        AXImage (155,107 34x34) “Selected” “checkmark.circle.fill”
+        AXStaticText (206,105 290x33) “Your rough cut is ready”
+        AXStaticText (206,144 448x19) “Version 1. Planned by Claude Opus 5.5, through your Claude plan.”
+        AXStaticText (168,208 108x20) “OC Food Fest”
+        AXStaticText (793,197 63x33) “0:33”
+        AXStaticText (168,255 83x16) “Dialogue only”
+        AXStaticText (275,255 29x16) “0:35”
+        AXStaticText (168,279 30x16) “Edits”
+        AXStaticText (275,279 96x16) “10 cuts, 6 B-roll”
+        AXStaticText (168,303 55x16) “Graphics”
+        AXStaticText (275,303 129x16) “4 of 4 on the timeline”
+        AXStaticText (168,327 53x16) “Sections”
+        AXStaticText (275,327 250x16) “Cold open  ·  Maria  ·  On the pier  ·  Wrap”
+        AXDisclosureTriangle (146,359 144x15) “More about this cut” “0”
+        AXImage (165,426 13x13) “Info” “info.circle.fill”
+        AXStaticText (189,424 660x30) “In Final Cut Pro choose a library; then open the project “OC Food Fest - Rough Cut v1 (tight, opus-5-5)” in the event “OC Food Fest (2026-10-16)”.”
+        AXStaticText (189,461 511x15) “Captions: OC Food Fest v1.srt. With the project open in Final Cut: File > Import > Captions.”
+        AXButton (708,460 97x17) “Show Captions”
+        AXButton (152,507 106x28) “Show in Finder”
+        AXButton (268,507 134x28) “Read the edit notes” “The paper edit: what was cut and why, in a page you can read”
+        AXDisclosureTriangle (130,557 100x16) “2 warnings” “0”
+      AXButton (106,711 147x16) “Not quite right? Adjust…”
+      AXButton (684,695 234x48) “Open in Final Cut Pro”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton (845,37 49x28) “Clock” “Rough cuts you made before”
+      AXButton (898,25 36x52) “New Cut”
+        AXButton (902,37 28x28) “New Cut” “Back to the start. The footage and brief stay.”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

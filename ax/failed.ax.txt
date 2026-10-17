@@ -1,0 +1,53 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (150,93 48x81) “Footage, 17 files, done”
+      AXButton (275,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (419,93 51x81) “Add, 2 added, done”
+      AXButton (544,93 72x81) “Music, upbeat_bed, done”
+      AXButton (668,93 94x81) “Graphics, Venture OC look, done”
+      AXButton (829,93 42x81) “Build, Ready, current step”
+      AXScrollArea (82,183 860x497) 
+        AXStaticText (159,219 454x16) “Your Claude plan's usage limit was reached while the edit was planned.”
+        AXStaticText (156,243 635x15) “Nothing is lost: transcripts and clip notes are saved. Build again after your plan resets and it picks up from there.”
+        AXStaticText (156,268 240x15) “The edit plan was saved before it stopped.”
+        AXButton (737,266 116x20) “Finish without AI” “Cuts from the saved plan with its own settings and no model call (roughcut render)”
+        AXStaticText (144,318 181x33) “Ready to build”
+        AXStaticText (144,357 329x19) “This is your line. Change a part, or send it down.”
+        AXImage (168,416 21x17) “Movie” “film”
+        AXStaticText (210,406 59x19) “Footage”
+        AXButton (825,416 24x16) “Edit”
+        AXStaticText (210,426 201x16) “14 videos, 2 stills and 1 recording”
+        AXImage (170,477 18x16) “Align Left” “text.alignleft”
+        AXStaticText (210,467 35x19) “Brief”
+        AXButton (825,477 24x16) “Edit”
+        AXStaticText (210,487 215x16) “Venture OC. About 1:30, tight pace.”
+        AXImage (173,537 11x18) “Song” “music.note”
+        AXStaticText (210,528 43x19) “Music”
+        AXButton (825,538 24x16) “Edit”
+        AXStaticText (210,548 251x16) “upbeat_bed.m4a. Ends on the last frame.”
+        AXImage (169,598 18x18) “wand.and.stars”
+        AXStaticText (210,589 116x19) “Motion graphics”
+        AXButton (825,599 24x16) “Edit”
+        AXStaticText (210,609 230x16) “Venture OC look, designed by Claude.”
+        AXStaticText (160,650 581x15) “Plans with Claude Code. YouTube loudness. Matches your footage. Also builds a dialogue-only version.”
+        AXButton (780,650 69x16) “Fine-tune…”
+        AXStaticText (144,696 531x15) “Later runs on the same footage are much faster, because transcripts and clip notes are saved.”
+        AXScrollBar (926,182 17x499) “0”
+          AXValueIndicator (927,185 15x447) “0”
+          AXButton (927,183 0x0) 
+          AXButton (927,183 0x0) 
+          AXButton (927,633 15x47) 
+          AXButton (927,183 15x2) 
+      AXButton (107,711 47x16) “Back”
+      AXStaticText (592,712 127x15) “Uses your Claude plan”
+      AXButton (731,695 187x48) “Build rough cut”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

@@ -1,0 +1,26 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (157,93 61x81) “Footage, Start here, current step”
+      AXButton (329,93 42x81) “Brief, not reached yet”
+      AXButton (486,93 53x81) “Add, Optional, not reached yet”
+      AXButton (648,93 53x81) “Graphics, not reached yet”
+      AXButton (816,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 291x33) “Start with your footage”
+        AXStaticText (152,246 453x19) “Drop the folders or clips from your shoot. Subfolders are included.”
+        AXImage (500,359 25x32) “Download” “square.and.arrow.down”
+        AXStaticText (406,412 212x21) “Drop folders or clips here”
+        AXStaticText (446,444 133x16) “Video, audio and stills”
+        AXButton (476,476 73x28) “Choose…”
+      AXStaticText (106,714 137x15) “Add footage to continue”
+      AXButton disabled (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

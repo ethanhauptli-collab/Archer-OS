@@ -1,0 +1,31 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (140,93 48x81) “Footage, 17 files, done”
+      AXButton (246,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (370,93 52x81) “Add, 3 added, done”
+      AXButton (476,93 72x81) “Music, upbeat_bed, done”
+      AXButton (597,93 63x81) “Effects, Whooshes, current step”
+      AXButton (718,93 53x81) “Graphics, not reached yet”
+      AXButton (839,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 388x33) “Where are your sound effects?”
+        AXStaticText (152,246 666x38) “Pick a folder, or a Venture Studio collection. Whooshes land at section changes, pops and hits as graphics arrive.”
+        AXImage (176,325 22x17) “Move” “folder”
+        AXStaticText (218,324 76x19) “Whooshes” “/Volumes/Sounds/Whooshes”
+        AXButton (843,328 11x11) “Remove Whooshes” “Remove”
+        AXButton (462,417 100x28) “Add another…”
+        AXTextField (302,457 371x22) 
+        AXButton disabled (681,458 41x20) “Add”
+        AXStaticText (176,491 671x30) “Sounds are classed by the words in their file names and set under the dialogue on their own role. Want more or fewer? Say so in your brief.”
+      AXButton (107,713 47x16) “Back”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

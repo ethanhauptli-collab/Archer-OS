@@ -1,0 +1,31 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXUnknown (153,93 42x81) “Listen, done”
+      AXUnknown (288,93 42x81) “Watch, done”
+      AXUnknown (418,93 52x81) “Plan, Working, current step”
+      AXUnknown (559,93 42x81) “Cut, not reached yet”
+      AXUnknown (689,93 53x81) “Graphics, not reached yet”
+      AXUnknown (829,93 42x81) “Export, not reached yet”
+      AXScrollArea (82,183 860x517) 
+        AXStaticText (152,211 70x16) “Step 3 of 6”
+        AXStaticText (152,235 213x33) “Planning the edit”
+        AXStaticText (152,274 710x38) “Claude reads every transcript and clip note, then chooses which lines to keep, in what order, and where the B-roll goes.”
+        AXBusyIndicator (152,336 16x16) “0”
+        AXStaticText (178,334 234x17) “Waiting for Claude · 1 min 12 s so far”
+        AXImage (153,377 11x11) “Selected” “checkmark”
+        AXStaticText (175,374 302x17) “Listened to your footage and found the pauses”
+        AXImage (153,402 11x11) “Selected” “checkmark”
+        AXStaticText (175,399 142x17) “Looked at the footage”
+        AXDisclosureTriangle (130,442 76x16) “Details” “0”
+      AXStaticText (106,722 507x15) “Transcripts and clip notes are saved, so a second run on the same footage is much faster.”
+      AXButton (860,715 58x28) “Cancel”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

@@ -1,0 +1,36 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (163,93 48x81) “Footage, 17 files, current step”
+      AXButton (329,93 42x81) “Brief, not reached yet”
+      AXButton (486,93 53x81) “Add, Optional, not reached yet”
+      AXButton (648,93 53x81) “Graphics, not reached yet”
+      AXButton (816,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 162x33) “Your footage”
+        AXStaticText (152,246 231x19) “14 videos, 2 stills and 1 recording.”
+        AXImage (176,308 22x17) “Move” “folder”
+        AXStaticText (218,298 58x19) “Pier day”
+        AXButton (843,311 11x11) “Remove Pier day” “Remove”
+        AXStaticText (218,318 52x16) “9 videos”
+        AXImage (176,371 22x17) “Move” “folder”
+        AXStaticText (218,361 75x19) “Interviews”
+        AXButton (843,374 11x11) “Remove Interviews” “Remove”
+        AXStaticText (218,381 149x16) “5 videos and 1 recording”
+        AXImage (176,434 22x17) “Move” “folder”
+        AXStaticText (218,424 36x19) “Stills”
+        AXButton (843,437 11x11) “Remove Stills” “Remove”
+        AXStaticText (218,444 39x16) “2 stills”
+        AXStaticText (414,513 115x16) “Drop more here, or”
+        AXButton (537,511 73x20) “Choose…”
+      AXStaticText (106,714 56x15) “3 sources”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

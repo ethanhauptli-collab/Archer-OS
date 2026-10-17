@@ -1,0 +1,31 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (150,93 48x81) “Footage, 17 files, done”
+      AXButton (275,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (419,93 51x81) “Add, 2 added, done”
+      AXButton (544,93 72x81) “Music, upbeat_bed, current step”
+      AXButton (689,93 53x81) “Graphics, not reached yet”
+      AXButton (829,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 142x33) “Add a song”
+        AXStaticText (152,246 559x19) “It plays under the edit, ducks under speech, and is timed to end on the last frame.”
+        AXImage (181,305 12x19) “Song” “music.note”
+        AXStaticText (218,304 123x19) “upbeat_bed.m4a”
+        AXButton (843,309 11x11) “Remove upbeat_bed.m4a” “Remove”
+        AXStaticText (428,407 169x19) “Drop another song here”
+        AXButton (339,438 100x28) “Add another…”
+        AXButton (449,438 151x28) “From Venture Studio…” “Songs from Venture Studio's catalog snapshot, added here as plain files”
+        AXButton disabled (610,442 75x20) “Paste” “Paste a song copied in Finder or Studio, or its full path”
+        AXStaticText (374,478 276x15) “Add more than one and Claude picks the best fit.”
+      AXButton (107,713 47x16) “Back”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

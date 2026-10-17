@@ -1,0 +1,33 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (163,93 48x81) “Footage, 17 files, done”
+      AXButton (316,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (487,93 50x81) “Add, 1 added, done”
+      AXButton (627,93 94x81) “Graphics, Venture OC look, current step”
+      AXButton (816,93 42x81) “Build, not reached yet”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (152,207 206x33) “Motion graphics”
+        AXStaticText (152,246 653x19) “Claude designs lower thirds, stats and captions from what people say. They sit above the B-roll.”
+        AXStaticText (168,299 123x19) “Venture OC look”
+        AXTextField (168,326 688x22) “Venture Orange County house look: deep navy plates, orange as the one accent, warm gold sparingly. Jost bold for headlines.”
+        AXStaticText (168,356 466x15) “Set by the preset you chose, or write your own. Claude follows it for every graphic.”
+        AXStaticText (168,421 36x19) “Logo”
+        AXButton (783,429 73x20) “Choose…”
+        AXStaticText (168,442 348x15) “Optional. Graphics can show it on title cards and lower thirds.”
+        AXStaticText (168,509 109x16) “Reference images”
+        AXButton (747,507 51x20) “Add…”
+        AXButton (806,507 50x20) “Paste” “Paste a copied screenshot, an image, or picture files. ⌘V does the same while the box below is selected.”
+        AXStaticText (168,533 688x68) “Drop pictures here, or click here and press ⌘V”
+        AXStaticText (168,607 688x26) “Show the look you want: screenshots, other videos' titles, brand sheets. Roughcut matches the style, not the content. The pictures are sent to the AI model that designs your graphics, and nowhere else.”
+      AXButton (107,713 47x16) “Back”
+      AXButton (819,699 99x44) “Next”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

@@ -1,0 +1,33 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXScrollArea (82,77 860x607) 
+        AXStaticText (234,112 378x33) “One thing before your first cut”
+        AXStaticText (234,151 504x19) “Roughcut needs a few tools. Here is what's ready and what's still missing.”
+        AXImage (172,214 22x22) “Selected” “checkmark.circle.fill”
+        AXStaticText (210,211 81x19) “Video tools”
+        AXStaticText (210,232 116x16) “ffmpeg is installed.”
+        AXImage (172,280 22x22) “Selected” “checkmark.circle.fill”
+        AXStaticText (210,277 95x19) “Transcription”
+        AXStaticText (210,298 169x16) “The speech engine is ready.”
+        AXImage (172,346 22x22) “exclamationmark.circle.fill”
+        AXStaticText (210,343 50x19) “Claude”
+        AXStaticText (210,364 483x16) “Not signed in yet. Roughcut uses your Claude Pro or Max plan to plan each edit.”
+        AXStaticText (210,398 161x17) “1. Open Terminal and run”
+        AXStaticText (395,398 49x16) “claude”
+        AXButton (454,393 51x26) “Copy the command”
+        AXStaticText (210,434 331x17) “2. Sign in with your Claude account, not an API key.”
+        AXStaticText (210,461 342x15) “Roughcut checks again when you come back to this window.”
+      AXButton (106,713 76x16) “Skip for now”
+      AXButton (477,707 154x28) “Use an API key instead”
+      AXButton (643,707 135x28) “Continue without AI” “Roughcut can still cut the dead air. It won't plan the edit, place B-roll or make graphics.”
+      AXButton (790,699 128x44) “Check again”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

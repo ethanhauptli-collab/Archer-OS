@@ -1,0 +1,64 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (150,93 48x81) “Footage, 17 files, done”
+      AXButton (275,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (419,93 51x81) “Add, 2 added, done”
+      AXButton (544,93 72x81) “Music, upbeat_bed, done”
+      AXButton (668,93 94x81) “Graphics, Venture OC look, done”
+      AXButton (829,93 42x81) “Build, Ready, current step”
+      AXScrollArea (82,183 860x501) 
+        AXStaticText (144,207 124x33) “Fine-tune”
+        AXStaticText (144,246 388x19) “The defaults suit most cuts. Change only what you need.”
+        AXStaticText (144,283 55x16) “Planning”
+        AXStaticText (160,320 126x17) “Who plans the edit”
+        AXPopUpButton (549,319 300x20) “Who plans the edit” “Claude (your Pro/Max plan, via Claude Code)”
+        AXStaticText (160,366 42x17) “Model”
+        AXPopUpButton (549,364 300x20) “Model” “Claude Opus 5.5 (best judgment)”
+        AXStaticText (160,410 39x17) “Effort”
+        AXPopUpButton (649,409 200x20) “Effort” “High”
+        AXStaticText (160,454 131x17) “Look at the footage”
+        AXStaticText (160,473 231x16) “Better B-roll picks. Costs a little more.”
+        AXCheckBox (811,461 38x22) “Look at the footage” “1”
+        AXStaticText (160,516 128x17) “Describe clips with”
+        AXPopUpButton (549,514 300x20) “Describe clips with” “Same as above”
+        AXStaticText (160,561 89x17) “Project name”
+        AXTextField (549,559 300x21) 
+        AXStaticText (160,608 243x17) “Open in Final Cut Pro when it's done”
+        AXCheckBox (811,605 38x22) “Open in Final Cut Pro when it's done” “0”
+        AXStaticText (144,657 116x16) “Sound and picture”
+        AXStaticText (160,694 94x17) “Dialogue level”
+        AXPopUpButton (549,693 300x20) “Dialogue level” “Matched at -16 LUFS (YouTube, most web)”
+        AXStaticText (160,740 49x17) “Format”
+        AXPopUpButton (649,738 200x20) “Format” “Match footage”
+        AXStaticText (160,783 159x17) “Punch-ins on jump cuts”
+        AXStaticText (160,802 464x48) “A 112% zoom alternating at each jump cut no B-roll covers, so back-to-back pieces of one shot don't jump. Auto: when Claude reads the brief asking for them (without AI, when it says so).”
+        AXRadioGroup (679,806 170x22) “Punch-ins”
+          AXRadioButton (677,805 59x24) “Auto” “1”
+          AXRadioButton (736,805 57x24) “On” “0”
+          AXRadioButton (793,805 58x24) “Off” “0”
+        AXStaticText (160,875 173x17) “Short fades at audio edits”
+        AXStaticText (160,894 127x16) “No clicks at the cuts.”
+        AXCheckBox (811,882 38x22) “Short fades at audio edits” “1”
+        AXStaticText (160,938 136x17) “Keep “um” and “uh””
+        AXCheckBox (811,935 38x22) “Keep um and uh” “0”
+        AXStaticText (160,982 230x17) “Also make a dialogue-only version”
+        AXStaticText (160,1001 187x16) “All dialogue, dead air removed.”
+        AXCheckBox (811,989 38x22) “Also make a dialogue-only version” “1”
+        AXScrollBar (926,182 17x503) “0”
+          AXValueIndicator (927,185 15x287) “0”
+          AXButton (927,183 0x0) 
+          AXButton (927,183 0x0) 
+          AXButton (927,473 15x211) 
+          AXButton (927,183 15x2) 
+      AXButton (107,713 47x16) “Back”
+      AXButton (840,699 78x44) “Done”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 

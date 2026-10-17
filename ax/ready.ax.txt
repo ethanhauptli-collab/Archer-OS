@@ -1,0 +1,43 @@
+AXApplication  “Roughcut”
+  AXWindow (82,25 860x732) “Roughcut” “main”
+    AXGroup (82,25 860x732) 
+      AXButton (150,93 48x81) “Footage, 17 files, done”
+      AXButton (275,93 68x81) “Brief, Tight · 1:30, done”
+      AXButton (419,93 51x81) “Add, 2 added, done”
+      AXButton (544,93 72x81) “Music, upbeat_bed, done”
+      AXButton (668,93 94x81) “Graphics, Venture OC look, done”
+      AXButton (829,93 42x81) “Build, Ready, current step”
+      AXScrollArea (82,183 860x497) 
+        AXStaticText (152,207 181x33) “Ready to build”
+        AXStaticText (152,246 329x19) “This is your line. Change a part, or send it down.”
+        AXImage (176,305 21x17) “Movie” “film”
+        AXStaticText (218,295 59x19) “Footage”
+        AXButton (832,305 24x16) “Edit”
+        AXStaticText (218,315 201x16) “14 videos, 2 stills and 1 recording”
+        AXImage (177,366 18x16) “Align Left” “text.alignleft”
+        AXStaticText (218,356 35x19) “Brief”
+        AXButton (832,366 24x16) “Edit”
+        AXStaticText (218,376 215x16) “Venture OC. About 1:30, tight pace.”
+        AXImage (181,426 11x18) “Song” “music.note”
+        AXStaticText (218,417 43x19) “Music”
+        AXButton (832,427 24x16) “Edit”
+        AXStaticText (218,437 251x16) “upbeat_bed.m4a. Ends on the last frame.”
+        AXImage (177,487 18x18) “wand.and.stars”
+        AXStaticText (218,478 116x19) “Motion graphics”
+        AXButton (832,488 24x16) “Edit”
+        AXStaticText (218,498 230x16) “Venture OC look, designed by Claude.”
+        AXStaticText (168,540 581x15) “Plans with Claude Code. YouTube loudness. Matches your footage. Also builds a dialogue-only version.”
+        AXButton (787,539 69x16) “Fine-tune…”
+        AXStaticText (152,585 531x15) “Later runs on the same footage are much faster, because transcripts and clip notes are saved.”
+      AXButton (107,711 47x16) “Back”
+      AXStaticText (592,712 127x15) “Uses your Claude plan”
+      AXButton (731,695 187x48) “Build rough cut”
+    AXToolbar (82,25 860x52) 
+      AXGroup (841,25 57x52) 
+        AXPopUpButton disabled (845,37 49x28) “Clock” “Rough cuts you made before”
+    AXButton (100,43 16x16) 
+    AXButton (140,43 16x16) “this button also has an action to zoom the window”
+      AXGroup (141,43 14x16) 
+    AXButton (120,43 16x16) 
+    AXStaticText (169,25 672x52) “Roughcut”
+  AXMenuBar (0,0 1024x24) 
